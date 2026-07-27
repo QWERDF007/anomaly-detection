@@ -1328,10 +1328,14 @@ def save_roi_visualizations_and_report(
                 "image_path",
                 "before_score",
                 "after_score",
+                "score_difference",
+                "distance_threshold",
                 "candidate_roi_count",
                 "kept_roi_count",
                 "filtered_roi_count",
                 "roi_filtered",
+                "before_roi_distances",
+                "after_roi_distances",
                 "filtered_roi_distances",
             ],
         )
@@ -1343,6 +1347,15 @@ def save_roi_visualizations_and_report(
                 for roi in sample["rois"]
                 if roi["distance"] < distance_threshold
             ]
+            before_distances = [
+                float(roi["distance"])
+                for roi in sample["rois"]
+            ]
+            after_distances = [
+                float(roi["distance"])
+                for roi in sample["rois"]
+                if roi["distance"] >= distance_threshold
+            ]
             kept_count = len(sample["rois"]) - len(filtered_distances)
             writer.writerow(
                 {
@@ -1350,10 +1363,20 @@ def save_roi_visualizations_and_report(
                     "image_path": str(sample["image_path"]),
                     "before_score": sample["before_score"],
                     "after_score": sample["after_score"],
+                    "score_difference": (
+                        sample["before_score"] - sample["after_score"]
+                    ),
+                    "distance_threshold": distance_threshold,
                     "candidate_roi_count": len(sample["rois"]),
                     "kept_roi_count": kept_count,
                     "filtered_roi_count": len(filtered_distances),
                     "roi_filtered": bool(filtered_distances),
+                    "before_roi_distances": ";".join(
+                        f"{distance:.8f}" for distance in before_distances
+                    ),
+                    "after_roi_distances": ";".join(
+                        f"{distance:.8f}" for distance in after_distances
+                    ),
                     "filtered_roi_distances": ";".join(
                         f"{distance:.8f}" for distance in filtered_distances
                     ),
