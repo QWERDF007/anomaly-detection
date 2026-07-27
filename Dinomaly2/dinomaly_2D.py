@@ -38,7 +38,7 @@ warnings.filterwarnings("ignore")
 
 # Keep the legacy and mask-constraint training loops on the same schedule.
 TRAIN_BATCH_SIZE = 8
-EVAL_EVERY_EPOCHS = 50
+EVAL_EVERY_EPOCHS = -1
 
 
 def get_logger(name, save_path=None, level='INFO'):
@@ -499,31 +499,31 @@ if __name__ == '__main__':
     parser.add_argument(
         '--aug_brightness',
         type=float,
-        default=0.2,
+        default=0,
         help='Training brightness jitter strength. Set 0 to disable.',
     )
     parser.add_argument(
         '--aug_contrast',
         type=float,
-        default=0.2,
+        default=0,
         help='Training contrast jitter strength. Set 0 to disable.',
     )
     parser.add_argument(
         '--aug_hue',
         type=float,
-        default=0.1,
+        default=0,
         help='Training hue jitter strength in [0, 0.5]. Set 0 to disable.',
     )
     parser.add_argument(
         '--lambda_good',
         type=float,
-        default=1.0,
+        default=0.5,
         help='Weight of the Dinomaly2 loss restricted to good pixels.',
     )
     parser.add_argument(
         '--lambda_anomaly',
         type=float,
-        default=1.0,
+        default=0.5,
         help='Weight of the anomaly-region Dinomaly2 loss to maximize.',
     )
     args = parser.parse_args()

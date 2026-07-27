@@ -293,8 +293,6 @@ def train_mask(item_list, args):
                     f"loss={mean_total:.4f}, "
                     f"dinomaly={mean_loss:.4f}, good={mean_good:.4f}, "
                     f"anomaly={mean_anomaly:.4f}, "
-                    f"good_term={mean_good_term:.4f}, "
-                    f"anomaly_term={mean_anomaly_term:.4f}, "
                     f"batch={time.time() - batch_start:.3f}s, "
                     f"elapsed={_sec2hms(elapsed)}, ETA={_sec2hms(eta)}",
                     flush=True,
