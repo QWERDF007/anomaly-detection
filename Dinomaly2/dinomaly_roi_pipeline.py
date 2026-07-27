@@ -573,15 +573,19 @@ def plot_distance_distribution(
     output_path: Path,
     threshold: Optional[float],
     bins: int,
+    gt_anomaly_roi_distances: Optional[Sequence[float]] = None,
 ) -> None:
-    grid = common_grid(groups, bins)
+    gt_anomaly_roi_distances = list(gt_anomaly_roi_distances or [])
+    all_groups = dict(groups)
+    all_groups["Test / Anomaly / GT-overlap ROI"] = gt_anomaly_roi_distances
+    grid = common_grid(all_groups, bins)
     figure, axes = plt.subplots(
-        3,
+        4,
         1,
-        figsize=(10, 12),
+        figsize=(10, 16),
         sharex=True,
     )
-    for axis, (_, label) in zip(axes, GROUPS):
+    for axis, (_, label) in zip(axes[:3], GROUPS):
         plot_group_density(
             axis,
             {label: groups.get(label, [])},
@@ -591,11 +595,61 @@ def plot_distance_distribution(
             xlabel="FAISS squared L2 distance",
             bins=bins,
         )
+    plot_group_density(
+        axes[3],
+        {"Test / Anomaly / GT-overlap ROI": gt_anomaly_roi_distances},
+        grid,
+        "Test / Anomaly / GT-overlap ROI",
+        threshold,
+        xlabel="FAISS squared L2 distance",
+        bins=bins,
+        color_overrides={
+            "Test / Anomaly / GT-overlap ROI": "crimson",
+        },
+    )
     figure.suptitle("ROI FAISS Distance Distribution", y=0.995)
     figure.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(figure)
+
+
+def collect_gt_anomaly_roi_distances(
+    samples: Sequence[Dict],
+    ground_truth_dir: Path,
+) -> List[float]:
+    """Collect distances for Test/Anomaly ROIs overlapping GT anomalies."""
+
+    distances: List[float] = []
+    for sample in samples:
+        if sample["group_key"] != "test_anomaly":
+            continue
+
+        score_map = np.asarray(
+            np.load(sample["score_path"]),
+            dtype=np.float32,
+        )
+        score_map = np.squeeze(score_map)
+        if score_map.ndim != 2:
+            raise ValueError(f"Expected 2D score map: {sample['score_path']}")
+
+        gt_mask = load_ground_truth(
+            sample,
+            ground_truth_dir,
+            score_map.shape,
+        ).astype(bool, copy=False)
+        for roi in sample["rois"]:
+            roi_mask = np.asarray(roi["mask"], dtype=bool)
+            if roi_mask.shape != gt_mask.shape:
+                raise ValueError(
+                    "ROI mask and ground-truth mask shapes do not match for "
+                    f"{sample['image_path']}"
+                )
+            if np.any(roi_mask & gt_mask):
+                distance = float(roi["distance"])
+                if np.isfinite(distance):
+                    distances.append(distance)
+    return distances
 
 
 def plot_score_comparison(
@@ -830,30 +884,100 @@ def roi_align_vectors(
     )
 
 
+def annotation_path_for_sample(
+    sample: Dict,
+    annotation_root: Path,
+    data_root: Optional[Path] = None,
+) -> Optional[Path]:
+    """Resolve Labelme JSON for both split-preserving and legacy layouts.
+
+    Preferred layout mirrors the dataset relative to ``data_root``::
+
+        annotations/train/good/image.json
+        annotations/test/bad/image.json
+        annotations/test/scratch/image.json
+
+    Legacy flat/name-based layouts remain supported as fallbacks.
+    """
+
+    annotation_root = Path(annotation_root)
+    image_path = Path(sample["image_path"])
+    image_root = Path(sample["image_root"])
+    candidates: List[Path] = []
+
+    if data_root is not None:
+        try:
+            relative = image_path.relative_to(Path(data_root))
+        except ValueError:
+            relative = None
+        if relative is not None:
+            candidates.append(annotation_root / relative.with_suffix(".json"))
+
+    try:
+        relative_to_group = image_path.relative_to(image_root)
+    except ValueError:
+        relative_to_group = Path(image_path.name)
+
+    group_key = sample.get("group_key")
+    if group_key == "train_good":
+        candidates.append(
+            annotation_root
+            / "train"
+            / "good"
+            / relative_to_group.with_suffix(".json")
+        )
+    elif group_key == "test_anomaly":
+        candidates.append(
+            annotation_root
+            / "test"
+            / image_root.name
+            / relative_to_group.with_suffix(".json")
+        )
+
+    # Keep compatibility with the previous flat annotation directory and
+    # basename-based lookup.
+    candidates.extend(
+        [
+            annotation_root / relative_to_group.with_suffix(".json"),
+            annotation_root / f"{image_path.stem}.json",
+        ]
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    return annotation_path_for_image(
+        image_path,
+        annotation_root,
+        image_root,
+    )
+
+
 def build_roi_index(
     samples: Sequence[Dict],
     annotation_root: Path,
     output_dir: Path,
     args,
+    data_root: Optional[Path] = None,
     roi_device: Optional[torch.device] = None,
 ) -> Tuple[Path, Path]:
     vectors = []
     records = []
     feature_dim = None
-    train_samples = [
-        sample for sample in samples if sample["group_key"] == "train_good"
-    ]
+    # Every discovered sample is eligible. Samples without an annotation or
+    # without valid polygon shapes are skipped below.
+    index_samples = list(samples)
 
     for sample in tqdm(
-        train_samples,
+        index_samples,
         desc="Build ROI FAISS index",
         unit="image",
         dynamic_ncols=True,
     ):
-        annotation_path = annotation_path_for_image(
-            sample["image_path"],
+        annotation_path = annotation_path_for_sample(
+            sample,
             annotation_root,
-            sample["image_root"],
+            data_root,
         )
         if annotation_path is None:
             # LOGGER.warning(
@@ -930,6 +1054,8 @@ def build_roi_index(
             records.append(
                 {
                     "id": len(records),
+                    "group": sample["group_label"],
+                    "group_key": sample["group_key"],
                     "image_path": str(sample["image_path"]),
                     "annotation_path": str(annotation_path),
                     "shape_index": int(entry["shape_index"]),
@@ -947,8 +1073,8 @@ def build_roi_index(
 
     if not vectors:
         raise RuntimeError(
-            "No Train/good polygon ROI features were collected. "
-            "Check --train_annotation_dir and Labelme JSON files."
+            "No polygon ROI features were collected from any sample. "
+            "Check --train_annotation_dir and the annotation layout."
         )
 
     vectors_array = np.stack(vectors).astype(np.float32)
@@ -1983,6 +2109,7 @@ def main(argv=None) -> int:
         train_annotation_dir,
         output_dir,
         args,
+        data_root=data_root,
         roi_device=device,
     )
     distance_groups = query_score_rois(
@@ -2012,11 +2139,21 @@ def main(argv=None) -> int:
         f"({sum(len(values) for values in distance_groups.values())} ROIs)...",
         flush=True,
     )
+    gt_anomaly_roi_distances = collect_gt_anomaly_roi_distances(
+        samples,
+        ground_truth_dir,
+    )
+    print(
+        "GT-overlap Test/Anomaly ROI distances: "
+        f"{len(gt_anomaly_roi_distances)} ROIs",
+        flush=True,
+    )
     plot_distance_distribution(
         distance_groups,
         output_dir / "distance_distribution.png",
         distance_threshold,
         args.bins,
+        gt_anomaly_roi_distances=gt_anomaly_roi_distances,
     )
 
     print("Applying ROI distance filtering...", flush=True)
