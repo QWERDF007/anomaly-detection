@@ -1078,13 +1078,33 @@ def visualization_path(
     return path
 
 
-def save_score_heatmap(
+def save_fused_heatmap(
     score_map: np.ndarray,
+    image_path: Path,
     output_path: Path,
     reference_min: float,
     reference_max: float,
 ) -> None:
     score_map = np.asarray(score_map, dtype=np.float32)
+    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if image is None:
+        raise OSError(f"Cannot read source image: {image_path}")
+
+    image_height, image_width = image.shape[:2]
+    if score_map.shape != (image_height, image_width):
+        zero_mask = cv2.resize(
+            (score_map == 0).astype(np.uint8),
+            (image_width, image_height),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(bool)
+        score_map = cv2.resize(
+            score_map,
+            (image_width, image_height),
+            interpolation=cv2.INTER_LINEAR,
+        )
+    else:
+        zero_mask = score_map == 0
+
     if reference_max <= reference_min:
         normalized = np.zeros(score_map.shape, dtype=np.uint8)
     else:
@@ -1096,7 +1116,9 @@ def save_score_heatmap(
             255.0,
         ).astype(np.uint8)
     heatmap = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
-    if not cv2.imwrite(str(output_path), heatmap):
+    fused = cv2.addWeighted(image, 0.5, heatmap, 0.5, 0.0)
+    fused[zero_mask] = image[zero_mask]
+    if not cv2.imwrite(str(output_path), fused):
         raise OSError(f"Cannot write heatmap: {output_path}")
 
 
@@ -1143,14 +1165,16 @@ def save_roi_visualizations_and_report(
                 reference_min = 0.0
                 reference_max = 0.0
 
-            save_score_heatmap(
+            save_fused_heatmap(
                 score_map,
+                sample["image_path"],
                 visualization_path(output_dir, "before", "heatmap", sample),
                 reference_min,
                 reference_max,
             )
-            save_score_heatmap(
+            save_fused_heatmap(
                 after_score_map,
+                sample["image_path"],
                 visualization_path(output_dir, "after", "heatmap", sample),
                 reference_min,
                 reference_max,
@@ -1391,32 +1415,39 @@ def evaluate_stage(
     )
     gt_pixels = []
     score_pixels = []
-    for sample in evaluation_samples:
-        score_map = np.asarray(
-            sample["filtered_score_map"]
-            if after_filter
-            else np.load(sample["score_path"]),
-            dtype=np.float32,
-        )
-        score_map = np.squeeze(score_map)
-        original_shape = score_map.shape
-        gt_mask = load_ground_truth(
-            sample,
-            ground_truth_dir,
-            original_shape,
-        )
-        score_map = cv2.resize(
-            score_map,
-            (metric_size, metric_size),
-            interpolation=cv2.INTER_LINEAR,
-        )
-        gt_mask = cv2.resize(
-            gt_mask,
-            (metric_size, metric_size),
-            interpolation=cv2.INTER_NEAREST,
-        )
-        gt_pixels.append(gt_mask)
-        score_pixels.append(score_map)
+    stage_name = "after filtering" if after_filter else "before filtering"
+    with tqdm(
+        evaluation_samples,
+        desc=f"Evaluate {stage_name}",
+        unit="image",
+        dynamic_ncols=True,
+    ) as progress:
+        for sample in progress:
+            score_map = np.asarray(
+                sample["filtered_score_map"]
+                if after_filter
+                else np.load(sample["score_path"]),
+                dtype=np.float32,
+            )
+            score_map = np.squeeze(score_map)
+            original_shape = score_map.shape
+            gt_mask = load_ground_truth(
+                sample,
+                ground_truth_dir,
+                original_shape,
+            )
+            score_map = cv2.resize(
+                score_map,
+                (metric_size, metric_size),
+                interpolation=cv2.INTER_LINEAR,
+            )
+            gt_mask = cv2.resize(
+                gt_mask,
+                (metric_size, metric_size),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            gt_pixels.append(gt_mask)
+            score_pixels.append(score_map)
 
     gt_pixels_array = np.stack(gt_pixels, axis=0)
     score_pixels_array = np.stack(score_pixels, axis=0)
@@ -1473,6 +1504,19 @@ def print_and_save_metrics(
                     },
                 }
             )
+
+    print("\nEvaluation metrics")
+    print(
+        "stage                         "
+        + "  ".join(f"{name:>10}" for name in metric_names)
+    )
+    for stage, metrics in result.items():
+        values = "  ".join(
+            f"{metrics.get(name, float('nan')):10.6f}"
+            for name in metric_names
+        )
+        print(f"{stage:<29}{values}")
+    print()
 
 def save_score_table(
     samples: Sequence[Dict],
@@ -1642,7 +1686,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="不对 ROI 特征做 L2 归一化；默认会归一化。",
     )
-    parser.set_defaults(normalize=True)
+    parser.add_argument(
+        "--vis",
+        dest="save_visualizations",
+        action="store_true",
+        help="输出过滤前后的 heatmap、mask 和 ROI 过滤报告。",
+    )
+    parser.set_defaults(normalize=True, save_visualizations=False)
     return parser
 
 
@@ -1766,11 +1816,14 @@ def main(argv=None) -> int:
     )
 
     calculate_after_scores(samples, distance_threshold)
-    save_roi_visualizations_and_report(
-        samples,
-        output_dir,
-        distance_threshold,
-    )
+    if args.save_visualizations:
+        save_roi_visualizations_and_report(
+            samples,
+            output_dir,
+            distance_threshold,
+        )
+    else:
+        LOGGER.info("Visualization output disabled; pass --vis to enable")
     after_groups = score_values_by_group(samples, "after_score")
     before_metrics = evaluate_stage(
         samples,
