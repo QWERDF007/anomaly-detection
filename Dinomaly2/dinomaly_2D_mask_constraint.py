@@ -193,6 +193,11 @@ def _evaluate(model, test_data_list, item_list, device, batch_size):
 def train_mask(item_list, args):
     setup_seed(1)
     max_iters = int(args.max_iters)
+    # Keep the common dataset layout self-contained: when no override is
+    # supplied, masks live below the dataset root in ``masks/``.
+    mask_dir = args.mask_dir
+    if mask_dir is None:
+        mask_dir = os.path.join(args.data_path, "masks")
     batch_size = 8
     data_transform, gt_transform = get_data_transforms(
         args.image_size,
@@ -203,7 +208,7 @@ def train_mask(item_list, args):
         image_transform=data_transform,
         image_size=args.image_size,
         crop_size=args.crop_size,
-        mask_dir=args.mask_dir,
+        mask_dir=mask_dir,
         good_value=args.good_value,
         anomaly_value=args.anomaly_value,
     )

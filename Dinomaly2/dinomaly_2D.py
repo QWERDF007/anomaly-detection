@@ -392,7 +392,10 @@ if __name__ == '__main__':
         '--mask_dir',
         type=str,
         default=None,
-        help='Optional root directory used to resolve training masks.',
+        help=(
+            'Optional root directory used to resolve training masks. '
+            'Defaults to <data_path>/masks.'
+        ),
     )
     parser.add_argument(
         '--good_value',
