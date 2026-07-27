@@ -522,6 +522,7 @@ def plot_group_density(
     threshold: Optional[float] = None,
     xlabel: str = "Anomaly Score",
     bins: int = 30,
+    color_overrides: Optional[Dict[str, str]] = None,
 ) -> None:
     histogram_values = []
     histogram_labels = []
@@ -535,7 +536,12 @@ def plot_group_density(
             continue
         histogram_values.append(values_array)
         histogram_labels.append(f"{label} (n={values_array.size})")
-        histogram_colors.append(COLORS.get(label, "steelblue"))
+        histogram_colors.append(
+            (color_overrides or {}).get(
+                label,
+                COLORS.get(label, "steelblue"),
+            )
+        )
 
     if histogram_values:
         axis.hist(
@@ -557,7 +563,7 @@ def plot_group_density(
         )
     axis.set_title(title)
     axis.set_xlabel(xlabel)
-    axis.set_ylabel("Density")
+    axis.set_ylabel("Count")
     axis.grid(True, alpha=0.3)
     axis.legend()
 
@@ -569,16 +575,23 @@ def plot_distance_distribution(
     bins: int,
 ) -> None:
     grid = common_grid(groups, bins)
-    figure, axis = plt.subplots(figsize=(10, 6))
-    plot_group_density(
-        axis,
-        groups,
-        grid,
-        "ROI FAISS Distance Distribution",
-        threshold,
-        xlabel="FAISS squared L2 distance",
-        bins=bins,
+    figure, axes = plt.subplots(
+        3,
+        1,
+        figsize=(10, 12),
+        sharex=True,
     )
+    for axis, (_, label) in zip(axes, GROUPS):
+        plot_group_density(
+            axis,
+            {label: groups.get(label, [])},
+            grid,
+            label,
+            threshold,
+            xlabel="FAISS squared L2 distance",
+            bins=bins,
+        )
+    figure.suptitle("ROI FAISS Distance Distribution", y=0.995)
     figure.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -598,27 +611,28 @@ def plot_score_comparison(
     }
     grid = common_grid(merged, bins)
     figure, axes = plt.subplots(
-        2,
+        3,
         1,
-        figsize=(10, 11),
+        figsize=(10, 12),
         sharex=True,
     )
-    plot_group_density(
-        axes[0],
-        before,
-        grid,
-        "Before Distance Filtering",
-        score_threshold,
-        bins=bins,
-    )
-    plot_group_density(
-        axes[1],
-        after,
-        grid,
-        "After Distance Filtering",
-        score_threshold,
-        bins=bins,
-    )
+    for axis, (_, label) in zip(axes, GROUPS):
+        plot_group_density(
+            axis,
+            {
+                "Before": before.get(label, []),
+                "After": after.get(label, []),
+            },
+            grid,
+            label,
+            score_threshold,
+            bins=bins,
+            color_overrides={
+                "Before": "darkorange",
+                "After": "royalblue",
+            },
+        )
+    figure.suptitle("Score Distribution Before/After Distance Filtering", y=0.995)
     figure.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output_path, dpi=150, bbox_inches="tight")
