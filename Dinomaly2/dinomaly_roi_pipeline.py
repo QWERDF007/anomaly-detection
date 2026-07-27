@@ -1868,6 +1868,11 @@ def main(argv=None) -> int:
         distance_threshold,
         distance_method,
     )
+    print(
+        "Plotting ROI distance distribution "
+        f"({sum(len(values) for values in distance_groups.values())} ROIs)...",
+        flush=True,
+    )
     plot_distance_distribution(
         distance_groups,
         output_dir / "distance_distribution.png",
@@ -1875,8 +1880,10 @@ def main(argv=None) -> int:
         args.bins,
     )
 
+    print("Applying ROI distance filtering...", flush=True)
     calculate_after_scores(samples, distance_threshold)
     if args.save_visualizations:
+        print("Saving before/after visualizations...", flush=True)
         save_roi_visualizations_and_report(
             samples,
             output_dir,
@@ -1885,12 +1892,14 @@ def main(argv=None) -> int:
     else:
         LOGGER.info("Visualization output disabled; pass --vis to enable")
     after_groups = score_values_by_group(samples, "after_score")
+    print("Evaluating before filtering...", flush=True)
     before_metrics = evaluate_stage(
         samples,
         ground_truth_dir,
         after_filter=False,
         metric_size=args.metric_size,
     )
+    print("Evaluating after filtering...", flush=True)
     after_metrics = evaluate_stage(
         samples,
         ground_truth_dir,
