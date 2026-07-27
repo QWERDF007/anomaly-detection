@@ -17,7 +17,9 @@ import argparse
 import csv
 import json
 import logging
+import os
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -727,6 +729,7 @@ def roi_align_vectors(
     feature_chw: np.ndarray,
     entries: Sequence[Dict],
     output_size: int,
+    device: Optional[torch.device] = None,
 ) -> np.ndarray:
     """ROIAlign and mask-pool all ROIs from one feature map in one call."""
 
@@ -752,8 +755,13 @@ def roi_align_vectors(
         boxes.append([0.0, x1, y1, x2, y2])
         masks.append(np.asarray(entry["mask_feature"], dtype=np.float32))
 
-    boxes_tensor = torch.as_tensor(boxes, dtype=torch.float32)
-    feature_tensor = torch.from_numpy(feature).unsqueeze(0)
+    roi_device = device or torch.device("cpu")
+    boxes_tensor = torch.as_tensor(
+        boxes,
+        dtype=torch.float32,
+        device=roi_device,
+    )
+    feature_tensor = torch.from_numpy(feature).unsqueeze(0).to(roi_device)
     pooled = roi_align(
         feature_tensor,
         boxes_tensor,
@@ -763,9 +771,15 @@ def roi_align_vectors(
         aligned=True,
     )
 
-    mask_tensor = torch.from_numpy(np.stack(masks, axis=0)).unsqueeze(1)
+    mask_tensor = torch.from_numpy(
+        np.stack(masks, axis=0),
+    ).unsqueeze(1).to(roi_device)
     mask_boxes = boxes_tensor.clone()
-    mask_boxes[:, 0] = torch.arange(len(entries), dtype=torch.float32)
+    mask_boxes[:, 0] = torch.arange(
+        len(entries),
+        dtype=torch.float32,
+        device=roi_device,
+    )
     pooled_mask = roi_align(
         mask_tensor,
         mask_boxes,
@@ -780,7 +794,7 @@ def roi_align_vectors(
         (pooled * pooled_mask).sum(dim=(2, 3), keepdim=True) / weight,
         pooled.mean(dim=(2, 3), keepdim=True),
     )
-    return pooled.reshape(len(entries), channels).numpy().astype(
+    return pooled.reshape(len(entries), channels).detach().cpu().numpy().astype(
         np.float32,
         copy=False,
     )
@@ -791,6 +805,7 @@ def build_roi_index(
     annotation_root: Path,
     output_dir: Path,
     args,
+    roi_device: Optional[torch.device] = None,
 ) -> Tuple[Path, Path]:
     vectors = []
     records = []
@@ -872,6 +887,7 @@ def build_roi_index(
             feature,
             roi_entries,
             output_size=args.roi_size,
+            device=roi_device,
         )
         for entry, vector in zip(roi_entries, vectors_for_image):
             if args.normalize:
@@ -936,6 +952,7 @@ def query_score_rois(
     index_path: Path,
     metadata_path: Path,
     args,
+    roi_device: Optional[torch.device] = None,
 ) -> Dict[str, List[float]]:
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     index, _resources = load_search_index(
@@ -998,7 +1015,12 @@ def query_score_rois(
                 }
             )
 
-        vectors = roi_align_vectors(feature, roi_entries, output_size=roi_size)
+        vectors = roi_align_vectors(
+            feature,
+            roi_entries,
+            output_size=roi_size,
+            device=roi_device,
+        )
         if normalize and len(vectors):
             # Keep the original per-ROI normalization rule while batching the
             # expensive FAISS query below.
@@ -1142,12 +1164,75 @@ def save_fused_heatmap(
         raise OSError(f"Cannot write heatmap: {output_path}")
 
 
+def save_visualization_artifacts(
+    sample: Dict,
+    output_dir: Path,
+) -> None:
+    score_map = np.asarray(
+        np.load(sample["score_path"]),
+        dtype=np.float32,
+    )
+    score_map = np.squeeze(score_map)
+    after_score_map = np.asarray(
+        sample["filtered_score_map"],
+        dtype=np.float32,
+    )
+    finite_scores = score_map[np.isfinite(score_map)]
+    if finite_scores.size:
+        reference_min = float(finite_scores.min())
+        reference_max = float(finite_scores.max())
+    else:
+        reference_min = 0.0
+        reference_max = 0.0
+
+    save_fused_heatmap(
+        score_map,
+        sample["image_path"],
+        visualization_path(output_dir, "before", "heatmap", sample),
+        reference_min,
+        reference_max,
+    )
+    save_fused_heatmap(
+        after_score_map,
+        sample["image_path"],
+        visualization_path(output_dir, "after", "heatmap", sample),
+        reference_min,
+        reference_max,
+    )
+    if not cv2.imwrite(
+        str(visualization_path(output_dir, "before", "mask", sample)),
+        np.asarray(sample["before_roi_mask"], dtype=np.uint8) * 255,
+    ):
+        raise OSError(f"Cannot write before mask for {sample['image_path']}")
+    if not cv2.imwrite(
+        str(visualization_path(output_dir, "after", "mask", sample)),
+        np.asarray(sample["after_roi_mask"], dtype=np.uint8) * 255,
+    ):
+        raise OSError(f"Cannot write after mask for {sample['image_path']}")
+
+
 def save_roi_visualizations_and_report(
     samples: Sequence[Dict],
     output_dir: Path,
     distance_threshold: float,
+    workers: int = 8,
 ) -> None:
     """Save before/after ROI masks and heatmaps plus a per-image report."""
+
+    workers = max(1, int(workers))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(save_visualization_artifacts, sample, output_dir)
+            for sample in samples
+        ]
+        for future in tqdm(
+            as_completed(futures),
+            total=len(futures),
+            desc=f"Save visualizations ({workers} threads)",
+            unit="image",
+            dynamic_ncols=True,
+        ):
+            future.result()
 
     report_path = output_dir / "roi_filter_report.csv"
     with report_path.open("w", newline="", encoding="utf-8") as file:
@@ -1167,52 +1252,7 @@ def save_roi_visualizations_and_report(
         )
         writer.writeheader()
 
-        for sample in tqdm(
-            samples,
-            desc="Save visualizations",
-            unit="image",
-            dynamic_ncols=True,
-        ):
-            score_map = np.asarray(
-                np.load(sample["score_path"]),
-                dtype=np.float32,
-            )
-            score_map = np.squeeze(score_map)
-            after_score_map = np.asarray(
-                sample["filtered_score_map"],
-                dtype=np.float32,
-            )
-            finite_scores = score_map[np.isfinite(score_map)]
-            if finite_scores.size:
-                reference_min = float(finite_scores.min())
-                reference_max = float(finite_scores.max())
-            else:
-                reference_min = 0.0
-                reference_max = 0.0
-
-            save_fused_heatmap(
-                score_map,
-                sample["image_path"],
-                visualization_path(output_dir, "before", "heatmap", sample),
-                reference_min,
-                reference_max,
-            )
-            save_fused_heatmap(
-                after_score_map,
-                sample["image_path"],
-                visualization_path(output_dir, "after", "heatmap", sample),
-                reference_min,
-                reference_max,
-            )
-            cv2.imwrite(
-                str(visualization_path(output_dir, "before", "mask", sample)),
-                np.asarray(sample["before_roi_mask"], dtype=np.uint8) * 255,
-            )
-            cv2.imwrite(
-                str(visualization_path(output_dir, "after", "mask", sample)),
-                np.asarray(sample["after_roi_mask"], dtype=np.uint8) * 255,
-            )
-
+        for sample in samples:
             filtered_distances = [
                 float(roi["distance"])
                 for roi in sample["rois"]
@@ -1745,6 +1785,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="输出过滤前后的 heatmap、mask 和 ROI 过滤报告。",
     )
+    parser.add_argument(
+        "--vis_workers",
+        type=int,
+        default=max(1, min(8, os.cpu_count() or 1)),
+        help="可视化图片保存线程数；仅在指定 --vis 时生效。",
+    )
     parser.set_defaults(normalize=True, save_visualizations=False)
     return parser
 
@@ -1757,6 +1803,8 @@ def main(argv=None) -> int:
         raise ValueError("roi_size must be positive.")
     if args.roi_dilation < 0:
         raise ValueError("roi_dilation must be non-negative.")
+    if args.vis_workers < 1:
+        raise ValueError("vis_workers must be positive.")
     if args.metric_size < 1:
         raise ValueError("metric_size must be positive.")
     data_root = Path(args.data_root).expanduser()
@@ -1841,11 +1889,13 @@ def main(argv=None) -> int:
         "ROI feature-mask dilation: %d ring(s)",
         args.roi_dilation,
     )
+    LOGGER.info("ROIAlign device: %s", device)
     index_path, metadata_path = build_roi_index(
         samples,
         train_annotation_dir,
         output_dir,
         args,
+        roi_device=device,
     )
     distance_groups = query_score_rois(
         samples,
@@ -1857,6 +1907,7 @@ def main(argv=None) -> int:
             score_threshold=score_threshold,
             gpu=args.gpu,
         ),
+        roi_device=device,
     )
     distance_threshold, distance_method = choose_threshold(
         distance_groups,
@@ -1888,6 +1939,7 @@ def main(argv=None) -> int:
             samples,
             output_dir,
             distance_threshold,
+            workers=args.vis_workers,
         )
     else:
         LOGGER.info("Visualization output disabled; pass --vis to enable")
