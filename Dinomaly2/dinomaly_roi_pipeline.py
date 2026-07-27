@@ -710,6 +710,19 @@ def mask_components(mask: np.ndarray, min_area: int = 1):
     return components
 
 
+def dilate_binary_mask(mask: np.ndarray, iterations: int) -> np.ndarray:
+    """Expand a binary mask by ``iterations`` 8-connected pixel rings."""
+
+    if iterations <= 0:
+        return np.asarray(mask, dtype=np.uint8)
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    return cv2.dilate(
+        np.asarray(mask, dtype=np.uint8),
+        kernel,
+        iterations=int(iterations),
+    )
+
+
 def roi_align_vectors(
     feature_chw: np.ndarray,
     entries: Sequence[Dict],
@@ -931,6 +944,7 @@ def query_score_rois(
         gpu_id=args.gpu,
     )
     roi_size = int(args.roi_size)
+    roi_dilation = int(getattr(args, "roi_dilation", 0))
     normalize = bool(metadata.get("normalize", True))
     expected_dim = int(metadata["feature_dim"])
     if index.d != expected_dim:
@@ -962,8 +976,14 @@ def query_score_rois(
         feature_shape = feature.shape[-2:]
         roi_entries = []
         for component in components:
-            mask_feature = resize_mask_to_feature(
+            # Use the expanded region only to build the feature-map ROI.
+            # Keep the original component mask for score filtering and output.
+            feature_roi_mask = dilate_binary_mask(
                 component["mask"],
+                roi_dilation,
+            )
+            mask_feature = resize_mask_to_feature(
+                feature_roi_mask,
                 feature_shape,
             )
             bbox_feature = mask_bbox(mask_feature)
@@ -1147,7 +1167,12 @@ def save_roi_visualizations_and_report(
         )
         writer.writeheader()
 
-        for sample in samples:
+        for sample in tqdm(
+            samples,
+            desc="Save visualizations",
+            unit="image",
+            dynamic_ncols=True,
+        ):
             score_map = np.asarray(
                 np.load(sample["score_path"]),
                 dtype=np.float32,
@@ -1353,24 +1378,43 @@ def compute_pro_fast(
     if total_regions == 0 or inverse_count == 0:
         return float("nan")
 
-    for threshold in np.arange(min_th, max_th, delta):
-        binary = amaps > threshold
-        pro_sum = 0.0
-        false_positive_count = 0
-        for label_map, areas, amap_binary, inverse_mask in zip(
-            region_labels,
-            region_areas,
-            binary,
-            inverse_pixels,
-        ):
-            hits = np.bincount(
-                label_map[amap_binary].reshape(-1),
-                minlength=len(areas) + 1,
-            )[1:]
-            pro_sum += float(np.divide(hits, areas).sum())
-            false_positive_count += int(np.logical_and(inverse_mask, amap_binary).sum())
-        pros.append(pro_sum / total_regions)
-        fprs.append(false_positive_count / inverse_count)
+    thresholds = np.arange(min_th, max_th, delta)
+    pro_sums = np.zeros(thresholds.shape, dtype=np.float64)
+    false_positive_counts = np.zeros(thresholds.shape, dtype=np.int64)
+
+    # For a fixed threshold, ``amap > threshold`` only needs the number of
+    # values above that threshold. Sorting once per region/image turns the
+    # original threshold-by-pixel sweep into searchsorted lookups.
+    pro_samples = zip(
+        region_labels,
+        region_areas,
+        amaps,
+        inverse_pixels,
+    )
+    for label_map, areas, amap, inverse_mask in tqdm(
+        pro_samples,
+        total=len(amaps),
+        desc="Compute PRO",
+        unit="image",
+        dynamic_ncols=True,
+        leave=False,
+    ):
+        outside_values = np.sort(amap[inverse_mask])
+        false_positive_counts += (
+            outside_values.size
+            - np.searchsorted(outside_values, thresholds, side="right")
+        )
+        for region_id, area in enumerate(areas, start=1):
+            region_values = np.sort(amap[label_map == region_id])
+            hits = region_values.size - np.searchsorted(
+                region_values,
+                thresholds,
+                side="right",
+            )
+            pro_sums += hits / area
+
+    pros = pro_sums / total_regions
+    fprs = false_positive_counts / inverse_count
 
     fprs = np.asarray(fprs, dtype=np.float64)
     pros = np.asarray(pros, dtype=np.float64)
@@ -1648,6 +1692,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="ROIAlign 输出的空间尺寸 roi_size×roi_size；最终会池化成一个 ROI 特征向量。",
     )
     parser.add_argument(
+        "--roi_dilation",
+        type=int,
+        default=0,
+        help=(
+            "ROIAlign 前在 score map 上对每个异常区域做的 8 邻域膨胀圈数；"
+            "0 表示不膨胀，1 表示向外扩大一圈。"
+        ),
+    )
+    parser.add_argument(
         "--bins",
         type=int,
         default=30,
@@ -1702,6 +1755,8 @@ def main(argv=None) -> int:
         raise ValueError("image_size and crop_size must be positive.")
     if args.roi_size < 1:
         raise ValueError("roi_size must be positive.")
+    if args.roi_dilation < 0:
+        raise ValueError("roi_dilation must be non-negative.")
     if args.metric_size < 1:
         raise ValueError("metric_size must be positive.")
     data_root = Path(args.data_root).expanduser()
@@ -1782,6 +1837,10 @@ def main(argv=None) -> int:
         score_threshold,
         score_method,
     )
+    LOGGER.info(
+        "ROI feature-mask dilation: %d ring(s)",
+        args.roi_dilation,
+    )
     index_path, metadata_path = build_roi_index(
         samples,
         train_annotation_dir,
@@ -1794,6 +1853,7 @@ def main(argv=None) -> int:
         metadata_path,
         argparse.Namespace(
             roi_size=args.roi_size,
+            roi_dilation=args.roi_dilation,
             score_threshold=score_threshold,
             gpu=args.gpu,
         ),
