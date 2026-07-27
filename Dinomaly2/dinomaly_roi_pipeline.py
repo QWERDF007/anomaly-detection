@@ -36,7 +36,6 @@ warnings.filterwarnings(
 import cv2
 import faiss
 import matplotlib
-import pandas as pd
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -524,27 +523,33 @@ def plot_group_density(
     xlabel: str = "Anomaly Score",
     bins: int = 30,
 ) -> None:
-    frame = pd.DataFrame(
-        {
-            f"{label} (n={len(values)})": pd.Series(values, dtype=float)
-            for label, values in groups.items()
-            if values
-        }
-    )
-    if not frame.empty:
-        labels = list(frame.columns)
-        colors = [
-            COLORS.get(label.split(" (n=", 1)[0], "steelblue")
-            for label in labels
-        ]
-        frame.plot(
-            kind="hist",
-            density=True,
+    histogram_values = []
+    histogram_weights = []
+    histogram_labels = []
+    histogram_colors = []
+    for label, values in groups.items():
+        if not values:
+            continue
+        values_array = np.asarray(values, dtype=np.float64)
+        values_array = values_array[np.isfinite(values_array)]
+        if values_array.size == 0:
+            continue
+        histogram_values.append(values_array)
+        histogram_weights.append(
+            np.full(values_array.shape, 1.0 / values_array.size)
+        )
+        histogram_labels.append(f"{label} (n={values_array.size})")
+        histogram_colors.append(COLORS.get(label, "steelblue"))
+
+    if histogram_values:
+        axis.hist(
+            histogram_values,
             bins=max(1, int(bins)),
+            weights=histogram_weights,
             alpha=0.35,
             edgecolor="none",
-            color=colors,
-            ax=axis,
+            color=histogram_colors,
+            label=histogram_labels,
         )
         axis.set_xlim(float(grid[0]), float(grid[-1]))
     if threshold is not None:
