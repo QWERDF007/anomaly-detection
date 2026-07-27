@@ -1036,16 +1036,155 @@ def calculate_after_scores(
         )
         score_map = np.squeeze(score_map)
         filtered_score_map = np.zeros_like(score_map, dtype=np.float32)
+        before_roi_mask = np.zeros_like(score_map, dtype=np.uint8)
+        after_roi_mask = np.zeros_like(score_map, dtype=np.uint8)
+        filtered_roi_mask = np.zeros_like(score_map, dtype=np.uint8)
         kept_scores = [
             roi["score"]
             for roi in sample["rois"]
             if roi["distance"] >= distance_threshold
         ]
         for roi in sample["rois"]:
+            before_roi_mask[roi["mask"]] = 1
             if roi["distance"] >= distance_threshold:
+                after_roi_mask[roi["mask"]] = 1
                 filtered_score_map[roi["mask"]] = score_map[roi["mask"]]
+            else:
+                filtered_roi_mask[roi["mask"]] = 1
         sample["after_score"] = max(kept_scores, default=0.0)
         sample["filtered_score_map"] = filtered_score_map
+        sample["before_roi_mask"] = before_roi_mask
+        sample["after_roi_mask"] = after_roi_mask
+        sample["filtered_roi_mask"] = filtered_roi_mask
+
+
+def visualization_path(
+    output_dir: Path,
+    stage: str,
+    artifact: str,
+    sample: Dict,
+) -> Path:
+    relative = Path(sample["ground_truth_relative"])
+    extension = ".jpg" if artifact == "heatmap" else ".png"
+    path = (
+        output_dir
+        / "visualizations"
+        / stage
+        / sample["group_key"]
+        / artifact
+        / relative.with_suffix(extension)
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def save_score_heatmap(
+    score_map: np.ndarray,
+    output_path: Path,
+    reference_min: float,
+    reference_max: float,
+) -> None:
+    score_map = np.asarray(score_map, dtype=np.float32)
+    if reference_max <= reference_min:
+        normalized = np.zeros(score_map.shape, dtype=np.uint8)
+    else:
+        normalized = np.clip(
+            (score_map - reference_min)
+            / (reference_max - reference_min)
+            * 255.0,
+            0.0,
+            255.0,
+        ).astype(np.uint8)
+    heatmap = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
+    if not cv2.imwrite(str(output_path), heatmap):
+        raise OSError(f"Cannot write heatmap: {output_path}")
+
+
+def save_roi_visualizations_and_report(
+    samples: Sequence[Dict],
+    output_dir: Path,
+    distance_threshold: float,
+) -> None:
+    """Save before/after ROI masks and heatmaps plus a per-image report."""
+
+    report_path = output_dir / "roi_filter_report.csv"
+    with report_path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=[
+                "group",
+                "image_path",
+                "before_score",
+                "after_score",
+                "candidate_roi_count",
+                "kept_roi_count",
+                "filtered_roi_count",
+                "roi_filtered",
+                "filtered_roi_distances",
+            ],
+        )
+        writer.writeheader()
+
+        for sample in samples:
+            score_map = np.asarray(
+                np.load(sample["score_path"]),
+                dtype=np.float32,
+            )
+            score_map = np.squeeze(score_map)
+            after_score_map = np.asarray(
+                sample["filtered_score_map"],
+                dtype=np.float32,
+            )
+            finite_scores = score_map[np.isfinite(score_map)]
+            if finite_scores.size:
+                reference_min = float(finite_scores.min())
+                reference_max = float(finite_scores.max())
+            else:
+                reference_min = 0.0
+                reference_max = 0.0
+
+            save_score_heatmap(
+                score_map,
+                visualization_path(output_dir, "before", "heatmap", sample),
+                reference_min,
+                reference_max,
+            )
+            save_score_heatmap(
+                after_score_map,
+                visualization_path(output_dir, "after", "heatmap", sample),
+                reference_min,
+                reference_max,
+            )
+            cv2.imwrite(
+                str(visualization_path(output_dir, "before", "mask", sample)),
+                np.asarray(sample["before_roi_mask"], dtype=np.uint8) * 255,
+            )
+            cv2.imwrite(
+                str(visualization_path(output_dir, "after", "mask", sample)),
+                np.asarray(sample["after_roi_mask"], dtype=np.uint8) * 255,
+            )
+
+            filtered_distances = [
+                float(roi["distance"])
+                for roi in sample["rois"]
+                if roi["distance"] < distance_threshold
+            ]
+            kept_count = len(sample["rois"]) - len(filtered_distances)
+            writer.writerow(
+                {
+                    "group": sample["group_label"],
+                    "image_path": str(sample["image_path"]),
+                    "before_score": sample["before_score"],
+                    "after_score": sample["after_score"],
+                    "candidate_roi_count": len(sample["rois"]),
+                    "kept_roi_count": kept_count,
+                    "filtered_roi_count": len(filtered_distances),
+                    "roi_filtered": bool(filtered_distances),
+                    "filtered_roi_distances": ";".join(
+                        f"{distance:.8f}" for distance in filtered_distances
+                    ),
+                }
+            )
 
 
 def find_ground_truth_path(
@@ -1627,6 +1766,11 @@ def main(argv=None) -> int:
     )
 
     calculate_after_scores(samples, distance_threshold)
+    save_roi_visualizations_and_report(
+        samples,
+        output_dir,
+        distance_threshold,
+    )
     after_groups = score_values_by_group(samples, "after_score")
     before_metrics = evaluate_stage(
         samples,
