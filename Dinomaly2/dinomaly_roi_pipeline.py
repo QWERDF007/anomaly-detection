@@ -35,6 +35,7 @@ warnings.filterwarnings(
 import cv2
 import faiss
 import matplotlib
+import pandas as pd
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -520,20 +521,31 @@ def plot_group_density(
     title: str,
     threshold: Optional[float] = None,
     xlabel: str = "Anomaly Score",
+    bins: int = 30,
 ) -> None:
-    for label, values in groups.items():
-        if not values:
-            continue
-        density = kde_density(values, grid)
-        color = COLORS.get(label, "steelblue")
-        axis.plot(
-            grid,
-            density,
-            color=color,
-            linewidth=2.0,
-            label=f"{label} (n={len(values)})",
+    frame = pd.DataFrame(
+        {
+            f"{label} (n={len(values)})": pd.Series(values, dtype=float)
+            for label, values in groups.items()
+            if values
+        }
+    )
+    if not frame.empty:
+        labels = list(frame.columns)
+        colors = [
+            COLORS.get(label.split(" (n=", 1)[0], "steelblue")
+            for label in labels
+        ]
+        frame.plot(
+            kind="hist",
+            density=True,
+            bins=max(1, int(bins)),
+            alpha=0.35,
+            edgecolor="none",
+            color=colors,
+            ax=axis,
         )
-        axis.fill_between(grid, density, color=color, alpha=0.12)
+        axis.set_xlim(float(grid[0]), float(grid[-1]))
     if threshold is not None:
         axis.axvline(
             threshold,
@@ -564,6 +576,7 @@ def plot_distance_distribution(
         "ROI FAISS Distance Distribution",
         threshold,
         xlabel="FAISS squared L2 distance",
+        bins=bins,
     )
     figure.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -595,6 +608,7 @@ def plot_score_comparison(
         grid,
         "Before Distance Filtering",
         score_threshold,
+        bins=bins,
     )
     plot_group_density(
         axes[1],
@@ -602,6 +616,7 @@ def plot_score_comparison(
         grid,
         "After Distance Filtering",
         score_threshold,
+        bins=bins,
     )
     figure.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
