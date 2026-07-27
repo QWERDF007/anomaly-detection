@@ -17,9 +17,10 @@ import argparse
 import csv
 import json
 import logging
+import multiprocessing as mp
 import os
 import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -1141,9 +1142,14 @@ def save_fused_heatmap(
     output_path: Path,
     reference_min: float,
     reference_max: float,
+    source_image: Optional[np.ndarray] = None,
 ) -> None:
     score_map = np.asarray(score_map, dtype=np.float32)
-    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    image = (
+        source_image
+        if source_image is not None
+        else cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    )
     if image is None:
         raise OSError(f"Cannot read source image: {image_path}")
 
@@ -1179,19 +1185,35 @@ def save_fused_heatmap(
         raise OSError(f"Cannot write heatmap: {output_path}")
 
 
-def save_visualization_artifacts(
-    sample: Dict,
-    output_dir: Path,
-) -> None:
+def save_visualization_payload(payload: Dict) -> None:
     score_map = np.asarray(
-        np.load(sample["score_path"]),
+        np.load(payload["score_path"]),
         dtype=np.float32,
     )
     score_map = np.squeeze(score_map)
-    after_score_map = np.asarray(
-        sample["filtered_score_map"],
-        dtype=np.float32,
+    mask_shape = tuple(payload["mask_shape"])
+    pixel_count = int(np.prod(mask_shape))
+    before_roi_mask = np.unpackbits(
+        np.frombuffer(payload["before_mask_bits"], dtype=np.uint8),
+    )[:pixel_count].reshape(mask_shape).astype(np.uint8, copy=False)
+    after_roi_mask = np.unpackbits(
+        np.frombuffer(payload["after_mask_bits"], dtype=np.uint8),
+    )[:pixel_count].reshape(mask_shape).astype(np.uint8, copy=False)
+    after_score_map = np.where(after_roi_mask > 0, score_map, 0.0).astype(
+        np.float32,
+        copy=False,
     )
+
+    sample = {
+        "group_key": payload["group_key"],
+        "ground_truth_relative": Path(payload["ground_truth_relative"]),
+    }
+    image_path = Path(payload["image_path"])
+    output_dir = Path(payload["output_dir"])
+    source_image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if source_image is None:
+        raise OSError(f"Cannot read source image: {image_path}")
+
     finite_scores = score_map[np.isfinite(score_map)]
     if finite_scores.size:
         reference_min = float(finite_scores.min())
@@ -1202,28 +1224,54 @@ def save_visualization_artifacts(
 
     save_fused_heatmap(
         score_map,
-        sample["image_path"],
+        image_path,
         visualization_path(output_dir, "before", "heatmap", sample),
         reference_min,
         reference_max,
+        source_image=source_image,
     )
     save_fused_heatmap(
         after_score_map,
-        sample["image_path"],
+        image_path,
         visualization_path(output_dir, "after", "heatmap", sample),
         reference_min,
         reference_max,
+        source_image=source_image,
     )
     if not cv2.imwrite(
         str(visualization_path(output_dir, "before", "mask", sample)),
-        np.asarray(sample["before_roi_mask"], dtype=np.uint8) * 255,
+        before_roi_mask * 255,
     ):
-        raise OSError(f"Cannot write before mask for {sample['image_path']}")
+        raise OSError(f"Cannot write before mask for {image_path}")
     if not cv2.imwrite(
         str(visualization_path(output_dir, "after", "mask", sample)),
-        np.asarray(sample["after_roi_mask"], dtype=np.uint8) * 255,
+        after_roi_mask * 255,
     ):
-        raise OSError(f"Cannot write after mask for {sample['image_path']}")
+        raise OSError(f"Cannot write after mask for {image_path}")
+
+
+def visualization_payload(sample: Dict, output_dir: Path) -> Dict:
+    before_mask = np.asarray(sample["before_roi_mask"], dtype=np.uint8)
+    after_mask = np.asarray(sample["after_roi_mask"], dtype=np.uint8)
+    return {
+        "output_dir": str(output_dir),
+        "score_path": str(sample["score_path"]),
+        "image_path": str(sample["image_path"]),
+        "group_key": sample["group_key"],
+        "ground_truth_relative": str(sample["ground_truth_relative"]),
+        "mask_shape": before_mask.shape,
+        "before_mask_bits": np.packbits(before_mask.reshape(-1)).tobytes(),
+        "after_mask_bits": np.packbits(after_mask.reshape(-1)).tobytes(),
+    }
+
+
+def save_visualization_artifacts(
+    sample: Dict,
+    output_dir: Path,
+) -> None:
+    """Compatibility wrapper for saving one visualization payload."""
+
+    save_visualization_payload(visualization_payload(sample, output_dir))
 
 
 def save_roi_visualizations_and_report(
@@ -1232,18 +1280,26 @@ def save_roi_visualizations_and_report(
     distance_threshold: float,
     workers: int = 8,
 ) -> None:
-    """Save before/after ROI masks and heatmaps plus a per-image report."""
+    """Save visualizations in separate processes plus a per-image report."""
 
     workers = max(1, int(workers))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
+    payloads = [
+        visualization_payload(sample, output_dir)
+        for sample in samples
+    ]
+    process_context = mp.get_context("spawn")
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        mp_context=process_context,
+    ) as executor:
         futures = [
-            executor.submit(save_visualization_artifacts, sample, output_dir)
-            for sample in samples
+            executor.submit(save_visualization_payload, payload)
+            for payload in payloads
         ]
         for future in tqdm(
             as_completed(futures),
             total=len(futures),
-            desc=f"Save visualizations ({workers} threads)",
+            desc=f"Save visualizations ({workers} processes)",
             unit="image",
             dynamic_ncols=True,
         ):
@@ -1804,7 +1860,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--vis_workers",
         type=int,
         default=max(1, min(8, os.cpu_count() or 1)),
-        help="可视化图片保存线程数；仅在指定 --vis 时生效。",
+        help="可视化图片保存进程数；仅在指定 --vis 时生效。",
     )
     parser.set_defaults(normalize=True, save_visualizations=False)
     return parser
