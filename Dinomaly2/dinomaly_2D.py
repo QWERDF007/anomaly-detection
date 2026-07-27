@@ -493,7 +493,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--aug_hflip_prob',
         type=float,
-        default=0.5,
+        default=0,
         help='Training random horizontal flip probability. Set 0 to disable.',
     )
     parser.add_argument(
