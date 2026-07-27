@@ -36,6 +36,10 @@ from torch.utils.tensorboard import SummaryWriter
 
 warnings.filterwarnings("ignore")
 
+# Keep the legacy and mask-constraint training loops on the same schedule.
+TRAIN_BATCH_SIZE = 8
+EVAL_EVERY_EPOCHS = 50
+
 
 def get_logger(name, save_path=None, level='INFO'):
     logger = logging.getLogger(name)
@@ -73,6 +77,97 @@ def setup_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 
+def evaluate_model(model, test_data_list, item_list, device, batch_size, epoch, writer=None):
+    """Run the shared default Dinomaly2 evaluation for either train mode."""
+
+    if not test_data_list:
+        return None
+
+    auroc_sp_list, ap_sp_list, f1_sp_list = [], [], []
+    auroc_px_list, ap_px_list, f1_px_list, aupro_px_list = [], [], [], []
+    model.eval()
+
+    for item, test_data in zip(item_list, test_data_list):
+        test_dataloader = torch.utils.data.DataLoader(
+            test_data,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=4,
+        )
+        results = evaluation_batch(
+            model,
+            test_dataloader,
+            device,
+            max_ratio=0.01,
+            resize_mask=256,
+        )
+        auroc_sp, ap_sp, f1_sp, auroc_px, ap_px, f1_px, aupro_px = results
+        auroc_sp_list.append(auroc_sp)
+        ap_sp_list.append(ap_sp)
+        f1_sp_list.append(f1_sp)
+        auroc_px_list.append(auroc_px)
+        ap_px_list.append(ap_px)
+        f1_px_list.append(f1_px)
+        aupro_px_list.append(aupro_px)
+
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(
+            '[{}] epoch: {}, {}: I-Auroc:{:.4f}, I-AP:{:.4f}, I-F1:{:.4f}, '
+            'P-AUROC:{:.4f}, P-AP:{:.4f}, P-F1:{:.4f}, P-AUPRO:{:.4f}'.format(
+                ts,
+                epoch,
+                item,
+                auroc_sp,
+                ap_sp,
+                f1_sp,
+                auroc_px,
+                ap_px,
+                f1_px,
+                aupro_px,
+            ),
+            flush=True,
+        )
+
+    mean_metrics = np.asarray(
+        [
+            np.mean(auroc_sp_list),
+            np.mean(ap_sp_list),
+            np.mean(f1_sp_list),
+            np.mean(auroc_px_list),
+            np.mean(ap_px_list),
+            np.mean(f1_px_list),
+            np.mean(aupro_px_list),
+        ],
+        dtype=np.float64,
+    )
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(
+        '[{}] epoch: {}, Mean: I-Auroc:{:.4f}, I-AP:{:.4f}, I-F1:{:.4f}, '
+        'P-AUROC:{:.4f}, P-AP:{:.4f}, P-F1:{:.4f}, P-AUPRO:{:.4f}'.format(
+            ts,
+            epoch,
+            *mean_metrics,
+        ),
+        flush=True,
+    )
+
+    if writer is not None:
+        metric_names = (
+            'I-AUROC',
+            'I-AP',
+            'I-F1',
+            'P-AUROC',
+            'P-AP',
+            'P-F1',
+            'P-AUPRO',
+        )
+        for name, value in zip(metric_names, mean_metrics):
+            writer.add_scalar(f'eval/{name}', float(value), epoch)
+
+    model.train()
+    return mean_metrics
+
+
 def train(item_list, args):
     if getattr(args, 'train_mode', 'default') == 'mask_constraint':
         from dinomaly_2D_mask_constraint import train_mask
@@ -82,7 +177,7 @@ def train(item_list, args):
     setup_seed(1)
 
     max_iters = args.max_iters
-    batch_size = 8
+    batch_size = TRAIN_BATCH_SIZE
     image_size = args.image_size
     crop_size = args.crop_size
 
@@ -284,53 +379,30 @@ def train(item_list, args):
                 batch_cost_list = []
                 data_cost_list = []
 
-        if epoch % 50 == 0:
-            auroc_sp_list, ap_sp_list, f1_sp_list = [], [], []
-            auroc_px_list, ap_px_list, f1_px_list, aupro_px_list = [], [], [], []
-
-            for item, test_data in zip(item_list, test_data_list):
-                test_dataloader = torch.utils.data.DataLoader(test_data, batch_size=batch_size, shuffle=False,
-                                                              num_workers=4)
-                results = evaluation_batch(model, test_dataloader, device, max_ratio=0.01, resize_mask=256)
-                auroc_sp, ap_sp, f1_sp, auroc_px, ap_px, f1_px, aupro_px = results
-
-                auroc_sp_list.append(auroc_sp)
-                ap_sp_list.append(ap_sp)
-                f1_sp_list.append(f1_sp)
-                auroc_px_list.append(auroc_px)
-                ap_px_list.append(ap_px)
-                f1_px_list.append(f1_px)
-                aupro_px_list.append(aupro_px)
-
-                ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                print(
-                    '[{}] epoch: {}, {}: I-Auroc:{:.4f}, I-AP:{:.4f}, I-F1:{:.4f}, P-AUROC:{:.4f}, P-AP:{:.4f}, P-F1:{:.4f}, P-AUPRO:{:.4f}'.format(
-                        ts, epoch, item, auroc_sp, ap_sp, f1_sp, auroc_px, ap_px, f1_px, aupro_px), flush=True)
-
-            # ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            mean_auroc_sp = np.mean(auroc_sp_list)
-            mean_ap_sp = np.mean(ap_sp_list)
-            mean_f1_sp = np.mean(f1_sp_list)
-            mean_auroc_px = np.mean(auroc_px_list)
-            mean_ap_px = np.mean(ap_px_list)
-            mean_f1_px = np.mean(f1_px_list)
-            mean_aupro_px = np.mean(aupro_px_list)
-            print(
-                '[{}] epoch: {}, Mean: I-Auroc:{:.4f}, I-AP:{:.4f}, I-F1:{:.4f}, P-AUROC:{:.4f}, P-AP:{:.4f}, P-F1:{:.4f}, P-AUPRO:{:.4f}'.format(
-                    ts, epoch, mean_auroc_sp, mean_ap_sp, mean_f1_sp, mean_auroc_px, mean_ap_px, mean_f1_px, mean_aupro_px), flush=True)
-
-            writer.add_scalar('eval/I-AUROC', mean_auroc_sp, epoch)
-            writer.add_scalar('eval/I-AP', mean_ap_sp, epoch)
-            writer.add_scalar('eval/I-F1', mean_f1_sp, epoch)
-            writer.add_scalar('eval/P-AUROC', mean_auroc_px, epoch)
-            writer.add_scalar('eval/P-AP', mean_ap_px, epoch)
-            writer.add_scalar('eval/P-F1', mean_f1_px, epoch)
-            writer.add_scalar('eval/P-AUPRO', mean_aupro_px, epoch)
-
-            model.train()
+        if args.eval_interval > 0 and epoch % args.eval_interval == 0:
+            evaluate_model(
+                model,
+                test_data_list,
+                item_list,
+                device,
+                batch_size,
+                epoch,
+                writer,
+            )
 
         if it >= max_iters:
             break
+
+    if args.eval_interval == -1:
+        evaluate_model(
+            model,
+            test_data_list,
+            item_list,
+            device,
+            batch_size,
+            total_epochs,
+            writer,
+        )
 
     writer.close()
     torch.save(model.state_dict(), os.path.join(args.save_dir, args.save_name, 'model.pth'))
@@ -374,6 +446,15 @@ if __name__ == '__main__':
     parser.add_argument('--image_size', type=int, default=448)
     parser.add_argument('--crop_size', type=int, default=392)
     parser.add_argument('--max-iters', type=int, default=40000)
+    parser.add_argument(
+        '--eval_interval',
+        type=int,
+        default=EVAL_EVERY_EPOCHS,
+        help=(
+            'Evaluate every N epochs in both modes; use -1 to evaluate only '
+            'after the final training iteration.'
+        ),
+    )
     parser.add_argument('--lr_decay_ratio', type=float, default=1.)
     parser.add_argument('--cuda', type=int, default=0)
     parser.add_argument('--cache', action='store_true',
@@ -410,6 +491,30 @@ if __name__ == '__main__':
         help='Integer value representing anomaly pixels in a mask.',
     )
     parser.add_argument(
+        '--aug_hflip_prob',
+        type=float,
+        default=0.5,
+        help='Training random horizontal flip probability. Set 0 to disable.',
+    )
+    parser.add_argument(
+        '--aug_brightness',
+        type=float,
+        default=0.2,
+        help='Training brightness jitter strength. Set 0 to disable.',
+    )
+    parser.add_argument(
+        '--aug_contrast',
+        type=float,
+        default=0.2,
+        help='Training contrast jitter strength. Set 0 to disable.',
+    )
+    parser.add_argument(
+        '--aug_hue',
+        type=float,
+        default=0.1,
+        help='Training hue jitter strength in [0, 0.5]. Set 0 to disable.',
+    )
+    parser.add_argument(
         '--lambda_good',
         type=float,
         default=1.0,
@@ -422,6 +527,17 @@ if __name__ == '__main__':
         help='Weight of the anomaly-region Dinomaly2 loss to maximize.',
     )
     args = parser.parse_args()
+
+    if args.eval_interval == 0 or args.eval_interval < -1:
+        parser.error('--eval_interval must be -1 or a positive integer.')
+    if not 0 <= args.aug_hflip_prob <= 1:
+        parser.error('--aug_hflip_prob must be in [0, 1].')
+    if args.aug_brightness < 0:
+        parser.error('--aug_brightness must be non-negative.')
+    if args.aug_contrast < 0:
+        parser.error('--aug_contrast must be non-negative.')
+    if not 0 <= args.aug_hue <= 0.5:
+        parser.error('--aug_hue must be in [0, 0.5].')
 
     if args.dataset == 'custom':
         item_name = os.path.basename(os.path.normpath(args.data_path)) or 'custom'

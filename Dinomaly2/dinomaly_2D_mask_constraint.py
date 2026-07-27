@@ -24,8 +24,14 @@ from dataset import (
     MVTecDataset,
     MVTecRAMDataset,
     get_data_transforms,
+    get_mask_constraint_train_transform,
 )
-from dinomaly_2D import _sec2hms, setup_seed
+from dinomaly_2D import (
+    TRAIN_BATCH_SIZE,
+    _sec2hms,
+    evaluate_model,
+    setup_seed,
+)
 from mask_constraint_dataset import MaskConstraintTrainDataset
 from mask_constraint_losses import calculate_mask_constraint_losses
 from models import vit_encoder
@@ -148,48 +154,6 @@ def _build_test_datasets(item_list, args, data_transform, gt_transform):
     return test_data_list
 
 
-def _evaluate(model, test_data_list, item_list, device, batch_size):
-    if not test_data_list:
-        return
-    names = item_list if len(item_list) == len(test_data_list) else ["custom"]
-    metrics = []
-    model.eval()
-    with torch.no_grad():
-        for name, test_data in zip(names, test_data_list):
-            loader = DataLoader(
-                test_data,
-                batch_size=batch_size,
-                shuffle=False,
-                num_workers=4,
-                pin_memory=True,
-            )
-            result = evaluation_batch(
-                model,
-                loader,
-                next(model.parameters()).device,
-                max_ratio=0.01,
-                resize_mask=256,
-            )
-            metrics.append(result)
-            print(
-                f"{name}: I-AUROC={result[0]:.4f}, I-AP={result[1]:.4f}, "
-                f"I-F1={result[2]:.4f}, P-AUROC={result[3]:.4f}, "
-                f"P-AP={result[4]:.4f}, P-F1={result[5]:.4f}, "
-                f"P-AUPRO={result[6]:.4f}",
-                flush=True,
-            )
-    model.train()
-    if metrics:
-        mean_metrics = np.asarray(metrics, dtype=np.float64).mean(axis=0)
-        print(
-            "Mean: I-AUROC={:.4f}, I-AP={:.4f}, I-F1={:.4f}, "
-            "P-AUROC={:.4f}, P-AP={:.4f}, P-F1={:.4f}, P-AUPRO={:.4f}".format(
-                *mean_metrics
-            ),
-            flush=True,
-        )
-
-
 def train_mask(item_list, args):
     setup_seed(1)
     max_iters = int(args.max_iters)
@@ -198,10 +162,18 @@ def train_mask(item_list, args):
     mask_dir = args.mask_dir
     if mask_dir is None:
         mask_dir = os.path.join(args.data_path, "masks")
-    batch_size = 8
+    batch_size = TRAIN_BATCH_SIZE
     data_transform, gt_transform = get_data_transforms(
         args.image_size,
         args.crop_size,
+    )
+    train_transform = get_mask_constraint_train_transform(
+        args.image_size,
+        args.crop_size,
+        hflip_prob=args.aug_hflip_prob,
+        brightness=args.aug_brightness,
+        contrast=args.aug_contrast,
+        hue=args.aug_hue,
     )
     train_data = MaskConstraintTrainDataset(
         root=args.data_path,
@@ -211,6 +183,7 @@ def train_mask(item_list, args):
         mask_dir=mask_dir,
         good_value=args.good_value,
         anomaly_value=args.anomaly_value,
+        joint_transform=train_transform,
     )
     train_loader = DataLoader(
         train_data,
@@ -220,7 +193,7 @@ def train_mask(item_list, args):
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=4,
-        drop_last=False,
+        drop_last=True,
     )
     test_data_list = _build_test_datasets(
         item_list,
@@ -290,14 +263,12 @@ def train_mask(item_list, args):
                     factor=args.ll_factor,
                 )
             )
-            total_loss = (
-                loss_dinomaly
-                + args.lambda_good * loss_good
-                - args.lambda_anomaly * loss_anomaly
-            )
-            optimizer.zero_grad(set_to_none=True)
+            good_term = args.lambda_good * loss_good
+            anomaly_term = -args.lambda_anomaly * loss_anomaly
+            total_loss = loss_dinomaly + good_term + anomaly_term
+            optimizer.zero_grad()
             total_loss.backward()
-            nn.utils.clip_grad_norm_(trainable.parameters(), max_norm=0.1)
+            nn.utils.clip_grad_norm(trainable.parameters(), max_norm=0.1)
             optimizer.step()
             scheduler.step()
 
@@ -305,8 +276,7 @@ def train_mask(item_list, args):
             good_window.append(float(loss_good.detach().cpu()))
             anomaly_window.append(float(loss_anomaly.detach().cpu()))
             iteration += 1
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            torch.cuda.synchronize()
 
             if iteration % 100 == 0 or iteration == max_iters:
                 elapsed = time.time() - start_time
@@ -314,12 +284,18 @@ def train_mask(item_list, args):
                 mean_loss = float(np.mean(loss_window))
                 mean_good = float(np.mean(good_window))
                 mean_anomaly = float(np.mean(anomaly_window))
+                mean_good_term = args.lambda_good * mean_good
+                mean_anomaly_term = -args.lambda_anomaly * mean_anomaly
+                mean_total = mean_loss + mean_good_term + mean_anomaly_term
                 print(
                     f"[{datetime.now():%Y-%m-%d %H:%M:%S}] "
                     f"iter [{iteration}/{max_iters}], "
-                    f"loss={mean_loss + args.lambda_good * mean_good - args.lambda_anomaly * mean_anomaly:.4f}, "
+                    f"loss={mean_total:.4f}, "
                     f"dinomaly={mean_loss:.4f}, good={mean_good:.4f}, "
-                    f"anomaly={mean_anomaly:.4f}, batch={time.time() - batch_start:.3f}s, "
+                    f"anomaly={mean_anomaly:.4f}, "
+                    f"good_term={mean_good_term:.4f}, "
+                    f"anomaly_term={mean_anomaly_term:.4f}, "
+                    f"batch={time.time() - batch_start:.3f}s, "
                     f"elapsed={_sec2hms(elapsed)}, ETA={_sec2hms(eta)}",
                     flush=True,
                 )
@@ -333,10 +309,30 @@ def train_mask(item_list, args):
         if iteration >= max_iters:
             break
 
+        if args.eval_interval > 0 and epoch % args.eval_interval == 0:
+            evaluate_model(
+                model,
+                test_data_list,
+                item_list,
+                device,
+                batch_size,
+                epoch,
+                writer,
+            )
+
+    if args.eval_interval == -1:
+        evaluate_model(
+            model,
+            test_data_list,
+            item_list,
+            device,
+            batch_size,
+            math.ceil(max_iters / len(train_loader)),
+            writer,
+        )
     model_path = os.path.join(output_root, "model.pth")
     torch.save(model.state_dict(), model_path)
     print(f"save to {model_path}", flush=True)
-    _evaluate(model, test_data_list, item_list, device, batch_size)
     writer.close()
     return
 

@@ -75,6 +75,7 @@ class MaskConstraintTrainDataset(Dataset):
         mask_dir: str | Path | None = None,
         good_value: int = 1,
         anomaly_value: int = 2,
+        joint_transform=None,
     ) -> None:
         self.root = Path(root).expanduser()
         self.train_root = _find_child(self.root, "train")
@@ -93,6 +94,7 @@ class MaskConstraintTrainDataset(Dataset):
         )
         self.good_value = int(good_value)
         self.anomaly_value = int(anomaly_value)
+        self.joint_transform = joint_transform
         if self.good_value == 0 or self.anomaly_value == 0:
             raise ValueError("good_value and anomaly_value must differ from 0.")
         if self.good_value == self.anomaly_value:
@@ -173,20 +175,28 @@ class MaskConstraintTrainDataset(Dataset):
         item = self.samples[index]
         image_path = item["image_path"]
         image = Image.open(image_path).convert("RGB")
-        image_tensor = self.image_transform(image)
 
         mask_path = item["mask_path"]
-        if mask_path is None:
+        mask_image = None
+        if mask_path is not None:
+            mask_array = self._load_mask(mask_path)
+            mask_image = Image.fromarray(mask_array.astype(np.int32), mode="I")
+
+        if self.joint_transform is not None:
+            image_tensor, mask_image = self.joint_transform(image, mask_image)
+        else:
+            image_tensor = self.image_transform(image)
+
+        if mask_image is None:
             mask = torch.zeros(
                 (image_tensor.shape[-2], image_tensor.shape[-1]),
                 dtype=torch.long,
             )
             has_mask = False
         else:
-            mask_array = self._load_mask(mask_path)
-            mask_image = Image.fromarray(mask_array.astype(np.int32), mode="I")
-            mask_image = self.mask_resize(mask_image)
-            mask_image = self.mask_crop(mask_image)
+            if self.joint_transform is None:
+                mask_image = self.mask_resize(mask_image)
+                mask_image = self.mask_crop(mask_image)
             mask = torch.from_numpy(
                 np.asarray(mask_image, dtype=np.int64).copy()
             ).long()
