@@ -524,7 +524,6 @@ def plot_group_density(
     bins: int = 30,
 ) -> None:
     histogram_values = []
-    histogram_weights = []
     histogram_labels = []
     histogram_colors = []
     for label, values in groups.items():
@@ -535,9 +534,6 @@ def plot_group_density(
         if values_array.size == 0:
             continue
         histogram_values.append(values_array)
-        histogram_weights.append(
-            np.full(values_array.shape, 1.0 / values_array.size)
-        )
         histogram_labels.append(f"{label} (n={values_array.size})")
         histogram_colors.append(COLORS.get(label, "steelblue"))
 
@@ -545,7 +541,6 @@ def plot_group_density(
         axis.hist(
             histogram_values,
             bins=max(1, int(bins)),
-            weights=histogram_weights,
             alpha=0.35,
             edgecolor="none",
             color=histogram_colors,
