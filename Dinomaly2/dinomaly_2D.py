@@ -74,6 +74,11 @@ def setup_seed(seed):
 
 
 def train(item_list, args):
+    if getattr(args, 'train_mode', 'default') == 'mask_constraint':
+        from dinomaly_2D_mask_constraint import train_mask
+
+        return train_mask(item_list, args)
+
     setup_seed(1)
 
     max_iters = args.max_iters
@@ -280,9 +285,6 @@ def train(item_list, args):
                 data_cost_list = []
 
         if epoch % 50 == 0:
-            outpath = os.path.join(args.save_dir, args.save_name, f'model_{epoch}.pth')
-            print(f'save to {outpath}')
-            torch.save(model.state_dict(), outpath)
             auroc_sp_list, ap_sp_list, f1_sp_list = [], [], []
             auroc_px_list, ap_px_list, f1_px_list, aupro_px_list = [], [], [], []
 
@@ -376,6 +378,46 @@ if __name__ == '__main__':
     parser.add_argument('--cuda', type=int, default=0)
     parser.add_argument('--cache', action='store_true',
                         help='Cache test dataset in RAM.')
+    parser.add_argument(
+        '--train_mode',
+        choices=['default', 'mask_constraint'],
+        default='default',
+        help=(
+            'default: original Dinomaly2 training on Train/good; '
+            'mask_constraint: one-pass training with optional three-value masks '
+            'from Train/good and all non-good directories.'
+        ),
+    )
+    parser.add_argument(
+        '--mask_dir',
+        type=str,
+        default=None,
+        help='Optional root directory used to resolve training masks.',
+    )
+    parser.add_argument(
+        '--good_value',
+        type=int,
+        default=1,
+        help='Integer value representing good/weak_ok pixels in a mask.',
+    )
+    parser.add_argument(
+        '--anomaly_value',
+        type=int,
+        default=2,
+        help='Integer value representing anomaly pixels in a mask.',
+    )
+    parser.add_argument(
+        '--lambda_good',
+        type=float,
+        default=1.0,
+        help='Weight of the Dinomaly2 loss restricted to good pixels.',
+    )
+    parser.add_argument(
+        '--lambda_anomaly',
+        type=float,
+        default=1.0,
+        help='Weight of the anomaly-region Dinomaly2 loss to maximize.',
+    )
     args = parser.parse_args()
 
     if args.dataset == 'custom':

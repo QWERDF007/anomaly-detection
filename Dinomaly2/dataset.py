@@ -90,8 +90,22 @@ class CustomDataset(torch.utils.data.Dataset):
         self.transform = transform
         self.gt_transform = gt_transform
         self.phase = phase
-        self.img_path = self.root / phase
-        self.gt_path = self.root / 'ground_truth'
+        self.img_path = next(
+            (
+                child
+                for child in self.root.iterdir()
+                if child.is_dir() and child.name.lower() == phase.lower()
+            ),
+            self.root / phase,
+        )
+        self.gt_path = next(
+            (
+                child
+                for child in self.root.iterdir()
+                if child.is_dir() and child.name.lower() == 'ground_truth'
+            ),
+            self.root / 'ground_truth',
+        )
 
         if not self.img_path.is_dir():
             raise FileNotFoundError(
