@@ -41,11 +41,14 @@ import torch
 from PIL import Image
 from sklearn.metrics import (
     average_precision_score,
+    auc,
     precision_recall_curve,
     roc_auc_score,
 )
+from skimage import measure
 from tqdm import tqdm
 from torchvision import transforms
+from torchvision.ops import roi_align
 
 from extract_dino_features import extract_feature_map
 from models.uad import Dinomaly
@@ -60,9 +63,8 @@ from roi_feature_utils import (
     mask_bbox,
     polygon_to_feature_mask,
     resize_mask_to_feature,
-    roi_align_vector,
 )
-from utils import cal_anomaly_maps, compute_pro, get_gaussian_kernel
+from utils import cal_anomaly_maps, get_gaussian_kernel
 
 
 LOGGER = logging.getLogger("dinomaly_roi_pipeline")
@@ -198,29 +200,85 @@ def infer_score_and_feature(
     device: torch.device,
     layers: Sequence[int],
     feature_merge: str,
+    gaussian_filter: Optional[torch.nn.Module] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     with Image.open(image_path) as image:
         image = image.convert("RGB")
         original = np.asarray(image)
         image_tensor = transform(image).unsqueeze(0).to(device)
 
-    with torch.no_grad():
-        encoder_output, decoder_output = model(image_tensor)
-        anomaly_map, _ = cal_anomaly_maps(
-            encoder_output,
-            decoder_output,
-            original.shape[:2],
-        )
-        anomaly_map = get_gaussian_kernel(
-            kernel_size=5,
-            sigma=4,
-        ).to(device)(anomaly_map)
-        feature_map = extract_feature_map(
-            model.encoder,
-            image_tensor,
-            layers,
-            feature_merge,
-        )
+    layers = sorted(set(int(layer) for layer in layers))
+    captured = {}
+    handles = []
+    encoder_blocks = getattr(model.encoder, "blocks", None)
+    target_layers = getattr(model, "target_layers", ())
+    can_reuse_encoder = (
+        encoder_blocks is not None
+        and layers
+        and all(0 <= layer < len(encoder_blocks) for layer in layers)
+        and (not target_layers or max(layers) <= max(target_layers))
+    )
+
+    if can_reuse_encoder:
+        def capture(layer_index):
+            def hook(_module, _inputs, output):
+                captured[layer_index] = output[0] if isinstance(output, tuple) else output
+
+            return hook
+
+        for layer in layers:
+            handles.append(encoder_blocks[layer].register_forward_hook(capture(layer)))
+
+    try:
+        with torch.no_grad():
+            encoder_output, decoder_output = model(image_tensor)
+            anomaly_map, _ = cal_anomaly_maps(
+                encoder_output,
+                decoder_output,
+                original.shape[:2],
+            )
+            if gaussian_filter is None:
+                gaussian_filter = get_gaussian_kernel(
+                    kernel_size=5,
+                    sigma=4,
+                ).to(device)
+            anomaly_map = gaussian_filter(anomaly_map)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    if can_reuse_encoder and all(layer in captured for layer in layers):
+        register_tokens = int(getattr(model.encoder, "num_register_tokens", 0))
+        feature_maps = []
+        for layer in layers:
+            layer_tokens = captured[layer][:, 1 + register_tokens:, :]
+            side = int(layer_tokens.shape[1] ** 0.5)
+            if side * side != layer_tokens.shape[1]:
+                raise ValueError(
+                    f"Layer {layer} has {layer_tokens.shape[1]} spatial tokens, "
+                    "which cannot be reshaped into a square feature map."
+                )
+            feature_maps.append(
+                layer_tokens.transpose(1, 2).reshape(
+                    layer_tokens.shape[0], layer_tokens.shape[2], side, side
+                )
+            )
+        if feature_merge == "mean":
+            feature_map = torch.stack(feature_maps, dim=1).mean(dim=1)
+        elif feature_merge == "concat":
+            feature_map = torch.cat(feature_maps, dim=1)
+        else:
+            raise ValueError(f"Unsupported feature merge mode: {feature_merge}")
+    else:
+        # Keep the original behavior for unusual layer selections outside the
+        # layers traversed by Dinomaly.forward.
+        with torch.no_grad():
+            feature_map = extract_feature_map(
+                model.encoder,
+                image_tensor,
+                layers,
+                feature_merge,
+            )
 
     score_map = anomaly_map[0, 0].detach().cpu().numpy().astype(np.float32)
     feature_nchw = feature_map.detach().cpu().numpy().astype(np.float32)
@@ -288,6 +346,11 @@ def prepare_samples(
 ) -> List[Dict]:
     samples: List[Dict] = []
     jobs = []
+    gaussian_filter = (
+        get_gaussian_kernel(kernel_size=5, sigma=4).to(device)
+        if model is not None
+        else None
+    )
 
     for group_key, _display_name in GROUPS:
         roots = group_roots(groups, group_key)
@@ -366,6 +429,7 @@ def prepare_samples(
                     device,
                     args.layers,
                     args.feature_merge,
+                    gaussian_filter,
                 )
                 np.save(score_path, score_map)
                 np.save(feature_path, feature_nchw)
@@ -646,6 +710,69 @@ def mask_components(mask: np.ndarray, min_area: int = 1):
     return components
 
 
+def roi_align_vectors(
+    feature_chw: np.ndarray,
+    entries: Sequence[Dict],
+    output_size: int,
+) -> np.ndarray:
+    """ROIAlign and mask-pool all ROIs from one feature map in one call."""
+
+    if not entries:
+        return np.empty((0, feature_chw.shape[0]), dtype=np.float32)
+
+    feature = np.asarray(feature_chw, dtype=np.float32)
+    if feature.ndim == 4 and feature.shape[0] == 1:
+        feature = feature[0]
+    if feature.ndim != 3:
+        raise ValueError(f"Expected a CHW feature map, got shape {feature.shape}")
+    feature = np.nan_to_num(feature, copy=False)
+    channels, height, width = feature.shape
+
+    boxes = []
+    masks = []
+    for entry in entries:
+        x1, y1, x2, y2 = [float(value) for value in entry["bbox_feature"]]
+        x1 = max(0.0, min(x1, width - 1e-3))
+        y1 = max(0.0, min(y1, height - 1e-3))
+        x2 = max(x1 + 1e-3, min(x2, float(width)))
+        y2 = max(y1 + 1e-3, min(y2, float(height)))
+        boxes.append([0.0, x1, y1, x2, y2])
+        masks.append(np.asarray(entry["mask_feature"], dtype=np.float32))
+
+    boxes_tensor = torch.as_tensor(boxes, dtype=torch.float32)
+    feature_tensor = torch.from_numpy(feature).unsqueeze(0)
+    pooled = roi_align(
+        feature_tensor,
+        boxes_tensor,
+        output_size=(output_size, output_size),
+        spatial_scale=1.0,
+        sampling_ratio=-1,
+        aligned=True,
+    )
+
+    mask_tensor = torch.from_numpy(np.stack(masks, axis=0)).unsqueeze(1)
+    mask_boxes = boxes_tensor.clone()
+    mask_boxes[:, 0] = torch.arange(len(entries), dtype=torch.float32)
+    pooled_mask = roi_align(
+        mask_tensor,
+        mask_boxes,
+        output_size=(output_size, output_size),
+        spatial_scale=1.0,
+        sampling_ratio=-1,
+        aligned=True,
+    ).clamp_min(0.0)
+    weight = pooled_mask.sum(dim=(2, 3), keepdim=True)
+    pooled = torch.where(
+        weight > 1e-6,
+        (pooled * pooled_mask).sum(dim=(2, 3), keepdim=True) / weight,
+        pooled.mean(dim=(2, 3), keepdim=True),
+    )
+    return pooled.reshape(len(entries), channels).numpy().astype(
+        np.float32,
+        copy=False,
+    )
+
+
 def build_roi_index(
     samples: Sequence[Dict],
     annotation_root: Path,
@@ -692,6 +819,7 @@ def build_roi_index(
         if not isinstance(shapes, list):
             LOGGER.warning("Labelme shapes is not a list: %s", annotation_path)
             continue
+        roi_entries = []
         for shape_index, shape in enumerate(shapes):
             if not isinstance(shape, dict):
                 continue
@@ -716,12 +844,23 @@ def build_roi_index(
             bbox_feature = mask_bbox(roi_mask)
             if bbox_feature is None:
                 continue
-            vector = roi_align_vector(
-                feature,
-                bbox_feature,
-                mask_feature=roi_mask,
-                output_size=args.roi_size,
+            roi_entries.append(
+                {
+                    "mask_feature": roi_mask,
+                    "bbox_feature": bbox_feature,
+                    "shape_index": shape_index,
+                    "shape": shape,
+                    "points": points,
+                    "area": area,
+                }
             )
+
+        vectors_for_image = roi_align_vectors(
+            feature,
+            roi_entries,
+            output_size=args.roi_size,
+        )
+        for entry, vector in zip(roi_entries, vectors_for_image):
             if args.normalize:
                 vector = l2_normalize(vector)
             if feature_dim is None:
@@ -734,16 +873,16 @@ def build_roi_index(
                     "id": len(records),
                     "image_path": str(sample["image_path"]),
                     "annotation_path": str(annotation_path),
-                    "shape_index": int(shape_index),
-                    "label": str(shape.get("label", "")),
+                    "shape_index": int(entry["shape_index"]),
+                    "label": str(entry["shape"].get("label", "")),
                     "points": [
                         [float(point[0]), float(point[1])]
-                        for point in points
+                        for point in entry["points"]
                     ],
                     "bbox_feature": [
-                        float(value) for value in bbox_feature
+                        float(value) for value in entry["bbox_feature"]
                     ],
-                    "area": area,
+                    "area": entry["area"],
                 }
             )
 
@@ -821,7 +960,7 @@ def query_score_rois(
                 f"Feature dimension mismatch in {sample['feature_path']}."
             )
         feature_shape = feature.shape[-2:]
-
+        roi_entries = []
         for component in components:
             mask_feature = resize_mask_to_feature(
                 component["mask"],
@@ -830,24 +969,40 @@ def query_score_rois(
             bbox_feature = mask_bbox(mask_feature)
             if bbox_feature is None:
                 continue
-            vector = roi_align_vector(
-                feature,
-                bbox_feature,
-                mask_feature=mask_feature,
-                output_size=roi_size,
-            )
-            if normalize:
-                vector = l2_normalize(vector)
-            distances, neighbours = index.search(
-                np.asarray([vector], dtype=np.float32),
-                1,
-            )
-            distance = float(distances[0, 0])
-            matched_index = int(neighbours[0, 0])
-            sample["rois"].append(
+            roi_entries.append(
                 {
+                    "mask_feature": mask_feature,
+                    "bbox_feature": bbox_feature,
                     "mask": component["mask"],
                     "score": float(score_map[component["mask"]].max()),
+                }
+            )
+
+        vectors = roi_align_vectors(feature, roi_entries, output_size=roi_size)
+        if normalize and len(vectors):
+            # Keep the original per-ROI normalization rule while batching the
+            # expensive FAISS query below.
+            vectors = np.stack([l2_normalize(vector) for vector in vectors])
+        if len(vectors):
+            distances, neighbours = index.search(
+                np.asarray(vectors, dtype=np.float32),
+                1,
+            )
+        else:
+            distances = np.empty((0, 1), dtype=np.float32)
+            neighbours = np.empty((0, 1), dtype=np.int64)
+
+        for entry, distance_row, neighbour_row in zip(
+            roi_entries,
+            distances,
+            neighbours,
+        ):
+            distance = float(distance_row[0])
+            matched_index = int(neighbour_row[0])
+            sample["rois"].append(
+                {
+                    "mask": entry["mask"],
+                    "score": entry["score"],
                     "distance": distance,
                     "matched_index": matched_index,
                 }
@@ -986,9 +1141,88 @@ def safe_aupro(masks: np.ndarray, scores: np.ndarray) -> float:
     if float(scores.max()) <= float(scores.min()):
         return 0.0
     try:
-        return float(compute_pro(masks.astype(np.uint8), scores))
+        return float(compute_pro_fast(masks.astype(np.uint8), scores))
     except (AssertionError, ValueError, ZeroDivisionError):
         return float("nan")
+
+
+def compute_pro_fast(
+    masks: np.ndarray,
+    amaps: np.ndarray,
+    num_th: int = 200,
+) -> float:
+    """Vectorized equivalent of ``utils.compute_pro``.
+
+    The threshold sweep and the 0--0.3 FPR integration range intentionally
+    match the original implementation. Connected-component labels are built
+    once; per-threshold region hits then use ``np.bincount`` instead of a
+    Python loop over every region.
+    """
+
+    masks = np.asarray(masks)
+    amaps = np.asarray(amaps)
+    if masks.ndim != 3 or amaps.ndim != 3 or masks.shape != amaps.shape:
+        raise ValueError("masks and amaps must be equally shaped 3D arrays")
+    if set(np.unique(masks).tolist()) != {0, 1}:
+        raise AssertionError("masks must contain exactly 0 and 1")
+    if not isinstance(num_th, int) or num_th <= 0:
+        raise ValueError("num_th must be a positive integer")
+
+    region_labels = []
+    region_areas = []
+    for mask in masks:
+        labels = measure.label(mask)
+        areas = np.bincount(labels.reshape(-1))[1:].astype(np.float64)
+        region_labels.append(labels)
+        region_areas.append(areas)
+
+    min_th = amaps.min()
+    max_th = amaps.max()
+    delta = (max_th - min_th) / num_th
+    if delta <= 0:
+        return 0.0
+
+    pros = []
+    fprs = []
+    inverse_pixels = np.logical_not(masks.astype(bool))
+    inverse_count = int(inverse_pixels.sum())
+    total_regions = sum(len(areas) for areas in region_areas)
+    if total_regions == 0 or inverse_count == 0:
+        return float("nan")
+
+    for threshold in np.arange(min_th, max_th, delta):
+        binary = amaps > threshold
+        pro_sum = 0.0
+        false_positive_count = 0
+        for label_map, areas, amap_binary, inverse_mask in zip(
+            region_labels,
+            region_areas,
+            binary,
+            inverse_pixels,
+        ):
+            hits = np.bincount(
+                label_map[amap_binary].reshape(-1),
+                minlength=len(areas) + 1,
+            )[1:]
+            pro_sum += float(np.divide(hits, areas).sum())
+            false_positive_count += int(np.logical_and(inverse_mask, amap_binary).sum())
+        pros.append(pro_sum / total_regions)
+        fprs.append(false_positive_count / inverse_count)
+
+    fprs = np.asarray(fprs, dtype=np.float64)
+    pros = np.asarray(pros, dtype=np.float64)
+    valid = fprs < 0.3
+    if not np.any(valid):
+        return float("nan")
+    fprs = fprs[valid]
+    pros = pros[valid]
+    max_fpr = fprs.max()
+    if max_fpr <= 0:
+        # The original implementation divides by zero in this degenerate
+        # case; preserve its resulting undefined metric rather than inventing
+        # a new score.
+        return float("nan")
+    return float(auc(fprs / max_fpr, pros))
 
 
 def evaluate_stage(
