@@ -73,12 +73,13 @@ dataset/
 0 = BG / normal
 1 = good / weak_ok
 2 = anomaly
+255 = 待定/忽略
 ```
 
-同一张图可以同时包含三种值：
+同一张图可以同时包含四种值：
 
 ```text
-0、1、2
+0、1、2、255
 ```
 
 因此不需要通过图像所在目录区分 `good`、`weak_ok` 和 `anomaly`。
@@ -92,8 +93,11 @@ dataset/
 | 有 good 区域 | 额外计算 good 区域损失 |
 | 有 anomaly 区域 | 额外计算 anomaly 区域损失 |
 | 同时有 good 和 anomaly | 同时计算两个区域损失 |
+| 有待定区域 | 待定区域不参与默认、good、anomaly 三个损失 |
 
 Mask 缺失和全 0 Mask 的区别是：缺失 Mask 会被标记为无标注样本；全 0 Mask 是显式标注的正常区域。两者都不会产生 good/anomaly 区域损失。
+
+待定值默认是 `255`，表示无法明确判断为 BG、good 或 anomaly 的区域。待定值不会转换为 BG，也不会参与任何损失。如果整张 Mask 都是待定，该样本在当前 iteration 中不产生有效梯度。
 
 ## 4. LabelMe 标注转换
 
@@ -112,6 +116,8 @@ LabelMe 标签规则固定为：
 ```
 
 不需要配置标签映射。例如 `scratch`、`crack`、`defect`、`weak_ok` 等标签都会被转换为 anomaly；只有 `good` 标签转换为 good。标签比较会忽略首尾空格和大小写。
+
+当前 LabelMe 转换脚本没有把任何标签自动转换为待定值，保持“非 `good` 标签都是 anomaly”的约定。若需要待定区域，可在转换后将对应 Mask 像素设为 `255`，或使用其他能够直接生成四值 Mask 的标注流程。
 
 如果标注 JSON 位于 `annotations/Train/` 下，可以执行：
 
@@ -165,7 +171,7 @@ Train/good/image_002.jpg
 Train/good/image_002_mask.png
 ```
 
-训练流程只从默认的 `<data_path>/masks/` 读取三值训练 Mask，不会自动读取
+训练流程只从默认的 `<data_path>/masks/` 读取训练 Mask（允许 `0/1/2/255` 四种值），不会自动读取
 `ground_truth/`、`mask/` 或 `annotations/`。其中 `ground_truth/` 仅用于训练结束后的
 默认评估；如果训练 Mask 位于其他位置，必须通过 `--mask_dir` 指定。
 
@@ -188,6 +194,7 @@ python dinomaly_2D.py \
     --cuda 0 \
     --good_value 1 \
     --anomaly_value 2 \
+    --ignore_value 255 \
     --lambda_good 1.0 \
     --lambda_anomaly 1.0
 ```
@@ -207,6 +214,7 @@ python dinomaly_2D.py \
 | `--eval_interval` | 评估周期，单位为 epoch；`-1` 表示只在最终评估 | `50` |
 | `--good_value` | good 的 Mask 值 | `1` |
 | `--anomaly_value` | anomaly 的 Mask 值 | `2` |
+| `--ignore_value` | 待定/忽略的 Mask 值；该区域不参与三个损失 | `255` |
 | `--lambda_good` | good 损失权重 | `1.0` |
 | `--lambda_anomaly` | anomaly 损失权重 | `1.0` |
 
@@ -227,7 +235,9 @@ Bottleneck + Decoder
         ↓
 计算默认全图损失 L_dinomaly
         ↓
-按 Mask 值计算 L_good 和 L_anomaly
+如果存在待定值，从 L_dinomaly 的有效区域中排除待定像素
+        ↓
+按 Mask 值计算 L_good 和 L_anomaly；待定像素不进入两个区域损失
         ↓
 L = L_dinomaly
     + lambda_good × L_good
@@ -298,7 +308,7 @@ P-AUPRO
 
 1. `--data_path/Train/` 存在，并且其中包含图像。
 2. `<data_path>/masks` 下的 Mask 与训练图像能够按相对路径或文件名匹配；如果使用其他目录，再检查 `--mask_dir`。
-3. Mask 只包含 `0`、`1`、`2`，或与 `--good_value`、`--anomaly_value` 参数一致的三个值。
+3. Mask 只包含 `0`、`1`、`2`、`255`，或与 `--good_value`、`--anomaly_value`、`--ignore_value` 参数一致的四个值。
 4. 图像和 Mask 的原始尺寸对应。
 5. `--dataset custom` 用于这种单数据集目录结构。
 6. 如果需要训练结束后的默认评估，准备好 `Test/` 和异常图对应的 `ground_truth/`。

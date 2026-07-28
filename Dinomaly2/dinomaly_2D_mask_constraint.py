@@ -1,4 +1,4 @@
-"""One-pass Dinomaly2 training with optional three-value region masks.
+"""One-pass Dinomaly2 training with optional four-value region masks.
 
 The legacy ``dinomaly_2D.py`` remains the default entry point. It dispatches
 here only when ``--train_mode mask_constraint`` is selected.
@@ -183,6 +183,7 @@ def train_mask(item_list, args):
         mask_dir=mask_dir,
         good_value=args.good_value,
         anomaly_value=args.anomaly_value,
+        ignore_value=args.ignore_value,
         joint_transform=train_transform,
     )
     print(f"training mask directory: {mask_dir}", flush=True)
@@ -230,7 +231,7 @@ def train_mask(item_list, args):
     print(f"train image number: {len(train_data)}", flush=True)
     print(
         f"mask values: BG=0, good={args.good_value}, "
-        f"anomaly={args.anomaly_value}",
+        f"anomaly={args.anomaly_value}, ignore={args.ignore_value}",
         flush=True,
     )
 
@@ -262,6 +263,7 @@ def train_mask(item_list, args):
                     use_loose_loss=bool(args.ll),
                     p=p,
                     factor=args.ll_factor,
+                    ignore_value=args.ignore_value,
                 )
             )
             good_term = args.lambda_good * loss_good

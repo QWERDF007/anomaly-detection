@@ -2,9 +2,9 @@
 
 ## 1. 目标与兼容性原则
 
-在保留 Dinomaly2 原始网络结构、异常图算法、checkpoint 键和推理接口的前提下，引入 BG/normal、good/weak_ok、anomaly 三值区域和 Triplet 式排序约束。
+在保留 Dinomaly2 原始网络结构、异常图算法、checkpoint 键和推理接口的前提下，引入 BG/normal、good/weak_ok、anomaly 和待定/忽略四种 Mask 状态，以及 Triplet 式排序约束。待定状态只用于屏蔽不确定标注，不产生新的损失。
 
-标注和训练约束以 Mask 区域为单位，不以整张图的类别为单位。同一张图可以同时存在 BG/normal、`good` 和 `anomaly` 区域。其中 `good` 表示业务允许的 Weak OK，完全正常区域由值为 0 的 BG 表示。
+标注和训练约束以 Mask 区域为单位，不以整张图的类别为单位。同一张图可以同时存在 BG/normal、`good`、`anomaly` 和待定区域。其中 `good` 表示业务允许的 Weak OK，完全正常区域由值为 0 的 BG 表示。待定区域表示无法可靠判断为 BG、good 或 anomaly 的区域。
 
 最终部署 checkpoint 仍为原始 `Dinomaly.state_dict()`：
 
@@ -31,22 +31,24 @@ image
 mask（可选）
 ```
 
-Mask 是三值语义标注：
+Mask 是四值语义标注：
 
 ```text
 0                 BG，完全正常区域（normal）
 GOOD_VALUE        good，业务允许的 Weak OK 区域
 ANOMALY_VALUE     anomaly，必须检出的异常区域
+IGNORE_VALUE      待定区域，不参与任何训练损失
 ```
 
-`GOOD_VALUE` 和 `ANOMALY_VALUE` 由数据配置明确指定，不在方案中猜测其数值。数据加载时必须校验 Mask 只包含 `0`、`GOOD_VALUE`、`ANOMALY_VALUE` 三种值。
+`GOOD_VALUE`、`ANOMALY_VALUE` 和 `IGNORE_VALUE` 由参数明确指定，默认值分别为 `1`、`2`、`255`，且必须互不相同并都不等于 0。数据加载时必须校验 Mask 只包含这四种值。
 
-进入损失计算前，将 Mask 转换为三个互斥的 boolean mask：
+进入损失计算前，将 Mask 转换为三个监督区域 Mask 和一个有效区域 Mask：
 
 ```text
 M_n    mask == 0                 # BG / normal
 M_g    mask == GOOD_VALUE        # good / weak_ok
 M_a    mask == ANOMALY_VALUE     # anomaly
+M_v    mask != IGNORE_VALUE      # 参与默认 Dinomaly2 损失的有效区域
 ```
 
 同一张图允许以下任意组合：
@@ -57,6 +59,7 @@ Mask 中只有 BG
 Mask 中同时存在 BG 和 good
 Mask 中同时存在 BG 和 anomaly
 Mask 中同时存在 BG、good、anomaly
+Mask 中同时存在 BG、good、anomaly 和待定
 ```
 
 完全正常图像不需要 Mask。若样本没有 Mask，则定义整张有效图像为 BG/normal：
@@ -65,7 +68,9 @@ $$
 M_n=\mathbf{1},\qquad M_g=\mathbf{0},\qquad M_a=\mathbf{0}
 $$
 
-若样本包含 Mask，则直接按三种像素值构造区域：
+此时 $M_i=\mathbf{0}$、$M_v=\mathbf{1}$。
+
+若样本包含 Mask，则直接按各像素值构造区域：
 
 $$
 M_n=[M=0]
@@ -79,7 +84,19 @@ $$
 M_a=[M=ANOMALY\_VALUE]
 $$
 
-三种区域必须互斥并覆盖整张 Mask；BG 的值固定为 0。为了避免 anomaly 边缘插值污染 normal/good 监督，在映射到特征图后，可从 $M_n$ 和 $M_g$ 中排除膨胀后的 anomaly 边界，但不修改原始 Mask 和评估 GT。
+待定区域为：
+
+$$
+M_i=[M=IGNORE_VALUE]
+$$
+
+有效区域为：
+
+$$
+M_v=[M\ne IGNORE_VALUE]
+$$
+
+四种值互斥并覆盖整张 Mask；BG 的值固定为 0。待定区域不转换为 BG，也不参与 $L_{dinomaly}$、$L_{good}$ 或 $L_{anomaly}$。为了避免 anomaly 边缘插值污染 normal/good 监督，在映射到特征图后，可从 $M_n$ 和 $M_g$ 中排除膨胀后的 anomaly 边界，但不修改原始 Mask 和评估 GT。
 
 训练集、验证集和测试集如何划分由用户自行组织；方案和训练代码不对工件、生产批次、采集日期或 ROI 的跨集合分布做强制检查和限制。
 
@@ -94,7 +111,7 @@ dataset/
     └── xxx/
 ```
 
-`Train/good` 是默认正常目录；`Train/` 下所有名称不等于 `good` 的子目录都是新流程可读取的训练目录。非 `good` 目录名称只用于组织数据，不代替三值 Mask 标签，区域语义仍由 Mask 中的 0、`GOOD_VALUE`、`ANOMALY_VALUE` 决定。
+`Train/good` 是默认正常目录；`Train/` 下所有名称不等于 `good` 的子目录都是新流程可读取的训练目录。非 `good` 目录名称只用于组织数据，不代替四值 Mask 标签，区域语义仍由 Mask 中的 0、`GOOD_VALUE`、`ANOMALY_VALUE` 和 `IGNORE_VALUE` 决定。
 
 ---
 
@@ -145,14 +162,14 @@ $$
 
 ### 4.2 `--train_mode mask_constraint`
 
-启用新的三值 Mask 训练流程，递归读取 `Train/` 下 `good` 和所有非 `good` 子目录，从标准 Dinomaly2 初始化开始，在一次训练中联合完成所有约束：
+启用新的四值 Mask 训练流程，递归读取 `Train/` 下 `good` 和所有非 `good` 子目录，从标准 Dinomaly2 初始化开始，在一次训练中联合完成所有约束。待定值只表示忽略区域，不增加新的损失：
 
 ```text
 标准 Dinomaly2 初始化
         ↓
 每个训练样本：图像 + 可选 Mask
 无 Mask：只计算默认 Dinomaly2 损失
-有 Mask：计算默认、good、anomaly 三个损失
+有 Mask：计算默认、good、anomaly 三个损失；待定区域从三者中排除
         ↓
 默认 Dinomaly2 损失 + good 区域损失 + anomaly 区域损失
         ↓
@@ -185,7 +202,7 @@ $$
 
 ## 6. 统一的 Dinomaly2 区域损失
 
-三个损失都调用同一种 Dinomaly2 loss。区别仅在于参与损失计算的区域。
+三个损失都调用同一种 Dinomaly2 loss。区别仅在于参与损失计算的区域。待定区域不会进入任何一个损失。
 
 定义 Mask $M$ 下的 Dinomaly2 loss：
 
@@ -215,19 +232,27 @@ $$
 
 区域 Mask 为空时，不计算该区域损失并返回 0。
 
+当一个有 Mask 的样本包含待定值时，默认损失使用有效区域 Mask $M_v$：
+
+$$
+L_{dinomaly}=L_D(e,d;M_v),\qquad M_v=[M\ne IGNORE_VALUE]
+$$
+
+没有 Mask 的样本使用全 1 Mask，仍然计算完整的默认 Dinomaly2 损失。若一个样本全部为待定区域，则该样本对三个损失均不产生梯度。
+
 ---
 
 ## 7. 三个损失
 
 ### 7.1 Dinomaly2 默认损失
 
-全图使用值为 1 的 Mask，完全等价于默认 Dinomaly2：
+没有待定值时，全图使用值为 1 的 Mask，完全等价于默认 Dinomaly2：
 
 $$
 L_{dinomaly}=L_D(e,d;\mathbf{1})=L_{default}(e,d)
 $$
 
-该损失对每个训练样本都计算。有 Mask 时也保持默认全图计算方式。
+该损失对每个训练样本都计算。包含待定值的有 Mask 样本只计算有效区域；没有待定值时保持默认全图计算方式。
 
 ### 7.2 good 区域损失
 
@@ -261,18 +286,21 @@ $$
 有 Mask：L_sample = L_dinomaly
                    + lambda_good * L_good
                    - lambda_anomaly * L_anomaly
+
+有待定区域的 Mask：先从该样本中去除 `IGNORE_VALUE` 区域，再按上式计算；待定区域不参与三个损失。
 ```
 
-一个 batch 可以同时包含有 Mask 和无 Mask 的图像。`L_dinomaly` 对整个 batch 计算；`L_good` 和 `L_anomaly` 只使用有 Mask 图像中的对应区域。
+一个 batch 可以同时包含有 Mask 和无 Mask 的图像。无待定值时，`L_dinomaly` 保持默认 Dinomaly2 的整图计算；存在待定值时，包含待定值的样本使用有效区域 Mask。`L_good` 和 `L_anomaly` 只使用有 Mask 图像中的对应区域。
 
 ---
 
 ## 9. Mask 映射规则
 
-Mask 只用于计算 $L_{good}$ 和 $L_{anomaly}$，不改变 $L_{dinomaly}$ 的默认全图定义。
+Mask 用于计算三个损失。没有待定值时不改变 $L_{dinomaly}$ 的默认全图定义；包含待定值时，从 $L_{dinomaly}$ 中排除 `IGNORE_VALUE` 区域。
 
 - Mask 缺失：整图视为 BG/normal，但只计算 $L_{dinomaly}$。
-- Mask 存在：解析值 0、`GOOD_VALUE`、`ANOMALY_VALUE`。
+- Mask 存在：解析值 0、`GOOD_VALUE`、`ANOMALY_VALUE` 和 `IGNORE_VALUE`。
+- `IGNORE_VALUE` 只表示待定/忽略，不转换为 BG、good 或 anomaly。
 - Mask 缩放到 anomaly map 或特征图尺寸时只使用 nearest interpolation。
 - 不对原始 Mask 做膨胀、平滑或重新赋值。
 - 不额外计算 BCE、Dice、Pixel Loss 或蒸馏损失。
@@ -307,7 +335,7 @@ images + optional masks
 一次 zero_grad / backward / clip_grad_norm / optimizer.step
 ```
 
-缺少 good 或 anomaly 区域时，只将对应损失项置为 0，不切换训练模式，也不启动额外训练阶段。
+缺少 good 或 anomaly 区域时，只将对应损失项置为 0；待定区域从三个损失的有效 Mask 中排除。不切换训练模式，也不启动额外训练阶段。
 
 ---
 
@@ -322,7 +350,7 @@ $$
 
 | 损失 | 作用范围 |
 |---|---|
-| $L_{dinomaly}$ | 每张图，定义与默认 Dinomaly2 完全相同 |
+| $L_{dinomaly}$ | 每张图；无待定值时与默认 Dinomaly2 完全相同，有待定值时排除待定区域 |
 | $L_{good}$ | 有 Mask 且存在 good 区域时；最小化 |
 | $L_{anomaly}$ | 有 Mask 且存在 anomaly 区域时；最大化 |
 
@@ -336,8 +364,9 @@ Batch 以图像为单位加载，再从每张图的 Mask 中提取区域，不�
 
 - 无 Mask 图像提供全图 BG/normal 区域。
 - 有 Mask 图像可同时提供 BG、good 和 anomaly 区域。
+- 待定区域不提供任何损失监督；如果整张图都是待定，该图在当前 iteration 中不产生有效梯度。
 - 若某一类区域缺失，只跳过依赖该类的损失项，其他损失继续计算。
-- 图像增强必须同步作用于 image 和三值 Mask；Mask 只使用 nearest interpolation。
+- 图像增强必须同步作用于 image 和四值 Mask；Mask 只使用 nearest interpolation。
 - Batch size、shuffle 和样本组织由用户配置，不强制固定类别比例。
 
 ---
@@ -351,9 +380,10 @@ iterations = 与用户配置的 max_iters 一致
 冻结 = Encoder（保持默认 Dinomaly2 行为）
 训练 = Bottleneck、Decoder
 loss = L_dinomaly + lambda_good * L_good - lambda_anomaly * L_anomaly
+       （待定区域不参与三个分量）
 ```
 
-优化器、参数组、学习率调度、梯度裁剪、训练迭代数和 checkpoint 周期均沿用默认 Dinomaly2 配置。唯一变化是数据加载器可返回 Mask，并按第 12 节组合三个损失。
+优化器、参数组、学习率调度、梯度裁剪、训练迭代数和 checkpoint 周期均沿用默认 Dinomaly2 配置。唯一变化是数据加载器可返回 Mask，并按第 12 节组合三个损失；`IGNORE_VALUE` 区域从三个损失中排除。
 
 ---
 
@@ -398,7 +428,7 @@ $$
 
 ## 17. 验证指标
 
-完全保留 Dinomaly2 默认评估函数、异常图、后处理和指标，不增加三值区域专用指标：
+完全保留 Dinomaly2 默认评估函数、异常图、后处理和指标，不增加四值区域专用指标。训练 Mask 中的 `IGNORE_VALUE` 只影响训练损失，不自动改写 `Test/ground_truth`：
 
 ```text
 I-AUROC
@@ -410,11 +440,12 @@ P-F1
 P-AUPRO
 ```
 
-用于默认像素指标时，将三值训练 Mask 转成二值异常 GT：
+如果用户明确使用训练 Mask 作为额外 GT，`ANOMALY_VALUE` 可转为异常标签，`BG` 和 `GOOD_VALUE` 可转为正常标签；`IGNORE_VALUE` 必须在评估中排除，不能当作正常或异常标签。默认评估仍使用 `Test/ground_truth`，不读取训练 Mask：
 
 ```text
 ANOMALY_VALUE    → 1
 0 / GOOD_VALUE   → 0
+IGNORE_VALUE     → evaluation ignore
 ```
 
 图像中只要存在 `ANOMALY_VALUE`，默认图像级 label 为 1，否则为 0。无 Mask 图像的像素 GT 全 0、图像级 label 为 0。除此以外不修改 Dinomaly2 默认验证逻辑。
@@ -439,7 +470,7 @@ Dinomaly2/
 ├── dinomaly_2D.py                       # 原始训练，不修改
 ├── models/uad.py                        # 原始模型，不修改
 ├── dinomaly_2D_mask_constraint.py       # 有 Mask 时的新训练入口
-├── mask_constraint_losses.py            # good/anomaly 两个区域损失
+├── mask_constraint_losses.py            # 三个 Dinomaly2 损失和待定区域屏蔽
 └── checkpoints/
     └── model.pth
 ```
@@ -458,8 +489,68 @@ Dinomaly2/
     L = L_dinomaly
       + lambda_good * L_good
       - lambda_anomaly * L_anomaly
+
+有待定区域：
+    三个损失均排除 IGNORE_VALUE 区域
 ```
 
 `--train_mode default` 执行原始 Dinomaly2 训练；`--train_mode mask_constraint` 读取 `Train/` 下全部目录，并在一次训练中联合优化三个损失。训练和推理都不增加额外 Head，只保存与原 Dinomaly2 完全兼容的 `model.pth`。
 
-该方案支持同一张图同时存在 BG/normal、good/weak_ok 和 anomaly 区域，也支持完全正常图像不提供 Mask，同时保持原始网络结构、像素级异常定位方式、checkpoint 格式、推理接口和推理速度。
+该方案支持同一张图同时存在 BG/normal、good/weak_ok、anomaly 和待定区域，也支持完全正常图像不提供 Mask，同时保持原始网络结构、像素级异常定位方式、checkpoint 格式、推理接口和推理速度。
+
+
+
+
+
+
+
+Dinomaly2 的特征**余弦距离损失**，不是 BCE、MSE 或 Dice。
+
+  模型先得到：
+
+  - en：冻结的 DINO Encoder 特征
+  - de：Bottleneck + Decoder 输出特征
+
+  每个特征层的损失为：
+
+$$
+L_l=\frac{1}{B}\sum_{b=1}^{B}
+  \left(1-\cos(\operatorname{vec}(en_{b,l}),\operatorname{vec}(de_{b,l}))\right)
+$$
+
+  最终损失是所有特征层的平均：
+
+$$
+L=\frac{1}{L}\sum_l L_l
+$$
+
+  Encoder 特征会 detach，实际只训练 Bottleneck 和 Decoder。实现见 Dinomaly2/utils.py:31 和训练循环 Dinomaly2/
+  dinomaly_2D.py:337。
+
+  当前默认参数 --ll 1，实际使用 global_cosine_hm_percent：
+
+  - 前向计算的损失值仍然是上述全局余弦距离；
+  - 每个特征点计算局部余弦距离；
+  - 前 1000 次迭代将 p 从 0 增加到 0.9；
+  - 默认只重点保留距离较大的约 10% 区域梯度；
+  - 其余低距离区域的梯度乘以 ll_factor=0.1。
+
+  如果指定 --ll 0，则直接使用普通的 global_cosine。
+
+mask_constraint，总损失为：
+
+$$
+L_{\text{total}} = 
+
+  L_{\text{dinomaly}}
+
+  + \lambda_{\text{good}}L_{\text{good}}
+
+  - \lambda_{\text{anomaly}}L_{\text{anomaly}}
+$$
+
+  默认 lambda_good=0.5、lambda_anomaly=0.5：
+
+  - L_dinomaly：默认全图损失，忽略值为 255 的区域；
+  - L_good：只计算 Mask 值为 1 的 good 区域，并最小化；
+  - L_anomaly：只计算 Mask 值为 2 的 anomaly 区域，由于前面的负号，实际最大化异常区域的特征差异。

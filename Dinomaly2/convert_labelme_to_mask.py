@@ -1,14 +1,15 @@
-"""Convert LabelMe JSON annotations to three-value training masks.
+"""Convert LabelMe JSON annotations to four-value training masks.
 
 The conversion rule is intentionally simple:
 
 * ``0``: background/normal
 * ``good_value``: a shape whose label is ``good``
-* ``anomaly_value``: every other labeled shape
+* ``anomaly_value``: every labeled shape except ``good`` and ``ignore``
+* ``ignore_value``: a shape whose label is ``ignore``
 
-The comparison with ``good`` ignores leading/trailing whitespace and letter
-case.  No other label mapping is performed.  If good and anomaly shapes
-overlap, anomaly takes precedence.
+The label comparisons ignore leading/trailing whitespace and letter case. If
+good, anomaly and ignore shapes overlap, ignore takes precedence, followed by
+anomaly, then good.
 
 Example::
 
@@ -233,6 +234,10 @@ def _label_is_good(label: Any) -> bool:
     return isinstance(label, str) and label.strip().lower() == "good"
 
 
+def _label_is_ignore(label: Any) -> bool:
+    return isinstance(label, str) and label.strip().lower() == "ignore"
+
+
 def convert_annotation(
     annotation_path: Path,
     output_path: Path,
@@ -240,13 +245,19 @@ def convert_annotation(
     image_root: Optional[Path],
     good_value: int,
     anomaly_value: int,
+    ignore_value: int,
     line_width: int,
     label_counts: Counter[str],
     shape_status_counts: Counter[str],
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, int]:
     """Convert one JSON file.
 
-    Returns ``(good_shape_count, anomaly_shape_count, overlap_pixel_count)``.
+    Returns ``(
+        good_shape_count,
+        anomaly_shape_count,
+        ignore_shape_count,
+        overlap_pixel_count,
+    )``.
     """
 
     with annotation_path.open("r", encoding="utf-8") as file:
@@ -259,9 +270,11 @@ def convert_annotation(
     )
     good_canvas = np.zeros((height, width), dtype=np.uint8)
     anomaly_canvas = np.zeros((height, width), dtype=np.uint8)
+    ignore_canvas = np.zeros((height, width), dtype=np.uint8)
 
     good_count = 0
     anomaly_count = 0
+    ignore_count = 0
     shapes = annotation.get("shapes", [])
     if not isinstance(shapes, list):
         raise ValueError("LabelMe 'shapes' must be a list")
@@ -274,13 +287,20 @@ def convert_annotation(
         label = shape.get("label", "<missing>")
         label_key = str(label).strip() if label is not None else "<missing>"
         label_counts[label_key] += 1
-        target = good_canvas if _label_is_good(label) else anomaly_canvas
+        if _label_is_good(label):
+            target = good_canvas
+        elif _label_is_ignore(label):
+            target = ignore_canvas
+        else:
+            target = anomaly_canvas
         status = _draw_shape(target, shape, line_width)
         shape_status_counts[status] += 1
         if status != "drawn":
             continue
         if target is good_canvas:
             good_count += 1
+        elif target is ignore_canvas:
+            ignore_count += 1
         else:
             anomaly_count += 1
 
@@ -289,18 +309,21 @@ def convert_annotation(
     mask[good_canvas != 0] = np.uint8(good_value)
     # Anomaly deliberately overwrites good on overlapping pixels.
     mask[anomaly_canvas != 0] = np.uint8(anomaly_value)
+    # Ignore deliberately overwrites both good and anomaly on overlap.
+    mask[ignore_canvas != 0] = np.uint8(ignore_value)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(output_path), mask):
         raise OSError(f"OpenCV could not write mask: {output_path}")
-    return good_count, anomaly_count, overlap_pixels
+    return good_count, anomaly_count, ignore_count, overlap_pixels
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Convert LabelMe JSON files to masks where label 'good' is "
-            "good and every other label is anomaly."
+            "good, label 'ignore' is ignored, and every other label is "
+            "anomaly."
         )
     )
     parser.add_argument(
@@ -334,7 +357,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--anomaly_value",
         type=int,
         default=2,
-        help="Pixel value for every label other than 'good' (default: 2).",
+        help="Pixel value for labels other than 'good' and 'ignore' (default: 2).",
+    )
+    parser.add_argument(
+        "--ignore_value",
+        type=int,
+        default=255,
+        help="Pixel value for label 'ignore' (default: 255).",
     )
     parser.add_argument(
         "--line_width",
@@ -365,8 +394,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not 1 <= args.anomaly_value <= 255:
         print("--anomaly_value must be in [1, 255].", file=sys.stderr)
         return 2
-    if args.good_value == args.anomaly_value:
-        print("--good_value and --anomaly_value must differ.", file=sys.stderr)
+    if not 1 <= args.ignore_value <= 255:
+        print("--ignore_value must be in [1, 255].", file=sys.stderr)
+        return 2
+    if len({args.good_value, args.anomaly_value, args.ignore_value}) != 3:
+        print(
+            "--good_value, --anomaly_value and --ignore_value must differ.",
+            file=sys.stderr,
+        )
         return 2
     if args.line_width < 1:
         print("--line_width must be at least 1.", file=sys.stderr)
@@ -388,6 +423,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     failed = 0
     total_good_shapes = 0
     total_anomaly_shapes = 0
+    total_ignore_shapes = 0
     total_overlap_pixels = 0
 
     progress = tqdm(json_paths, desc="Convert LabelMe masks", unit="file")
@@ -398,13 +434,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             skipped += 1
             continue
         try:
-            good_shapes, anomaly_shapes, overlap_pixels = convert_annotation(
+            good_shapes, anomaly_shapes, ignore_shapes, overlap_pixels = convert_annotation(
                 annotation_path=annotation_path,
                 output_path=output_path,
                 input_dir=input_dir,
                 image_root=image_root,
                 good_value=args.good_value,
                 anomaly_value=args.anomaly_value,
+                ignore_value=args.ignore_value,
                 line_width=args.line_width,
                 label_counts=label_counts,
                 shape_status_counts=shape_status_counts,
@@ -416,6 +453,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         converted += 1
         total_good_shapes += good_shapes
         total_anomaly_shapes += anomaly_shapes
+        total_ignore_shapes += ignore_shapes
         total_overlap_pixels += overlap_pixels
 
     print(f"Converted: {converted}")
@@ -424,7 +462,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"Output directory: {output_dir}")
     print(
         "Shape counts: "
-        f"good={total_good_shapes}, anomaly={total_anomaly_shapes}"
+        f"good={total_good_shapes}, anomaly={total_anomaly_shapes}, "
+        f"ignore={total_ignore_shapes}"
     )
     if total_overlap_pixels:
         print(
@@ -434,7 +473,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     if label_counts:
         print("Labels:")
         for label, count in sorted(label_counts.items(), key=lambda item: item[0].lower()):
-            category = "good" if label.strip().lower() == "good" else "anomaly"
+            normalized_label = label.strip().lower()
+            if normalized_label == "good":
+                category = "good"
+            elif normalized_label == "ignore":
+                category = "ignore"
+            else:
+                category = "anomaly"
             print(f"  {label!r}: {count} ({category})")
     if shape_status_counts.get("unsupported") or shape_status_counts.get("invalid"):
         print(

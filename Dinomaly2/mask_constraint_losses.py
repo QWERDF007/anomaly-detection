@@ -155,6 +155,36 @@ def default_dinomaly_loss(
     return global_cosine(encoder_features, decoder_features)
 
 
+def masked_default_dinomaly_loss(
+    encoder_features: Sequence[torch.Tensor],
+    decoder_features: Sequence[torch.Tensor],
+    valid_mask: torch.Tensor,
+    use_loose_loss: bool,
+    p: float,
+    factor: float,
+) -> torch.Tensor:
+    """Compute the Dinomaly2 loss after removing ignored pixels.
+
+    ``valid_mask`` contains one for pixels that may contribute to the default
+    loss and zero for ``ignore_value`` pixels.  A missing-mask sample is
+    represented by an all-one mask, so it keeps contributing the full image.
+    """
+
+    if use_loose_loss:
+        return masked_global_cosine_hm_percent(
+            encoder_features,
+            decoder_features,
+            valid_mask,
+            p=p,
+            factor=factor,
+        )
+    return masked_global_cosine(
+        encoder_features,
+        decoder_features,
+        valid_mask,
+    )
+
+
 def calculate_mask_constraint_losses(
     encoder_features: Sequence[torch.Tensor],
     decoder_features: Sequence[torch.Tensor],
@@ -165,29 +195,63 @@ def calculate_mask_constraint_losses(
     use_loose_loss: bool,
     p: float,
     factor: float,
+    ignore_value: int = 255,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return ``(L_dinomaly, L_good, L_anomaly)`` for one batch."""
+    """Return ``(L_dinomaly, L_good, L_anomaly)`` for one batch.
 
-    loss_dinomaly = default_dinomaly_loss(
-        encoder_features,
-        decoder_features,
-        use_loose_loss=use_loose_loss,
-        p=p,
-        factor=factor,
-    )
+    Existing masks containing only BG/good/anomaly use the exact full-image
+    Dinomaly2 loss.  When an image contains ``ignore_value``, only its valid
+    pixels contribute to ``L_dinomaly``.  ``L_good`` and ``L_anomaly`` select
+    their values explicitly and therefore never include ignored pixels.
+    """
+
+    masks = masks.to(device=decoder_features[0].device)
+    has_mask = has_mask.to(device=masks.device, dtype=torch.bool)
+    if masks.ndim == 4 and masks.shape[1] == 1:
+        masks = masks[:, 0]
+    if masks.ndim != 3:
+        raise ValueError(f"Expected masks shape [B, H, W], got {masks.shape}")
+
+    has_mask_per_pixel = has_mask.view(-1, 1, 1)
+    ignore_pixels = (masks == int(ignore_value)) & has_mask_per_pixel
+    if torch.any(ignore_pixels):
+        # Samples without a mask use an all-one mask; samples with a mask use
+        # every annotated value except the explicit ignore value.
+        valid_mask = torch.where(
+            has_mask_per_pixel,
+            ~ignore_pixels,
+            torch.ones_like(ignore_pixels),
+        ).float()
+        loss_dinomaly = masked_default_dinomaly_loss(
+            encoder_features,
+            decoder_features,
+            valid_mask,
+            use_loose_loss=use_loose_loss,
+            p=p,
+            factor=factor,
+        )
+    else:
+        # Preserve the original Dinomaly2 path bit-for-bit when no ignored
+        # value is present in this batch.
+        loss_dinomaly = default_dinomaly_loss(
+            encoder_features,
+            decoder_features,
+            use_loose_loss=use_loose_loss,
+            p=p,
+            factor=factor,
+        )
+
     if not torch.any(has_mask):
         zero = _zero_from(decoder_features)
         return loss_dinomaly, zero, zero
 
-    masks = masks.to(device=decoder_features[0].device)
-    has_mask = has_mask.to(device=masks.device, dtype=torch.bool)
     good_mask = (
         (masks == int(good_value))
-        & has_mask.view(-1, 1, 1)
+        & has_mask_per_pixel
     ).float()
     anomaly_mask = (
         (masks == int(anomaly_value))
-        & has_mask.view(-1, 1, 1)
+        & has_mask_per_pixel
     ).float()
 
     if use_loose_loss:

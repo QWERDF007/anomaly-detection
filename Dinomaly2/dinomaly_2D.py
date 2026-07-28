@@ -468,7 +468,7 @@ if __name__ == '__main__':
         default='default',
         help=(
             'default: original Dinomaly2 training on Train/good; '
-            'mask_constraint: one-pass training with optional three-value masks '
+            'mask_constraint: one-pass training with optional four-value masks '
             'from Train/good and all non-good directories.'
         ),
     )
@@ -492,6 +492,16 @@ if __name__ == '__main__':
         type=int,
         default=2,
         help='Integer value representing anomaly pixels in a mask.',
+    )
+    parser.add_argument(
+        '--ignore_value',
+        type=int,
+        default=255,
+        help=(
+            'Integer value representing uncertain/ignored pixels in a mask. '
+            'These pixels are excluded from all three mask-constraint losses '
+            '(default: 255).'
+        ),
     )
     parser.add_argument(
         '--aug_hflip_prob',
@@ -535,6 +545,14 @@ if __name__ == '__main__':
         parser.error('--eval_interval must be -1 or a positive integer.')
     if not 0 <= args.aug_hflip_prob <= 1:
         parser.error('--aug_hflip_prob must be in [0, 1].')
+    if not 0 <= args.ignore_value <= 255:
+        parser.error('--ignore_value must be in [0, 255].')
+    if args.ignore_value == 0:
+        parser.error('--ignore_value must differ from BG value 0.')
+    if args.ignore_value in {args.good_value, args.anomaly_value}:
+        parser.error(
+            '--ignore_value must differ from --good_value and --anomaly_value.'
+        )
     if args.aug_brightness < 0:
         parser.error('--aug_brightness must be non-negative.')
     if args.aug_contrast < 0:

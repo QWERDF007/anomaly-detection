@@ -62,8 +62,10 @@ class MaskConstraintTrainDataset(Dataset):
     """Read ``Train/good`` and all non-good directories with optional masks.
 
     A missing mask is intentional and means that the whole image contributes
-    only to the default Dinomaly2 loss. A present mask must contain exactly
-    ``0``, ``good_value`` and ``anomaly_value`` (not necessarily all three).
+    only to the default Dinomaly2 loss. A present mask may contain BG,
+    ``good_value``, ``anomaly_value`` and ``ignore_value``. Pixels with
+    ``ignore_value`` are kept in the returned mask and excluded by the loss
+    function; they are not silently converted to BG.
     """
 
     def __init__(
@@ -75,6 +77,7 @@ class MaskConstraintTrainDataset(Dataset):
         mask_dir: str | Path | None = None,
         good_value: int = 1,
         anomaly_value: int = 2,
+        ignore_value: int = 255,
         joint_transform=None,
     ) -> None:
         self.root = Path(root).expanduser()
@@ -98,11 +101,21 @@ class MaskConstraintTrainDataset(Dataset):
         )
         self.good_value = int(good_value)
         self.anomaly_value = int(anomaly_value)
+        self.ignore_value = int(ignore_value)
         self.joint_transform = joint_transform
-        if self.good_value == 0 or self.anomaly_value == 0:
-            raise ValueError("good_value and anomaly_value must differ from 0.")
-        if self.good_value == self.anomaly_value:
-            raise ValueError("good_value and anomaly_value must be different.")
+        configured_values = {
+            "good_value": self.good_value,
+            "anomaly_value": self.anomaly_value,
+            "ignore_value": self.ignore_value,
+        }
+        if any(value == 0 for value in configured_values.values()):
+            raise ValueError(
+                "good_value, anomaly_value and ignore_value must differ from 0."
+            )
+        if len(set(configured_values.values())) != len(configured_values):
+            raise ValueError(
+                "good_value, anomaly_value and ignore_value must be different."
+            )
 
         self.samples = [
             {
@@ -118,7 +131,7 @@ class MaskConstraintTrainDataset(Dataset):
         relative = image_path.relative_to(self.train_root)
         relative_stem = relative.with_suffix("")
         # Only the configured training-mask root is searched. Evaluation
-        # data_root/ground_truth must never be treated as a three-value mask.
+        # data_root/ground_truth must never be treated as a training mask.
         roots = [self.mask_dir]
 
         for root in roots:
@@ -193,7 +206,12 @@ class MaskConstraintTrainDataset(Dataset):
             mask = torch.from_numpy(
                 np.asarray(mask_image, dtype=np.int64).copy()
             ).long()
-            valid_values = {0, self.good_value, self.anomaly_value}
+            valid_values = {
+                0,
+                self.good_value,
+                self.anomaly_value,
+                self.ignore_value,
+            }
             actual_values = set(np.unique(mask.numpy()).tolist())
             invalid_values = actual_values - valid_values
             if invalid_values:
