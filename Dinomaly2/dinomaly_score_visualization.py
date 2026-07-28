@@ -8,6 +8,9 @@ This is a standalone subset of ``dinomaly_roi_pipeline.py``.  It only:
 3. selects an automatic score threshold from the distributions; and
 4. optionally saves threshold masks and fused heatmaps.
 
+The score table also contains a ``Test / GT`` row for each annotated anomaly
+image.  Its score is the maximum score-map value inside that image's GT mask.
+
 It does not extract DINO patch features, run ROIAlign, build/query FAISS, or
 filter ROI distances.  Shared behavior is implemented in
 ``dinomaly_pipeline_common.py`` and reused by the ROI entry point.
@@ -196,6 +199,9 @@ def collect_gt_score_values(
         gt_values = score_map[gt_mask]
         gt_values = gt_values[np.isfinite(gt_values)]
         if gt_values.size:
+            # Keep the per-image maximum for the CSV's Test / GT group while
+            # retaining every GT-pixel value for the distribution plot.
+            sample["gt_score"] = float(gt_values.max())
             values.extend(gt_values.tolist())
     return values
 
@@ -368,6 +374,15 @@ def save_score_table(samples: Sequence[Dict], output_path: Path) -> None:
                     "score": sample["score"],
                 }
             )
+            gt_score = sample.get("gt_score")
+            if gt_score is not None:
+                writer.writerow(
+                    {
+                        "group": "Test / GT",
+                        "image_path": str(sample["image_path"]),
+                        "score": gt_score,
+                    }
+                )
 
 
 def build_parser() -> argparse.ArgumentParser:
