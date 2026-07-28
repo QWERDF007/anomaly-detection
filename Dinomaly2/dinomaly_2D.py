@@ -504,6 +504,15 @@ if __name__ == '__main__':
         ),
     )
     parser.add_argument(
+        '--mask_only',
+        action='store_true',
+        help=(
+            'For samples with a Mask, compute the Dinomaly2 loss only on '
+            'good and anomaly pixels; BG and ignored pixels are skipped. '
+            'Samples without a Mask still use the full-image loss.'
+        ),
+    )
+    parser.add_argument(
         '--aug_hflip_prob',
         type=float,
         default=0,

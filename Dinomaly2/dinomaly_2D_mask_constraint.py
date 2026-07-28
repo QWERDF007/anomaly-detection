@@ -234,6 +234,15 @@ def train_mask(item_list, args):
         f"anomaly={args.anomaly_value}, ignore={args.ignore_value}",
         flush=True,
     )
+    print(
+        "masked loss regions: "
+        + (
+            "good+anomaly only (BG ignored)"
+            if args.mask_only
+            else "BG+good+anomaly (ignore excluded)"
+        ),
+        flush=True,
+    )
 
     iteration = 0
     start_time = time.time()
@@ -264,6 +273,7 @@ def train_mask(item_list, args):
                     p=p,
                     factor=args.ll_factor,
                     ignore_value=args.ignore_value,
+                    mask_only=args.mask_only,
                 )
             )
             good_term = args.lambda_good * loss_good

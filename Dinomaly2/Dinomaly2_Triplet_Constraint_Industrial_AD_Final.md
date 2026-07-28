@@ -49,6 +49,8 @@ M_n    mask == 0                 # BG / normal
 M_g    mask == GOOD_VALUE        # good / weak_ok
 M_a    mask == ANOMALY_VALUE     # anomaly
 M_v    mask != IGNORE_VALUE      # 参与默认 Dinomaly2 损失的有效区域
+M_{ga} (M=GOOD_VALUE) or (M=ANOMALY_VALUE)
+                  # 启用 --mask_only 时的有效区域
 ```
 
 同一张图允许以下任意组合：
@@ -164,6 +166,12 @@ $$
 
 启用新的四值 Mask 训练流程，递归读取 `Train/` 下 `good` 和所有非 `good` 子目录，从标准 Dinomaly2 初始化开始，在一次训练中联合完成所有约束。待定值只表示忽略区域，不增加新的损失：
 
+若需要让有 Mask 样本只在 good/anomaly 区域计算损失，增加：
+
+```bash
+--mask_only
+```
+
 ```text
 标准 Dinomaly2 初始化
         ↓
@@ -252,7 +260,7 @@ $$
 L_{dinomaly}=L_D(e,d;\mathbf{1})=L_{default}(e,d)
 $$
 
-该损失对每个训练样本都计算。包含待定值的有 Mask 样本只计算有效区域；没有待定值时保持默认全图计算方式。
+该损失对每个训练样本都计算。包含待定值的有 Mask 样本只计算 $M_v$ 有效区域；没有待定值时保持默认全图计算方式。若启用 `--mask_only`，有 Mask 样本改为只计算 $M_{ga}$，BG 和待定区域均不参与。
 
 ### 7.2 good 区域损失
 
@@ -290,13 +298,16 @@ $$
 有待定区域的 Mask：先从该样本中去除 `IGNORE_VALUE` 区域，再按上式计算；待定区域不参与三个损失。
 ```
 
-一个 batch 可以同时包含有 Mask 和无 Mask 的图像。无待定值时，`L_dinomaly` 保持默认 Dinomaly2 的整图计算；存在待定值时，包含待定值的样本使用有效区域 Mask。`L_good` 和 `L_anomaly` 只使用有 Mask 图像中的对应区域。
+一个 batch 可以同时包含有 Mask 和无 Mask 的图像。无待定值且未启用 BG 忽略时，`L_dinomaly` 保持默认 Dinomaly2 的整图计算；存在待定值时，包含待定值的样本使用有效区域 Mask。启用 `--mask_only` 后，有 Mask 样本的 `L_dinomaly` 只使用 good/anomaly 区域。`L_good` 和 `L_anomaly` 只使用有 Mask 图像中的对应区域。
 
 ---
 
 ## 9. Mask 映射规则
 
-Mask 用于计算三个损失。没有待定值时不改变 $L_{dinomaly}$ 的默认全图定义；包含待定值时，从 $L_{dinomaly}$ 中排除 `IGNORE_VALUE` 区域。
+Mask 用于计算三个损失。没有待定值且未启用 BG 忽略时不改变
+$L_{dinomaly}$ 的默认全图定义；包含待定值时，从 $L_{dinomaly}$ 中排除
+`IGNORE_VALUE` 区域。启用 `--mask_only` 后，有 Mask 样本的
+$L_{dinomaly}$ 只使用 `GOOD_VALUE` 和 `ANOMALY_VALUE` 区域。
 
 - Mask 缺失：整图视为 BG/normal，但只计算 $L_{dinomaly}$。
 - Mask 存在：解析值 0、`GOOD_VALUE`、`ANOMALY_VALUE` 和 `IGNORE_VALUE`。
@@ -350,7 +361,7 @@ $$
 
 | 损失 | 作用范围 |
 |---|---|
-| $L_{dinomaly}$ | 每张图；无待定值时与默认 Dinomaly2 完全相同，有待定值时排除待定区域 |
+| $L_{dinomaly}$ | 每张图；默认包含 BG/good/anomaly、排除待定；启用 `--mask_only` 后，有 Mask 样本只包含 good/anomaly |
 | $L_{good}$ | 有 Mask 且存在 good 区域时；最小化 |
 | $L_{anomaly}$ | 有 Mask 且存在 anomaly 区域时；最大化 |
 
@@ -364,6 +375,7 @@ Batch 以图像为单位加载，再从每张图的 Mask 中提取区域，不�
 
 - 无 Mask 图像提供全图 BG/normal 区域。
 - 有 Mask 图像可同时提供 BG、good 和 anomaly 区域。
+- 启用 `--mask_only` 后，有 Mask 图像的 BG 区域不提供任何损失监督；无 Mask 图像仍提供全图默认损失。
 - 待定区域不提供任何损失监督；如果整张图都是待定，该图在当前 iteration 中不产生有效梯度。
 - 若某一类区域缺失，只跳过依赖该类的损失项，其他损失继续计算。
 - 图像增强必须同步作用于 image 和四值 Mask；Mask 只使用 nearest interpolation。
@@ -380,10 +392,10 @@ iterations = 与用户配置的 max_iters 一致
 冻结 = Encoder（保持默认 Dinomaly2 行为）
 训练 = Bottleneck、Decoder
 loss = L_dinomaly + lambda_good * L_good - lambda_anomaly * L_anomaly
-       （待定区域不参与三个分量）
+       （待定区域不参与三个分量；启用 --mask_only 时，BG 也不参与）
 ```
 
-优化器、参数组、学习率调度、梯度裁剪、训练迭代数和 checkpoint 周期均沿用默认 Dinomaly2 配置。唯一变化是数据加载器可返回 Mask，并按第 12 节组合三个损失；`IGNORE_VALUE` 区域从三个损失中排除。
+优化器、参数组、学习率调度、梯度裁剪、训练迭代数和 checkpoint 周期均沿用默认 Dinomaly2 配置。唯一变化是数据加载器可返回 Mask，并按第 12 节组合三个损失；`IGNORE_VALUE` 区域始终从三个损失中排除，`--mask_only` 决定是否同时排除 BG。
 
 ---
 
@@ -492,11 +504,14 @@ Dinomaly2/
 
 有待定区域：
     三个损失均排除 IGNORE_VALUE 区域
+
+启用 --mask_only：
+    有 Mask 样本的三个损失只使用 GOOD_VALUE 和 ANOMALY_VALUE 区域
 ```
 
 `--train_mode default` 执行原始 Dinomaly2 训练；`--train_mode mask_constraint` 读取 `Train/` 下全部目录，并在一次训练中联合优化三个损失。训练和推理都不增加额外 Head，只保存与原 Dinomaly2 完全兼容的 `model.pth`。
 
-该方案支持同一张图同时存在 BG/normal、good/weak_ok、anomaly 和待定区域，也支持完全正常图像不提供 Mask，同时保持原始网络结构、像素级异常定位方式、checkpoint 格式、推理接口和推理速度。
+该方案支持同一张图同时存在 BG/normal、good/weak_ok、anomaly 和待定区域，也支持完全正常图像不提供 Mask。通过 `--mask_only` 可以进一步只使用有 Mask 样本的 good/anomaly 区域，同时保持原始网络结构、像素级异常定位方式、checkpoint 格式、推理接口和推理速度。
 
 
 
@@ -551,6 +566,6 @@ $$
 
   默认 lambda_good=0.5、lambda_anomaly=0.5：
 
-  - L_dinomaly：默认全图损失，忽略值为 255 的区域；
+  - L_dinomaly：默认使用 BG/good/anomaly 有效区域，忽略值为 255 的区域；启用 `--mask_only` 后，有 Mask 样本只使用 good/anomaly 区域；
   - L_good：只计算 Mask 值为 1 的 good 区域，并最小化；
   - L_anomaly：只计算 Mask 值为 2 的 anomaly 区域，由于前面的负号，实际最大化异常区域的特征差异。

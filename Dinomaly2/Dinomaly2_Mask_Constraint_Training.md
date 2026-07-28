@@ -99,6 +99,8 @@ Mask 缺失和全 0 Mask 的区别是：缺失 Mask 会被标记为无标注样�
 
 待定值默认是 `255`，表示无法明确判断为 BG、good 或 anomaly 的区域。待定值不会转换为 BG，也不会参与任何损失。如果整张 Mask 都是待定，该样本在当前 iteration 中不产生有效梯度。
 
+默认情况下，有 Mask 样本的 `L_dinomaly` 使用 BG、good、anomaly 三类有效区域，待定区域除外。如果指定 `--mask_only`，有 Mask 样本的三个损失只使用 good 和 anomaly 区域，BG 和待定区域都不计算损失。没有 Mask 的样本始终使用整图默认损失。
+
 ## 4. LabelMe 标注转换
 
 转换脚本为：
@@ -195,6 +197,7 @@ python dinomaly_2D.py \
     --good_value 1 \
     --anomaly_value 2 \
     --ignore_value 255 \
+    --mask_only \
     --lambda_good 1.0 \
     --lambda_anomaly 1.0
 ```
@@ -215,10 +218,17 @@ python dinomaly_2D.py \
 | `--good_value` | good 的 Mask 值 | `1` |
 | `--anomaly_value` | anomaly 的 Mask 值 | `2` |
 | `--ignore_value` | 待定/忽略的 Mask 值；该区域不参与三个损失 | `255` |
+| `--mask_only` | 有 Mask 时只计算 good/anomaly 区域，忽略 BG | 关闭 |
 | `--lambda_good` | good 损失权重 | `1.0` |
 | `--lambda_anomaly` | anomaly 损失权重 | `1.0` |
 
 如果 Mask 使用的值就是 `0/1/2`，不需要额外指定 `--good_value` 和 `--anomaly_value`。
+
+不启用 BG 忽略时，使用默认行为；需要只训练标注为 good/anomaly 的区域时，添加：
+
+```bash
+--mask_only
+```
 
 ## 7. 单次训练流程
 
@@ -235,9 +245,10 @@ Bottleneck + Decoder
         ↓
 计算默认全图损失 L_dinomaly
         ↓
-如果存在待定值，从 L_dinomaly 的有效区域中排除待定像素
+按配置确定 L_dinomaly 的有效区域：默认包含 BG/good/anomaly；启用
+`--mask_only` 时只包含 good/anomaly；待定像素始终排除
         ↓
-按 Mask 值计算 L_good 和 L_anomaly；待定像素不进入两个区域损失
+按 Mask 值计算 L_good 和 L_anomaly；BG/待定像素不进入区域损失
         ↓
 L = L_dinomaly
     + lambda_good × L_good
