@@ -165,7 +165,9 @@ Train/good/image_002.jpg
 Train/good/image_002_mask.png
 ```
 
-或者将 Mask 放在数据根目录下的 `mask/`、`ground_truth/`、`annotations/` 目录中。推荐使用默认的独立 `masks/` 目录；只有 Mask 位于其他位置时才传入 `--mask_dir`。
+训练流程只从默认的 `<data_path>/masks/` 读取三值训练 Mask，不会自动读取
+`ground_truth/`、`mask/` 或 `annotations/`。其中 `ground_truth/` 仅用于训练结束后的
+默认评估；如果训练 Mask 位于其他位置，必须通过 `--mask_dir` 指定。
 
 ## 6. 启动训练
 

@@ -185,6 +185,7 @@ def train_mask(item_list, args):
         anomaly_value=args.anomaly_value,
         joint_transform=train_transform,
     )
+    print(f"training mask directory: {mask_dir}", flush=True)
     train_loader = DataLoader(
         train_data,
         batch_size=batch_size,

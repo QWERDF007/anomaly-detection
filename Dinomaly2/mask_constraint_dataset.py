@@ -89,8 +89,12 @@ class MaskConstraintTrainDataset(Dataset):
             interpolation=transforms.InterpolationMode.NEAREST,
         )
         self.mask_crop = transforms.CenterCrop(crop_size)
+        # Training masks are isolated from evaluation ground-truth masks.
+        # A missing mask_dir means exactly root/masks.
         self.mask_dir = (
-            Path(mask_dir).expanduser() if mask_dir is not None else None
+            Path(mask_dir).expanduser()
+            if mask_dir is not None
+            else self.root / "masks"
         )
         self.good_value = int(good_value)
         self.anomaly_value = int(anomaly_value)
@@ -113,16 +117,9 @@ class MaskConstraintTrainDataset(Dataset):
     def _candidate_mask_paths(self, image_path: Path):
         relative = image_path.relative_to(self.train_root)
         relative_stem = relative.with_suffix("")
-        roots = []
-        if self.mask_dir is not None:
-            roots.append(self.mask_dir)
-        for name in ("ground_truth", "masks", "mask", "annotations"):
-            child = _find_child(self.root, name)
-            if child is not None:
-                roots.append(child)
-            child = _find_child(image_path.parent, name)
-            if child is not None:
-                roots.append(child)
+        # Only the configured training-mask root is searched. Evaluation
+        # data_root/ground_truth must never be treated as a three-value mask.
+        roots = [self.mask_dir]
 
         for root in roots:
             for extension in MASK_EXTENSIONS:
@@ -137,10 +134,6 @@ class MaskConstraintTrainDataset(Dataset):
                     f"{relative_stem.name}-mask{extension}"
                 )
 
-        parent = image_path.parent
-        for suffix in ("_mask", "-mask"):
-            for extension in MASK_EXTENSIONS:
-                yield parent / f"{image_path.stem}{suffix}{extension}"
 
     def _find_mask(self, image_path: Path) -> Optional[Path]:
         seen = set()
