@@ -179,7 +179,6 @@ python dinomaly_2D.py \
     --dataset custom \
     --train_mode mask_constraint \
     --save_dir /path/to/trainlogs \
-    --save_name Dinomaly2_mask_constraint \
     --backbone dinov2reg_vit_small_14 \
     --image_size 448 \
     --crop_size 392 \
@@ -203,6 +202,7 @@ python dinomaly_2D.py \
 | `--image_size` | 图像缩放尺寸 | `448` |
 | `--crop_size` | 中心裁剪尺寸 | `392` |
 | `--cuda` | GPU 编号 | `0` |
+| `--eval_interval` | 评估周期，单位为 epoch；`-1` 表示只在最终评估 | `50` |
 | `--good_value` | good 的 Mask 值 | `1` |
 | `--anomaly_value` | anomaly 的 Mask 值 | `2` |
 | `--lambda_good` | good 损失权重 | `1.0` |
@@ -234,7 +234,18 @@ L = L_dinomaly
 一次 backward 和 optimizer.step
 ```
 
+`L_anomaly` 不取倒数。Dinomaly2 的 cosine distance 是有界量，使用负号可以直接实现“最大化 anomaly 区域距离”；倒数在 `L_anomaly` 接近 0 时会产生很大的梯度，训练不稳定。日志中的 `anomaly_term` 为 `-lambda_anomaly × L_anomaly`，因此最终 `loss` 是三个有符号项的和。
+
 Encoder 保持冻结，只训练 Dinomaly2 的 Bottleneck 和 Decoder。整个过程不加载第二个阶段的模型、不增加额外 Head，也不需要单独的 `weak_ok` 训练阶段。
+
+训练 DataLoader 与默认 Dinomaly2 流程保持一致，使用 batch size 8、`shuffle=True`、4 个 worker，并使用 `drop_last=True`。
+
+评估周期由 `--eval_interval` 控制，两个训练模式使用同一参数：
+
+```text
+--eval_interval 50     每 50 个 epoch 评估一次
+--eval_interval -1     跳过中途评估，只在最终 iteration 后评估一次
+```
 
 ## 8. 训练输出
 
@@ -242,10 +253,13 @@ Encoder 保持冻结，只训练 Dinomaly2 的 Bottleneck 和 Decoder。整个�
 
 ```text
 save_dir/
-└── save_name/
+└── YYYYMMDDHHMMSS/
     ├── model.pth
     └── tb/
 ```
+
+每次启动 `dinomaly_2D.py` 都会自动使用启动时刻生成一个
+`YYYYMMDDHHMMSS` 目录，不再传入 `--save_name`。
 
 只保存一个模型文件：
 
@@ -264,7 +278,7 @@ anomaly 区域损失
 耗时和 ETA
 ```
 
-训练结束后，如果 `Test/` 和对应的 `ground_truth/` 可用，还会打印默认 Dinomaly2 指标：
+按照 `--eval_interval`，如果 `Test/` 和对应的 `ground_truth/` 可用，会打印默认 Dinomaly2 指标：
 
 ```text
 I-AUROC

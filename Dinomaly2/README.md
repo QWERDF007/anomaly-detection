@@ -162,14 +162,17 @@ Unzip the file to `../MulSen_AD`.
 ## 3. Run Experiments
 2D MUAD (Conventional)
 ```
-python dinomaly_2D.py --data_path ../mvtec_anomaly_detection --image_size 448 --crop_size 392 --save_name dinomaly2_mvtec
-python dinomaly_2D.py --data_path ../VisA_pytorch/1cls --image_size 448 --crop_size 392 --save_name dinomaly2_visa
-python dinomaly_2D.py --data_path ../MPDD --image_size 448 --crop_size 392 --save_name dinomaly2_mpdd
-python dinomaly_2D.py --data_path ../BTech_Dataset_transformed --image_size 392 --crop_size 392 --save_name dinomaly2_btad
-python dinomaly_2D.py --data_path ../MIAD --image_size 392 --crop_size 392 --save_name dinomaly2_miad
-python dinomaly_2D.py --data_path ../Uni-Medical --image_size 280 --crop_size 280 --save_name dinomaly2_unimed
+python dinomaly_2D.py --data_path ../mvtec_anomaly_detection --image_size 448 --crop_size 392
+python dinomaly_2D.py --data_path ../VisA_pytorch/1cls --image_size 448 --crop_size 392
+python dinomaly_2D.py --data_path ../MPDD --image_size 448 --crop_size 392
+python dinomaly_2D.py --data_path ../BTech_Dataset_transformed --image_size 392 --crop_size 392
+python dinomaly_2D.py --data_path ../MIAD --image_size 392 --crop_size 392
+python dinomaly_2D.py --data_path ../Uni-Medical --image_size 280 --crop_size 280
 ...
 ```
+
+`dinomaly_2D.py` 会在 `./saved_results/YYYYMMDDHHMMSS/` 下保存本次训练的
+`model.pth`、TensorBoard 日志和 `log.txt`；不再使用 `--save_name`。
 
 Multi-View MUAD
 ```

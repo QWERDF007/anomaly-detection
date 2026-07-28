@@ -3,12 +3,14 @@
 This is a standalone subset of ``dinomaly_roi_pipeline.py``.  It only:
 
 1. predicts and caches Dinomaly2 score maps;
-2. plots Train/Good, Test/Good and Test/Anomaly score distributions;
+2. plots Train/Good, Test/Good, Test/Anomaly and optional GT-region score
+   distributions;
 3. selects an automatic score threshold from the distributions; and
 4. optionally saves threshold masks and fused heatmaps.
 
 It does not extract DINO patch features, run ROIAlign, build/query FAISS, or
-filter ROI distances.  The original ROI pipeline is not modified.
+filter ROI distances.  Shared behavior is implemented in
+``dinomaly_pipeline_common.py`` and reused by the ROI entry point.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ import logging
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence
 
 import cv2
 import matplotlib
@@ -29,186 +31,35 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from PIL import Image
 from tqdm import tqdm
-from torchvision import transforms
 
+from dinomaly_pipeline_common import (
+    GROUPS,
+    artifact_root,
+    choose_threshold,
+    common_grid,
+    find_child_directory,
+    group_roots,
+    ground_truth_relative_path,
+    load_ground_truth,
+    infer_score_map,
+    iter_image_paths,
+    load_score_map,
+    load_transform,
+    plot_group_density,
+    relative_output_path,
+    resolve_group_directory,
+    resolve_non_good_directories,
+    save_fused_heatmap,
+    score_values_by_group,
+    select_device,
+)
 from models.uad import Dinomaly
 from predict import build_model
-from utils import cal_anomaly_maps, get_gaussian_kernel
+from utils import get_gaussian_kernel
 
 
 LOGGER = logging.getLogger("dinomaly_score_visualization")
-
-GROUPS = (
-    ("train_good", "Train / Good"),
-    ("test_good", "Test / Good"),
-    ("test_anomaly", "Test / Anomaly"),
-)
-
-COLORS = {
-    "Train / Good": "green",
-    "Test / Good": "blue",
-    "Test / Anomaly": "red",
-}
-
-IMAGE_EXTENSIONS = {
-    ".bmp",
-    ".jpeg",
-    ".jpg",
-    ".png",
-    ".tif",
-    ".tiff",
-    ".webp",
-}
-
-
-def find_child_directory(root: Optional[Path], name: str) -> Optional[Path]:
-    if root is None or not root.is_dir():
-        return None
-    for child in root.iterdir():
-        if child.is_dir() and child.name.lower() == name.lower():
-            return child
-    return None
-
-
-def resolve_group_directory(
-    data_root: Path,
-    split: str,
-    category: str,
-) -> Path:
-    split_dir = find_child_directory(data_root, split)
-    path = find_child_directory(split_dir, category)
-    if path is None or not path.is_dir():
-        raise FileNotFoundError(
-            f"Cannot find {split}/{category} under {data_root}."
-        )
-    return path
-
-
-def resolve_non_good_directories(data_root: Path) -> List[Path]:
-    """Resolve every Test child directory except the directory named good."""
-
-    test_dir = find_child_directory(data_root, "test")
-    roots = (
-        [
-            child
-            for child in test_dir.iterdir()
-            if child.is_dir() and child.name.lower() != "good"
-        ]
-        if test_dir is not None
-        else []
-    )
-    roots = sorted(set(roots), key=lambda path: str(path).lower())
-    if not roots:
-        raise FileNotFoundError(
-            "Cannot find any non-good directory under test/. "
-            "Expected directories such as test/bad or test/anomaly."
-        )
-    return roots
-
-
-def group_roots(groups: Dict[str, object], group_key: str) -> List[Path]:
-    roots = groups[group_key]
-    if isinstance(roots, Path):
-        return [roots]
-    return list(roots)
-
-
-def artifact_root(
-    output_dir: Path,
-    artifact_name: str,
-    group_key: str,
-    image_root: Path,
-    root_count: int,
-) -> Path:
-    root = output_dir / artifact_name / group_key
-    if group_key == "test_anomaly" and root_count > 1:
-        root = root / image_root.name
-    return root
-
-
-def iter_image_paths(root: Path) -> List[Path]:
-    return sorted(
-        [
-            path
-            for path in root.rglob("*")
-            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
-        ],
-        key=lambda path: str(path).lower(),
-    )
-
-
-def load_transform(args):
-    return transforms.Compose(
-        [
-            transforms.Resize((args.image_size, args.image_size)),
-            transforms.ToTensor(),
-            transforms.CenterCrop(args.crop_size),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225],
-            ),
-        ]
-    )
-
-
-def select_device(gpu: int) -> torch.device:
-    if gpu >= 0 and torch.cuda.is_available():
-        if gpu >= torch.cuda.device_count():
-            raise ValueError(
-                f"GPU {gpu} is not available; "
-                f"{torch.cuda.device_count()} device(s) found."
-            )
-        return torch.device(f"cuda:{gpu}")
-    return torch.device("cpu")
-
-
-def infer_score_map(
-    model: Dinomaly,
-    image_path: Path,
-    transform,
-    device: torch.device,
-    gaussian_filter: Optional[torch.nn.Module] = None,
-) -> np.ndarray:
-    with Image.open(image_path) as image:
-        image = image.convert("RGB")
-        original = np.asarray(image)
-        image_tensor = transform(image).unsqueeze(0).to(device)
-
-    with torch.no_grad():
-        encoder_output, decoder_output = model(image_tensor)
-        anomaly_map, _ = cal_anomaly_maps(
-            encoder_output,
-            decoder_output,
-            original.shape[:2],
-        )
-        if gaussian_filter is None:
-            gaussian_filter = get_gaussian_kernel(
-                kernel_size=5,
-                sigma=4,
-            ).to(device)
-        anomaly_map = gaussian_filter(anomaly_map)
-
-    score_map = anomaly_map[0, 0].detach().cpu().numpy().astype(np.float32)
-    return np.nan_to_num(
-        score_map,
-        nan=0.0,
-        posinf=np.finfo(np.float32).max,
-        neginf=0.0,
-    )
-
-
-def relative_output_path(
-    image_path: Path,
-    image_root: Path,
-    output_root: Path,
-    extension: str,
-) -> Path:
-    relative = image_path.relative_to(image_root).with_suffix(extension)
-    output_path = output_root / relative
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    return output_path
 
 
 def has_cached_scores(groups: Dict[str, object], output_dir: Path) -> bool:
@@ -231,22 +82,6 @@ def has_cached_scores(groups: Dict[str, object], output_dir: Path) -> bool:
                 if not score_path.is_file():
                     return False
     return True
-
-
-def load_score_map(score_path: Path) -> np.ndarray:
-    score_map = np.asarray(np.load(score_path), dtype=np.float32)
-    score_map = np.squeeze(score_map)
-    if score_map.ndim != 2:
-        raise ValueError(
-            f"Cached score map must be 2D: {score_path}; "
-            f"got {score_map.shape}"
-        )
-    return np.nan_to_num(
-        score_map,
-        nan=0.0,
-        posinf=np.finfo(np.float32).max,
-        neginf=0.0,
-    )
 
 
 def prepare_samples(
@@ -320,6 +155,12 @@ def prepare_samples(
                     "image_path": image_path,
                     "image_root": image_root,
                     "root_count": len(roots),
+                    "ground_truth_relative": ground_truth_relative_path(
+                        group_key,
+                        image_path,
+                        image_root,
+                        len(roots),
+                    ),
                     "score_path": score_path,
                     "score_map_shape": score_map.shape,
                     "score": float(score_map.max()),
@@ -328,112 +169,35 @@ def prepare_samples(
     return samples
 
 
-def score_values_by_group(samples: Sequence[Dict]) -> Dict[str, List[float]]:
-    values = {display: [] for _, display in GROUPS}
+def collect_gt_score_values(
+    samples: Sequence[Dict],
+    ground_truth_dir: Optional[Path],
+) -> List[float]:
+    """Collect score-map values inside Test/Anomaly GT regions.
+
+    The image-level distributions use one maximum score per image.  This
+    fourth distribution keeps the pixel-level score values whose GT mask is
+    non-zero, so it shows how the model scores the annotated anomaly pixels.
+    """
+
+    if ground_truth_dir is None:
+        return []
+
+    values: List[float] = []
     for sample in samples:
-        values[sample["group_label"]].append(float(sample["score"]))
-    return {label: scores for label, scores in values.items() if scores}
-
-
-def common_grid(groups: Dict[str, List[float]], bins: int) -> np.ndarray:
-    values = [value for scores in groups.values() for value in scores]
-    if not values:
-        raise ValueError("No values are available for plotting.")
-    low = float(min(values))
-    high = float(max(values))
-    if high <= low:
-        margin = max(abs(low) * 0.05, 1e-6)
-        low -= margin
-        high += margin
-    return np.linspace(low, high, max(256, int(bins) * 8))
-
-
-def kde_density(values: Sequence[float], grid: np.ndarray) -> np.ndarray:
-    values_array = np.asarray(values, dtype=np.float64)
-    values_array = values_array[np.isfinite(values_array)]
-    if values_array.size == 0:
-        return np.zeros_like(grid, dtype=np.float64)
-
-    standard_deviation = float(np.std(values_array))
-    interquartile_range = float(
-        np.percentile(values_array, 75)
-        - np.percentile(values_array, 25)
-    )
-    scale = (
-        min(standard_deviation, interquartile_range / 1.34)
-        if interquartile_range > 0
-        else standard_deviation
-    )
-    data_range = max(float(grid[-1] - grid[0]), 1e-12)
-    bandwidth = 0.9 * scale * values_array.size ** -0.2
-    if not np.isfinite(bandwidth) or bandwidth <= 1e-12:
-        bandwidth = data_range / 50.0
-
-    density = np.zeros_like(grid, dtype=np.float64)
-    normalizer = bandwidth * np.sqrt(2.0 * np.pi)
-    chunk_size = 4096
-    for start in range(0, values_array.size, chunk_size):
-        chunk = values_array[start : start + chunk_size]
-        distance = (grid[:, None] - chunk[None, :]) / bandwidth
-        density += np.exp(-0.5 * distance * distance).sum(axis=1)
-    density /= values_array.size * normalizer
-    return density
-
-
-def plot_group_histogram(
-    axis,
-    groups: Dict[str, List[float]],
-    grid: np.ndarray,
-    title: str,
-    threshold: Optional[float],
-    bins: int,
-) -> None:
-    histogram_values = []
-    histogram_labels = []
-    histogram_colors = []
-    for label, values in groups.items():
-        values_array = np.asarray(values, dtype=np.float64)
-        values_array = values_array[np.isfinite(values_array)]
-        if values_array.size == 0:
+        if sample["group_key"] != "test_anomaly":
             continue
-        histogram_values.append(values_array)
-        histogram_labels.append(f"{label} (n={values_array.size})")
-        histogram_colors.append(COLORS.get(label, "steelblue"))
-
-    if histogram_values:
-        axis.hist(
-            histogram_values,
-            bins=max(1, int(bins)),
-            alpha=0.55,
-            edgecolor="none",
-            color=histogram_colors,
-            label=histogram_labels,
-        )
-        axis.set_xlim(float(grid[0]), float(grid[-1]))
-    else:
-        axis.text(
-            0.5,
-            0.5,
-            "No samples",
-            ha="center",
-            va="center",
-            transform=axis.transAxes,
-        )
-
-    if threshold is not None:
-        axis.axvline(
-            threshold,
-            color="black",
-            linestyle="--",
-            linewidth=1.5,
-            label=f"threshold={threshold:.6f}",
-        )
-    axis.set_title(title)
-    axis.set_ylabel("Count")
-    axis.grid(True, alpha=0.3)
-    handles, labels = axis.get_legend_handles_labels()
-    if handles:
-        axis.legend()
+        score_map = load_score_map(Path(sample["score_path"]))
+        gt_mask = load_ground_truth(
+            sample,
+            ground_truth_dir,
+            score_map.shape,
+        ).astype(bool, copy=False)
+        gt_values = score_map[gt_mask]
+        gt_values = gt_values[np.isfinite(gt_values)]
+        if gt_values.size:
+            values.extend(gt_values.tolist())
+    return values
 
 
 def plot_score_distribution(
@@ -441,106 +205,41 @@ def plot_score_distribution(
     output_path: Path,
     threshold: Optional[float],
     bins: int,
+    gt_score_values: Optional[Sequence[float]] = None,
 ) -> None:
-    grid = common_grid(groups, bins)
-    figure, axes = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
-    for axis, (_, label) in zip(axes, GROUPS):
-        plot_group_histogram(
+    gt_label = "Test / Anomaly / GT pixels"
+    plot_groups = dict(groups)
+    plot_groups[gt_label] = (
+        list(gt_score_values) if gt_score_values is not None else []
+    )
+    grid = common_grid(plot_groups, bins)
+    figure, axes = plt.subplots(4, 1, figsize=(10, 16), sharex=True)
+    for axis, (_, label) in zip(axes[:3], GROUPS):
+        plot_group_density(
             axis,
             {label: groups.get(label, [])},
             grid,
             label,
             threshold,
-            bins,
+            bins=bins,
+            xlabel="Dinomaly2 image anomaly score",
         )
-    axes[-1].set_xlabel("Dinomaly2 image anomaly score")
+    plot_group_density(
+        axes[3],
+        {gt_label: plot_groups[gt_label]},
+        grid,
+        "Test / Anomaly / GT anomaly pixels",
+        threshold,
+        bins=bins,
+        xlabel="Dinomaly2 pixel anomaly score",
+        color_overrides={gt_label: "crimson"},
+    )
+    axes[-1].set_xlabel("Dinomaly2 anomaly score")
     figure.suptitle("Dinomaly2 Score Distribution", y=0.995)
     figure.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(figure)
-
-
-def distribution_valley_threshold(
-    normal_scores: Sequence[float],
-    anomaly_scores: Sequence[float],
-    bins: int,
-) -> Tuple[Optional[float], str]:
-    """Find a valley or largest gap between normal and anomaly scores."""
-
-    normal = np.asarray(normal_scores, dtype=np.float64)
-    anomaly = np.asarray(anomaly_scores, dtype=np.float64)
-    normal = normal[np.isfinite(normal)]
-    anomaly = anomaly[np.isfinite(anomaly)]
-    if normal.size == 0 or anomaly.size == 0:
-        return None, "missing-normal-or-anomaly"
-
-    values = np.concatenate((normal, anomaly))
-    low = float(values.min())
-    high = float(values.max())
-    if high <= low:
-        return low, "constant-distribution"
-
-    grid = common_grid(
-        {"normal": normal.tolist(), "anomaly": anomaly.tolist()},
-        bins,
-    )
-    normal_density = kde_density(normal, grid)
-    anomaly_density = kde_density(anomaly, grid)
-    combined_density = normal_density + anomaly_density
-
-    normal_peak = int(np.argmax(normal_density))
-    anomaly_peak = int(np.argmax(anomaly_density))
-    left_peak, right_peak = sorted((normal_peak, anomaly_peak))
-    if right_peak - left_peak >= 2:
-        valley_start = left_peak + 1
-        valley_end = right_peak - 1
-        valley_index = valley_start + int(
-            np.argmin(combined_density[valley_start : valley_end + 1])
-        )
-        return float(grid[valley_index]), "distribution-valley"
-
-    sorted_values = np.sort(values)
-    gaps = np.diff(sorted_values)
-    if gaps.size:
-        gap_index = int(np.argmax(gaps))
-        if gaps[gap_index] > 0:
-            return (
-                float(
-                    (sorted_values[gap_index] + sorted_values[gap_index + 1])
-                    / 2.0
-                ),
-                "distribution-largest-gap",
-            )
-
-    return float((np.median(normal) + np.median(anomaly)) / 2.0), (
-        "distribution-median-midpoint"
-    )
-
-
-def choose_threshold(
-    groups: Dict[str, List[float]],
-    explicit: Optional[float],
-    bins: int,
-) -> Tuple[float, str]:
-    if explicit is not None:
-        return float(explicit), "manual"
-
-    normal_scores = groups.get("Train / Good", []) + groups.get(
-        "Test / Good", []
-    )
-    anomaly_scores = groups.get("Test / Anomaly", [])
-    threshold, method = distribution_valley_threshold(
-        normal_scores,
-        anomaly_scores,
-        bins,
-    )
-    if threshold is None:
-        raise RuntimeError(
-            "Cannot choose an automatic threshold: both normal and anomaly "
-            "score distributions are required. Pass --score_threshold explicitly."
-        )
-    return threshold, method
 
 
 def visualization_path(
@@ -556,56 +255,6 @@ def visualization_path(
     path = root / artifact / relative.with_suffix(extension)
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
-
-
-def save_fused_heatmap(
-    score_map: np.ndarray,
-    image_path: Path,
-    output_path: Path,
-    reference_min: float,
-    reference_max: float,
-    source_image: Optional[np.ndarray] = None,
-) -> None:
-    score_map = np.asarray(score_map, dtype=np.float32)
-    image = (
-        source_image
-        if source_image is not None
-        else cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-    )
-    if image is None:
-        raise OSError(f"Cannot read source image: {image_path}")
-
-    image_height, image_width = image.shape[:2]
-    if score_map.shape != (image_height, image_width):
-        zero_mask = cv2.resize(
-            (score_map == 0).astype(np.uint8),
-            (image_width, image_height),
-            interpolation=cv2.INTER_NEAREST,
-        ).astype(bool)
-        score_map = cv2.resize(
-            score_map,
-            (image_width, image_height),
-            interpolation=cv2.INTER_LINEAR,
-        )
-    else:
-        zero_mask = score_map == 0
-
-    if reference_max <= reference_min:
-        normalized = np.zeros(score_map.shape, dtype=np.uint8)
-    else:
-        normalized = np.clip(
-            (score_map - reference_min)
-            / (reference_max - reference_min)
-            * 255.0,
-            0.0,
-            255.0,
-        ).astype(np.uint8)
-    heatmap = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
-    fused = cv2.addWeighted(image, 0.5, heatmap, 0.5, 0.0)
-    fused[zero_mask] = image[zero_mask]
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(output_path), fused):
-        raise OSError(f"Cannot write heatmap: {output_path}")
 
 
 def save_visualization_payload(payload: Dict) -> None:
@@ -730,7 +379,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  data_root/\n"
             "  ├── train/good/       训练正常图像\n"
             "  ├── test/good/        测试正常图像\n"
-            "  └── test/<非good目录>/ 测试异常图像\n\n"
+            "  ├── test/<非good目录>/ 测试异常图像\n"
+            "  └── ground_truth/     Test/Anomaly 的像素 GT 掩码（可选）\n\n"
             "本脚本不使用 DINO patch features、ROIAlign 或 FAISS。"
         ),
     )
@@ -751,6 +401,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--output_dir",
         required=True,
         help="输出目录；保存 scores、分布图、阈值、score 表和可视化结果。",
+    )
+    parser.add_argument(
+        "-gt",
+        "--ground_truth_dir",
+        default=None,
+        help=(
+            "Test/Anomaly 像素 GT 掩码目录；不指定时自动使用 "
+            "data_root/ground_truth，找不到时第四幅图为空。"
+        ),
     )
     parser.add_argument(
         "--backbone",
@@ -866,8 +525,16 @@ def main(argv=None) -> int:
     )
 
     groups = {
-        "train_good": resolve_group_directory(data_root, "train", "good"),
-        "test_good": resolve_group_directory(data_root, "test", "good"),
+        "train_good": resolve_group_directory(
+            data_root,
+            split="train",
+            category="good",
+        ),
+        "test_good": resolve_group_directory(
+            data_root,
+            split="test",
+            category="good",
+        ),
         "test_anomaly": resolve_non_good_directories(data_root),
     }
     device = select_device(args.gpu)
@@ -910,11 +577,30 @@ def main(argv=None) -> int:
         threshold_method,
     )
 
+    ground_truth_dir = (
+        Path(args.ground_truth_dir).expanduser()
+        if args.ground_truth_dir
+        else find_child_directory(data_root, "ground_truth")
+    )
+    if ground_truth_dir is not None and not ground_truth_dir.is_dir():
+        raise FileNotFoundError(
+            f"Ground-truth directory does not exist: {ground_truth_dir}"
+        )
+    if ground_truth_dir is None:
+        LOGGER.info(
+            "No ground-truth directory found; GT score distribution will be empty."
+        )
+    else:
+        LOGGER.info("Collecting GT score distribution from %s", ground_truth_dir)
+    gt_score_values = collect_gt_score_values(samples, ground_truth_dir)
+    LOGGER.info("GT anomaly pixel scores: %d", len(gt_score_values))
+
     plot_score_distribution(
         score_groups,
         output_dir / "score_distribution.png",
         score_threshold,
         args.bins,
+        gt_score_values,
     )
     save_score_table(samples, output_dir / "score_values.csv")
     with (output_dir / "score_threshold.json").open(
@@ -929,6 +615,7 @@ def main(argv=None) -> int:
                     label: len(values)
                     for label, values in score_groups.items()
                 },
+                "gt_anomaly_pixel_score_count": len(gt_score_values),
             },
             file,
             ensure_ascii=False,

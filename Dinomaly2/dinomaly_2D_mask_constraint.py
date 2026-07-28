@@ -223,7 +223,7 @@ def train_mask(item_list, args):
         total_epochs=max_iters,
         warmup_epochs=100,
     )
-    output_root = os.path.join(args.save_dir, args.save_name)
+    output_root = args.save_dir
     os.makedirs(output_root, exist_ok=True)
     writer = SummaryWriter(log_dir=os.path.join(output_root, "tb"))
     print(f"train image number: {len(train_data)}", flush=True)

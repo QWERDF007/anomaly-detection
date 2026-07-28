@@ -316,7 +316,7 @@ def train(item_list, args):
 
     print_fn('train image number:{}'.format(len(train_data)))
 
-    log_dir = os.path.join(args.save_dir, args.save_name, 'tb')
+    log_dir = os.path.join(args.save_dir, 'tb')
     writer = SummaryWriter(log_dir=log_dir)
 
     it = 0
@@ -405,7 +405,7 @@ def train(item_list, args):
         )
 
     writer.close()
-    torch.save(model.state_dict(), os.path.join(args.save_dir, args.save_name, 'model.pth'))
+    torch.save(model.state_dict(), os.path.join(args.save_dir, 'model.pth'))
 
     return
 
@@ -425,9 +425,12 @@ if __name__ == '__main__':
         help='Dataset format: custom uses one data_path; mvtec keeps the original multi-category logic.',
     )
 
-    parser.add_argument('--save_dir', type=str, default='./saved_results')
-    parser.add_argument('--save_name', type=str,
-                        default='dinomaly2_visa_uni_dinov2sr_i448392_en29_3bn2564e_dp4_la_lc2_llp09f01_car_it40k_sadam2e42e3_wd1e4_w1h_b16_s1')
+    parser.add_argument(
+        '--save_dir',
+        type=str,
+        default='./saved_results',
+        help='训练输出根目录；实际输出保存到其下的 YYYYMMDDHHMMSS 子目录。',
+    )
     parser.add_argument('--backbone', type=str, default='dinov2reg_vit_small_14')
     parser.add_argument('--dropout', type=float, default=0.4,
                         help='Dropout rate for Noisy Bottleneck')
@@ -443,8 +446,8 @@ if __name__ == '__main__':
                         help='The ratio gradients of the discarded regions. 0.1 by default.')
     parser.add_argument('--cr', type=int, default=1,
                         help='Context-aware recentering. 1 for yes, 0 for no.')
-    parser.add_argument('--image_size', type=int, default=448)
-    parser.add_argument('--crop_size', type=int, default=392)
+    parser.add_argument('--image_size', type=int, default=672)
+    parser.add_argument('--crop_size', type=int, default=672)
     parser.add_argument('--max-iters', type=int, default=40000)
     parser.add_argument(
         '--eval_interval',
@@ -561,7 +564,10 @@ if __name__ == '__main__':
         else:
             item_list = os.listdir(args.data_path)
 
-    logger = get_logger(args.save_name, os.path.join(args.save_dir, args.save_name))
+    run_name = datetime.now().strftime('%Y%m%d%H%M%S')
+    args.save_dir = os.path.join(args.save_dir, run_name)
+    os.makedirs(args.save_dir, exist_ok=True)
+    logger = get_logger(run_name, args.save_dir)
     print_fn = logger.info
 
     device = f'cuda:{args.cuda}' if torch.cuda.is_available() else 'cpu'

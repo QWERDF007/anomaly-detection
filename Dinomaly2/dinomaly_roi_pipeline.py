@@ -22,7 +22,7 @@ import os
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 warnings.filterwarnings(
     "ignore",
@@ -50,14 +50,32 @@ from sklearn.metrics import (
 )
 from skimage import measure
 from tqdm import tqdm
-from torchvision import transforms
 from torchvision.ops import roi_align
 
-from extract_dino_features import extract_feature_map
+from dinomaly_pipeline_common import (
+    GROUPS,
+    artifact_root,
+    choose_threshold,
+    common_grid,
+    extract_feature_map,
+    find_child_directory,
+    group_roots,
+    ground_truth_relative_path,
+    iter_image_paths,
+    load_ground_truth,
+    load_transform,
+    plot_group_density,
+    relative_output_path,
+    resolve_group_directory,
+    resolve_non_good_directories,
+    save_fused_heatmap,
+    score_map_from_outputs,
+    score_values_by_group,
+    select_device,
+)
 from models.uad import Dinomaly
 from predict import build_model
 from roi_feature_utils import (
-    IMAGE_EXTENSIONS,
     annotation_path_for_image,
     l2_normalize,
     load_labelme_annotation,
@@ -67,133 +85,10 @@ from roi_feature_utils import (
     polygon_to_feature_mask,
     resize_mask_to_feature,
 )
-from utils import cal_anomaly_maps, get_gaussian_kernel
+from utils import get_gaussian_kernel
 
 
 LOGGER = logging.getLogger("dinomaly_roi_pipeline")
-
-GROUPS = (
-    ("train_good", "Train / Good"),
-    ("test_good", "Test / Good"),
-    ("test_anomaly", "Test / Anomaly"),
-)
-
-COLORS = {
-    "Train / Good": "green",
-    "Test / Good": "blue",
-    "Test / Anomaly": "red",
-}
-
-
-def find_child_directory(root: Path, name: str) -> Optional[Path]:
-    if not root.is_dir():
-        return None
-    for child in root.iterdir():
-        if child.is_dir() and child.name.lower() == name.lower():
-            return child
-    return None
-
-
-def resolve_group_directory(
-    data_root: Path,
-    explicit: Optional[str],
-    split: str,
-    category: str,
-) -> Path:
-    if explicit:
-        path = Path(explicit).expanduser()
-    else:
-        split_dir = find_child_directory(data_root, split)
-        path = find_child_directory(split_dir, category) if split_dir else None
-    if path is None or not path.is_dir():
-        raise FileNotFoundError(
-            f"Cannot find {split}/{category} directory. "
-            f"Use the corresponding explicit argument."
-        )
-    return path
-
-
-def resolve_non_good_directories(
-    data_root: Path,
-) -> List[Path]:
-    """Resolve every Test child directory except the directory named good."""
-
-    test_dir = find_child_directory(data_root, "test")
-    roots = (
-        [
-            child
-            for child in test_dir.iterdir()
-            if child.is_dir() and child.name.lower() != "good"
-        ]
-        if test_dir is not None
-        else []
-    )
-
-    roots = sorted(set(roots), key=lambda path: str(path).lower())
-    if not roots:
-        raise FileNotFoundError(
-            "Cannot find any non-good directory under test/. "
-            "Expected directories such as test/bad or test/gg."
-        )
-    return roots
-
-
-def group_roots(groups: Dict, group_key: str) -> List[Path]:
-    roots = groups[group_key]
-    if isinstance(roots, Path):
-        return [roots]
-    return list(roots)
-
-
-def artifact_root(
-    output_dir: Path,
-    artifact_name: str,
-    group_key: str,
-    image_root: Path,
-    root_count: int,
-) -> Path:
-    root = output_dir / artifact_name / group_key
-    if group_key == "test_anomaly" and root_count > 1:
-        root = root / image_root.name
-    return root
-
-
-def iter_image_paths(root: Path) -> list[Path]:
-    root = Path(root)
-    iterator: Iterable[Path] = root.rglob("*")
-    return sorted(
-        [
-            path
-            for path in iterator
-            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
-        ],
-        key=lambda path: str(path).lower(),
-    )
-
-
-def load_transform(args):
-    return transforms.Compose(
-        [
-            transforms.Resize((args.image_size, args.image_size)),
-            transforms.ToTensor(),
-            transforms.CenterCrop(args.crop_size),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225],
-            ),
-        ]
-    )
-
-
-def select_device(gpu: int) -> torch.device:
-    if gpu >= 0 and torch.cuda.is_available():
-        if gpu >= torch.cuda.device_count():
-            raise ValueError(
-                f"GPU {gpu} is not available; "
-                f"{torch.cuda.device_count()} device(s) found."
-            )
-        return torch.device(f"cuda:{gpu}")
-    return torch.device("cpu")
 
 
 def infer_score_and_feature(
@@ -235,17 +130,13 @@ def infer_score_and_feature(
     try:
         with torch.no_grad():
             encoder_output, decoder_output = model(image_tensor)
-            anomaly_map, _ = cal_anomaly_maps(
+            score_map = score_map_from_outputs(
                 encoder_output,
                 decoder_output,
                 original.shape[:2],
+                device,
+                gaussian_filter,
             )
-            if gaussian_filter is None:
-                gaussian_filter = get_gaussian_kernel(
-                    kernel_size=5,
-                    sigma=4,
-                ).to(device)
-            anomaly_map = gaussian_filter(anomaly_map)
     finally:
         for handle in handles:
             handle.remove()
@@ -283,21 +174,8 @@ def infer_score_and_feature(
                 feature_merge,
             )
 
-    score_map = anomaly_map[0, 0].detach().cpu().numpy().astype(np.float32)
     feature_nchw = feature_map.detach().cpu().numpy().astype(np.float32)
     return score_map, feature_nchw
-
-
-def relative_output_path(
-    image_path: Path,
-    image_root: Path,
-    output_root: Path,
-    extension: str,
-) -> Path:
-    relative = image_path.relative_to(image_root).with_suffix(extension)
-    output_path = output_root / relative
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    return output_path
 
 
 def has_cached_outputs(
@@ -436,16 +314,18 @@ def prepare_samples(
                 )
                 np.save(score_path, score_map)
                 np.save(feature_path, feature_nchw)
-            ground_truth_relative = image_path.relative_to(image_root)
-            if group_key == "test_anomaly" and len(roots) > 1:
-                ground_truth_relative = Path(image_root.name) / ground_truth_relative
             samples.append(
                 {
                     "group_key": group_key,
                     "group_label": dict(GROUPS)[group_key],
                     "image_path": image_path,
                     "image_root": image_root,
-                    "ground_truth_relative": ground_truth_relative,
+                    "ground_truth_relative": ground_truth_relative_path(
+                        group_key,
+                        image_path,
+                        image_root,
+                        len(roots),
+                    ),
                     "score_path": score_path,
                     "feature_path": feature_path,
                     "before_score": float(score_map.max()),
@@ -454,118 +334,6 @@ def prepare_samples(
                 }
             )
     return samples
-
-
-def score_values_by_group(
-    samples: Sequence[Dict],
-    key: str = "before_score",
-) -> Dict[str, List[float]]:
-    values = {display: [] for _, display in GROUPS}
-    for sample in samples:
-        values[sample["group_label"]].append(float(sample[key]))
-    return {label: scores for label, scores in values.items() if scores}
-
-
-def common_grid(groups: Dict[str, List[float]], bins: int) -> np.ndarray:
-    values = [
-        value
-        for scores in groups.values()
-        for value in scores
-    ]
-    if not values:
-        raise ValueError("No values are available for plotting.")
-    low = float(min(values))
-    high = float(max(values))
-    if high <= low:
-        margin = max(abs(low) * 0.05, 1e-6)
-        low -= margin
-        high += margin
-    return np.linspace(low, high, max(256, int(bins) * 8))
-
-
-def kde_density(values: Sequence[float], grid: np.ndarray) -> np.ndarray:
-    values_array = np.asarray(values, dtype=np.float64)
-    values_array = values_array[np.isfinite(values_array)]
-    if values_array.size == 0:
-        return np.zeros_like(grid, dtype=np.float64)
-
-    standard_deviation = float(np.std(values_array))
-    interquartile_range = float(
-        np.percentile(values_array, 75)
-        - np.percentile(values_array, 25)
-    )
-    scale = min(
-        standard_deviation,
-        interquartile_range / 1.34,
-    ) if interquartile_range > 0 else standard_deviation
-    data_range = max(float(grid[-1] - grid[0]), 1e-12)
-    bandwidth = 0.9 * scale * values_array.size ** -0.2
-    if not np.isfinite(bandwidth) or bandwidth <= 1e-12:
-        bandwidth = data_range / 50.0
-
-    density = np.zeros_like(grid, dtype=np.float64)
-    normalizer = bandwidth * np.sqrt(2.0 * np.pi)
-    chunk_size = 4096
-    for start in range(0, values_array.size, chunk_size):
-        chunk = values_array[start : start + chunk_size]
-        distance = (grid[:, None] - chunk[None, :]) / bandwidth
-        density += np.exp(-0.5 * distance * distance).sum(axis=1)
-    density /= values_array.size * normalizer
-    return density
-
-
-def plot_group_density(
-    axis,
-    groups: Dict[str, List[float]],
-    grid: np.ndarray,
-    title: str,
-    threshold: Optional[float] = None,
-    xlabel: str = "Anomaly Score",
-    bins: int = 30,
-    color_overrides: Optional[Dict[str, str]] = None,
-) -> None:
-    histogram_values = []
-    histogram_labels = []
-    histogram_colors = []
-    for label, values in groups.items():
-        if not values:
-            continue
-        values_array = np.asarray(values, dtype=np.float64)
-        values_array = values_array[np.isfinite(values_array)]
-        if values_array.size == 0:
-            continue
-        histogram_values.append(values_array)
-        histogram_labels.append(f"{label} (n={values_array.size})")
-        histogram_colors.append(
-            (color_overrides or {}).get(
-                label,
-                COLORS.get(label, "steelblue"),
-            )
-        )
-
-    if histogram_values:
-        axis.hist(
-            histogram_values,
-            bins=max(1, int(bins)),
-            alpha=0.35,
-            edgecolor="none",
-            color=histogram_colors,
-            label=histogram_labels,
-        )
-        axis.set_xlim(float(grid[0]), float(grid[-1]))
-    if threshold is not None:
-        axis.axvline(
-            threshold,
-            color="black",
-            linestyle="--",
-            linewidth=1.5,
-            label=f"threshold={threshold:.6f}",
-        )
-    axis.set_title(title)
-    axis.set_xlabel(xlabel)
-    axis.set_ylabel("Count")
-    axis.grid(True, alpha=0.3)
-    axis.legend()
 
 
 def plot_distance_distribution(
@@ -691,90 +459,6 @@ def plot_score_comparison(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(figure)
-
-
-def distribution_valley_threshold(
-    normal_scores: Sequence[float],
-    anomaly_scores: Sequence[float],
-    bins: int,
-) -> Tuple[Optional[float], str]:
-    """Find the valley between normal and anomaly score distributions."""
-
-    normal = np.asarray(normal_scores, dtype=np.float64)
-    anomaly = np.asarray(anomaly_scores, dtype=np.float64)
-    normal = normal[np.isfinite(normal)]
-    anomaly = anomaly[np.isfinite(anomaly)]
-    if normal.size == 0 or anomaly.size == 0:
-        return None, "missing-normal-or-anomaly"
-
-    values = np.concatenate((normal, anomaly))
-    low = float(values.min())
-    high = float(values.max())
-    if high <= low:
-        return low, "constant-distribution"
-
-    grid = common_grid(
-        {"normal": normal.tolist(), "anomaly": anomaly.tolist()},
-        bins,
-    )
-    normal_density = kde_density(normal, grid)
-    anomaly_density = kde_density(anomaly, grid)
-    combined_density = normal_density + anomaly_density
-
-    normal_peak = int(np.argmax(normal_density))
-    anomaly_peak = int(np.argmax(anomaly_density))
-    left_peak, right_peak = sorted((normal_peak, anomaly_peak))
-    if right_peak - left_peak >= 2:
-        valley_start = left_peak + 1
-        valley_end = right_peak - 1
-        valley_index = valley_start + int(
-            np.argmin(combined_density[valley_start : valley_end + 1])
-        )
-        return (
-            float(grid[valley_index]),
-            "distribution-valley",
-        )
-
-    # If the two modes overlap, use the largest empty/low-density gap as the
-    # closest available valley rather than a percentile threshold.
-    sorted_values = np.sort(values)
-    gaps = np.diff(sorted_values)
-    if gaps.size:
-        gap_index = int(np.argmax(gaps))
-        if gaps[gap_index] > 0:
-            return (
-                float((sorted_values[gap_index] + sorted_values[gap_index + 1]) / 2.0),
-                "distribution-largest-gap",
-            )
-
-    return float((np.median(normal) + np.median(anomaly)) / 2.0), (
-        "distribution-median-midpoint"
-    )
-
-
-def choose_threshold(
-    groups: Dict[str, List[float]],
-    explicit: Optional[float],
-    bins: int,
-) -> Tuple[float, str]:
-    if explicit is not None:
-        return float(explicit), "manual"
-
-    normal_scores = groups.get("Train / Good", []) + groups.get(
-        "Test / Good", []
-    )
-    anomaly_scores = groups.get("Test / Anomaly", [])
-    threshold, method = distribution_valley_threshold(
-        normal_scores,
-        anomaly_scores,
-        bins,
-    )
-    if threshold is None:
-        raise RuntimeError(
-            "Cannot choose an automatic threshold: both normal and anomaly "
-            "score distributions are required. Pass the threshold explicitly."
-        )
-    return threshold, method
 
 
 def mask_components(mask: np.ndarray, min_area: int = 1):
@@ -1278,55 +962,6 @@ def visualization_path(
     return path
 
 
-def save_fused_heatmap(
-    score_map: np.ndarray,
-    image_path: Path,
-    output_path: Path,
-    reference_min: float,
-    reference_max: float,
-    source_image: Optional[np.ndarray] = None,
-) -> None:
-    score_map = np.asarray(score_map, dtype=np.float32)
-    image = (
-        source_image
-        if source_image is not None
-        else cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-    )
-    if image is None:
-        raise OSError(f"Cannot read source image: {image_path}")
-
-    image_height, image_width = image.shape[:2]
-    if score_map.shape != (image_height, image_width):
-        zero_mask = cv2.resize(
-            (score_map == 0).astype(np.uint8),
-            (image_width, image_height),
-            interpolation=cv2.INTER_NEAREST,
-        ).astype(bool)
-        score_map = cv2.resize(
-            score_map,
-            (image_width, image_height),
-            interpolation=cv2.INTER_LINEAR,
-        )
-    else:
-        zero_mask = score_map == 0
-
-    if reference_max <= reference_min:
-        normalized = np.zeros(score_map.shape, dtype=np.uint8)
-    else:
-        normalized = np.clip(
-            (score_map - reference_min)
-            / (reference_max - reference_min)
-            * 255.0,
-            0.0,
-            255.0,
-        ).astype(np.uint8)
-    heatmap = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
-    fused = cv2.addWeighted(image, 0.5, heatmap, 0.5, 0.0)
-    fused[zero_mask] = image[zero_mask]
-    if not cv2.imwrite(str(output_path), fused):
-        raise OSError(f"Cannot write heatmap: {output_path}")
-
-
 def save_visualization_payload(payload: Dict) -> None:
     score_map = np.asarray(
         np.load(payload["score_path"]),
@@ -1488,70 +1123,6 @@ def save_roi_visualizations_and_report(
                         "filter_status": "kept" if kept else "filtered",
                     }
                 )
-
-
-def find_ground_truth_path(
-    sample: Dict,
-    ground_truth_dir: Path,
-) -> Optional[Path]:
-    image_path = sample["image_path"]
-    image_root = sample["image_root"]
-    relative = Path(
-        sample.get(
-            "ground_truth_relative",
-            image_path.relative_to(image_root),
-        )
-    )
-    extensions = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
-    candidates = []
-    for extension in extensions:
-        candidates.extend(
-            [
-                ground_truth_dir / relative.with_suffix(extension),
-                ground_truth_dir / f"{image_path.stem}{extension}",
-                ground_truth_dir / f"{image_path.stem}_mask{extension}",
-            ]
-        )
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    matches = []
-    for extension in extensions:
-        matches.extend(ground_truth_dir.rglob(f"{image_path.stem}{extension}"))
-        matches.extend(
-            ground_truth_dir.rglob(f"{image_path.stem}_mask{extension}")
-        )
-    matches = sorted(set(matches), key=lambda path: str(path).lower())
-    return matches[0] if matches else None
-
-
-def load_ground_truth(
-    sample: Dict,
-    ground_truth_dir: Optional[Path],
-    shape: Tuple[int, int],
-) -> np.ndarray:
-    if sample["group_key"] == "test_good":
-        return np.zeros(shape, dtype=np.uint8)
-    if ground_truth_dir is None:
-        raise FileNotFoundError(
-            "Ground-truth directory is required for Test/anomaly pixel metrics."
-        )
-    ground_truth_path = find_ground_truth_path(sample, ground_truth_dir)
-    if ground_truth_path is None:
-        raise FileNotFoundError(
-            f"Ground-truth mask not found for {sample['image_path']}. "
-            f"Search root: {ground_truth_dir}"
-        )
-    mask = cv2.imread(str(ground_truth_path), cv2.IMREAD_GRAYSCALE)
-    if mask is None:
-        raise ValueError(f"Cannot read ground-truth mask: {ground_truth_path}")
-    if mask.shape != shape:
-        mask = cv2.resize(
-            mask,
-            (shape[1], shape[0]),
-            interpolation=cv2.INTER_NEAREST,
-        )
-    return np.asarray(mask > 0, dtype=np.uint8)
 
 
 def safe_auroc(labels: np.ndarray, scores: np.ndarray) -> float:
