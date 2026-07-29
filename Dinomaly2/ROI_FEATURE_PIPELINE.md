@@ -199,6 +199,24 @@ python dinomaly_score_visualization.py --data_root /data/dataset --model /data/t
 
 该入口生成 `score_distribution.png`，前 3 个子图分别是
 Train/Good、Test/Good、Test/Anomaly 的图像最大分数分布；第 4 个子图是
-Test/Anomaly 图像中 GT 非零区域的像素分数分布。四个子图使用相同的 X 轴，
-直方图统计数量而不是比例。未找到 `ground_truth` 时第 4 个子图为空，不影响
-分数图推理和前三个子图。
+Test/Anomaly 图像中每个 GT 连通区域的最大分数分布。四个子图使用相同的 X 轴，
+直方图统计数量而不是比例。`score_values.csv` 还会为每张有 GT 区域的异常图
+追加 `Test / GT` 行，记录该图 GT 区域最大分数。未找到 `ground_truth` 时第 4 个
+子图和评估指标为空，不影响分数图推理和前三个子图。
+
+## 八、复用已生成 score map 的独立评估
+
+如果已经运行过 `dinomaly_score_visualization.py`，可以直接读取其
+`scores/` 下的 `.npy` 分数图进行评估，不需要再次加载模型或预测：
+
+```bash
+python dinomaly_score_evaluation.py \
+    --data_root /data/dataset \
+    --score_output_dir /data/score_pipeline \
+    --ground_truth_dir /data/dataset/ground_truth
+```
+
+脚本复用 `dinomaly_evaluation.py` 中的同一套
+`I-AUROC`、`I-AP`、`I-F1`、`P-AUROC`、`P-AP`、`P-F1` 和 `P-AUPRO`，
+并将结果写入 `score_output_dir/metrics.json` 和
+`score_output_dir/metrics.csv`。通过 `--output_dir` 可以将指标写到其他目录。
