@@ -34,6 +34,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from sklearn.metrics import (
+    auc,
+    average_precision_score,
+    precision_recall_curve,
+    roc_auc_score,
+)
+from skimage import measure
 from tqdm import tqdm
 
 from dinomaly_pipeline_common import (
@@ -176,11 +183,11 @@ def collect_gt_score_values(
     samples: Sequence[Dict],
     ground_truth_dir: Optional[Path],
 ) -> List[float]:
-    """Collect score-map values inside Test/Anomaly GT regions.
+    """Collect one maximum score for every connected GT anomaly region.
 
     The image-level distributions use one maximum score per image.  This
-    fourth distribution keeps the pixel-level score values whose GT mask is
-    non-zero, so it shows how the model scores the annotated anomaly pixels.
+    fourth distribution uses one maximum score per connected GT region, so
+    large regions do not contribute more samples than small regions.
     """
 
     if ground_truth_dir is None:
@@ -196,13 +203,20 @@ def collect_gt_score_values(
             ground_truth_dir,
             score_map.shape,
         ).astype(bool, copy=False)
-        gt_values = score_map[gt_mask]
-        gt_values = gt_values[np.isfinite(gt_values)]
-        if gt_values.size:
+        labels = measure.label(gt_mask)
+        region_scores: List[float] = []
+        for region_id in range(1, int(labels.max()) + 1):
+            region_values = score_map[labels == region_id]
+            region_values = region_values[np.isfinite(region_values)]
+            if region_values.size:
+                region_scores.append(float(region_values.max()))
+        if region_scores:
             # Keep the per-image maximum for the CSV's Test / GT group while
-            # retaining every GT-pixel value for the distribution plot.
-            sample["gt_score"] = float(gt_values.max())
-            values.extend(gt_values.tolist())
+            # using one maximum score per connected region in the plot.
+            sample["gt_score"] = max(region_scores)
+            sample["gt_region_scores"] = region_scores
+            sample["gt_region_count"] = len(region_scores)
+            values.extend(region_scores)
     return values
 
 
@@ -213,7 +227,7 @@ def plot_score_distribution(
     bins: int,
     gt_score_values: Optional[Sequence[float]] = None,
 ) -> None:
-    gt_label = "Test / Anomaly / GT pixels"
+    gt_label = "Test / Anomaly / GT regions"
     plot_groups = dict(groups)
     plot_groups[gt_label] = (
         list(gt_score_values) if gt_score_values is not None else []
@@ -234,10 +248,10 @@ def plot_score_distribution(
         axes[3],
         {gt_label: plot_groups[gt_label]},
         grid,
-        "Test / Anomaly / GT anomaly pixels",
+        "Test / Anomaly / GT region maximum scores",
         threshold,
         bins=bins,
-        xlabel="Dinomaly2 pixel anomaly score",
+        xlabel="Dinomaly2 region maximum anomaly score",
         color_overrides={gt_label: "crimson"},
     )
     axes[-1].set_xlabel("Dinomaly2 anomaly score")
@@ -385,6 +399,242 @@ def save_score_table(samples: Sequence[Dict], output_path: Path) -> None:
                 )
 
 
+def safe_auroc(labels: np.ndarray, scores: np.ndarray) -> float:
+    try:
+        return float(roc_auc_score(labels, scores))
+    except ValueError:
+        return float("nan")
+
+
+def safe_ap(labels: np.ndarray, scores: np.ndarray) -> float:
+    try:
+        return float(average_precision_score(labels, scores))
+    except ValueError:
+        return float("nan")
+
+
+def max_f1(labels: np.ndarray, scores: np.ndarray) -> float:
+    try:
+        precision, recall, _ = precision_recall_curve(labels, scores)
+    except ValueError:
+        return float("nan")
+    f1 = 2.0 * precision * recall / (precision + recall + 1e-7)
+    return float(np.nanmax(f1))
+
+
+def safe_aupro(masks: np.ndarray, scores: np.ndarray) -> float:
+    if not np.any(masks):
+        return float("nan")
+    if float(scores.max()) <= float(scores.min()):
+        return 0.0
+    try:
+        return float(compute_pro_fast(masks.astype(np.uint8), scores))
+    except (AssertionError, ValueError, ZeroDivisionError):
+        return float("nan")
+
+
+def compute_pro_fast(
+    masks: np.ndarray,
+    amaps: np.ndarray,
+    num_th: int = 200,
+) -> float:
+    """Vectorized equivalent of the ROI pipeline's PRO implementation."""
+
+    masks = np.asarray(masks)
+    amaps = np.asarray(amaps)
+    if masks.ndim != 3 or amaps.ndim != 3 or masks.shape != amaps.shape:
+        raise ValueError("masks and amaps must be equally shaped 3D arrays")
+    if set(np.unique(masks).tolist()) != {0, 1}:
+        raise AssertionError("masks must contain exactly 0 and 1")
+    if not isinstance(num_th, int) or num_th <= 0:
+        raise ValueError("num_th must be a positive integer")
+
+    region_labels = []
+    region_areas = []
+    for mask in masks:
+        labels = measure.label(mask)
+        areas = np.bincount(labels.reshape(-1))[1:].astype(np.float64)
+        region_labels.append(labels)
+        region_areas.append(areas)
+
+    min_th = amaps.min()
+    max_th = amaps.max()
+    delta = (max_th - min_th) / num_th
+    if delta <= 0:
+        return 0.0
+
+    inverse_pixels = np.logical_not(masks.astype(bool))
+    inverse_count = int(inverse_pixels.sum())
+    total_regions = sum(len(areas) for areas in region_areas)
+    if total_regions == 0 or inverse_count == 0:
+        return float("nan")
+
+    thresholds = np.arange(min_th, max_th, delta)
+    pro_sums = np.zeros(thresholds.shape, dtype=np.float64)
+    false_positive_counts = np.zeros(thresholds.shape, dtype=np.int64)
+
+    for label_map, areas, amap, inverse_mask in tqdm(
+        zip(region_labels, region_areas, amaps, inverse_pixels),
+        total=len(amaps),
+        desc="Compute PRO",
+        unit="image",
+        dynamic_ncols=True,
+        leave=False,
+    ):
+        outside_values = np.sort(amap[inverse_mask])
+        false_positive_counts += (
+            outside_values.size
+            - np.searchsorted(outside_values, thresholds, side="right")
+        )
+        for region_id, area in enumerate(areas, start=1):
+            region_values = np.sort(amap[label_map == region_id])
+            hits = region_values.size - np.searchsorted(
+                region_values,
+                thresholds,
+                side="right",
+            )
+            pro_sums += hits / area
+
+    pros = pro_sums / total_regions
+    fprs = false_positive_counts / inverse_count
+    valid = fprs < 0.3
+    if not np.any(valid):
+        return float("nan")
+    fprs = fprs[valid]
+    pros = pros[valid]
+    max_fpr = fprs.max()
+    if max_fpr <= 0:
+        return float("nan")
+    return float(auc(fprs / max_fpr, pros))
+
+
+def evaluate_stage(
+    samples: Sequence[Dict],
+    ground_truth_dir: Path,
+    metric_size: int,
+) -> Dict[str, float]:
+    """Evaluate raw score maps with the same metrics as the ROI pipeline."""
+
+    evaluation_samples = [
+        sample
+        for sample in samples
+        if sample["group_key"] in {"test_good", "test_anomaly"}
+    ]
+    if not evaluation_samples:
+        raise RuntimeError("No Test/good or Test/anomaly samples were found.")
+
+    image_labels = np.asarray(
+        [sample["group_key"] == "test_anomaly" for sample in evaluation_samples],
+        dtype=np.uint8,
+    )
+    image_scores = np.asarray(
+        [sample["score"] for sample in evaluation_samples],
+        dtype=np.float32,
+    )
+    gt_pixels = []
+    score_pixels = []
+    with tqdm(
+        evaluation_samples,
+        desc="Evaluate score maps",
+        unit="image",
+        dynamic_ncols=True,
+    ) as progress:
+        for sample in progress:
+            score_map = load_score_map(Path(sample["score_path"]))
+            original_shape = score_map.shape
+            gt_mask = load_ground_truth(
+                sample,
+                ground_truth_dir,
+                original_shape,
+            )
+            score_map = cv2.resize(
+                score_map,
+                (metric_size, metric_size),
+                interpolation=cv2.INTER_LINEAR,
+            )
+            gt_mask = cv2.resize(
+                gt_mask,
+                (metric_size, metric_size),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            gt_pixels.append(gt_mask)
+            score_pixels.append(score_map)
+
+    gt_pixels_array = np.stack(gt_pixels, axis=0)
+    score_pixels_array = np.stack(score_pixels, axis=0)
+    pixel_labels = gt_pixels_array.reshape(-1)
+    pixel_scores = score_pixels_array.reshape(-1)
+    return {
+        "I-AUROC": safe_auroc(image_labels, image_scores),
+        "I-AP": safe_ap(image_labels, image_scores),
+        "I-F1": max_f1(image_labels, image_scores),
+        "P-AUROC": safe_auroc(pixel_labels, pixel_scores),
+        "P-AP": safe_ap(pixel_labels, pixel_scores),
+        "P-F1": max_f1(pixel_labels, pixel_scores),
+        "P-AUPRO": safe_aupro(gt_pixels_array, score_pixels_array),
+    }
+
+
+def print_and_save_metrics(
+    metrics: Dict[str, float],
+    output_dir: Path,
+) -> None:
+    """Print and save metrics using the ROI pipeline's table format."""
+
+    metric_names = [
+        "I-AUROC",
+        "I-AP",
+        "I-F1",
+        "P-AUROC",
+        "P-AP",
+        "P-F1",
+        "P-AUPRO",
+    ]
+    result = {"score_maps": metrics}
+    with (output_dir / "metrics.json").open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            result,
+            file,
+            ensure_ascii=False,
+            indent=2,
+            allow_nan=True,
+        )
+    with (output_dir / "metrics.csv").open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=["stage"] + metric_names,
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "stage": "score_maps",
+                **{
+                    name: metrics.get(name, float("nan"))
+                    for name in metric_names
+                },
+            }
+        )
+
+    print("\nEvaluation metrics")
+    print(
+        "stage                         "
+        + "  ".join(f"{name:>10}" for name in metric_names)
+    )
+    values = "  ".join(
+        f"{metrics.get(name, float('nan')):10.6f}"
+        for name in metric_names
+    )
+    print(f"{'score_maps':<29}{values}")
+    print()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Dinomaly2 score map, automatic threshold, heatmap and mask pipeline.",
@@ -476,6 +726,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="分布图直方图 bin 数以及自动阈值搜索分辨率基数。",
     )
     parser.add_argument(
+        "--metric_size",
+        type=int,
+        default=256,
+        help="计算评估指标前统一缩放到的正方形边长；与 ROI pipeline 默认值一致。",
+    )
+    parser.add_argument(
         "--score_threshold",
         type=float,
         default=None,
@@ -518,6 +774,8 @@ def main(argv=None) -> int:
         raise ValueError("crop_size must not be greater than image_size.")
     if args.bins < 1:
         raise ValueError("bins must be positive.")
+    if args.metric_size < 1:
+        raise ValueError("metric_size must be positive.")
     if args.vis_workers < 1:
         raise ValueError("vis_workers must be positive.")
 
@@ -608,7 +866,10 @@ def main(argv=None) -> int:
     else:
         LOGGER.info("Collecting GT score distribution from %s", ground_truth_dir)
     gt_score_values = collect_gt_score_values(samples, ground_truth_dir)
-    LOGGER.info("GT anomaly pixel scores: %d", len(gt_score_values))
+    LOGGER.info(
+        "GT anomaly region maximum scores: %d regions",
+        len(gt_score_values),
+    )
 
     plot_score_distribution(
         score_groups,
@@ -630,11 +891,24 @@ def main(argv=None) -> int:
                     label: len(values)
                     for label, values in score_groups.items()
                 },
-                "gt_anomaly_pixel_score_count": len(gt_score_values),
+                "gt_anomaly_region_score_count": len(gt_score_values),
             },
             file,
             ensure_ascii=False,
             indent=2,
+        )
+
+    if ground_truth_dir is not None:
+        print("Evaluating score maps...", flush=True)
+        metrics = evaluate_stage(
+            samples,
+            ground_truth_dir,
+            args.metric_size,
+        )
+        print_and_save_metrics(metrics, output_dir)
+    else:
+        LOGGER.info(
+            "Evaluation metrics skipped; no ground-truth directory found."
         )
 
     if args.save_visualizations:
