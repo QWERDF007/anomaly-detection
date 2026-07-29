@@ -37,7 +37,11 @@ import torch
 from skimage import measure
 from tqdm import tqdm
 
-from dinomaly_evaluation import evaluate_stage, print_and_save_metrics
+from dinomaly_evaluation import (
+    evaluate_stage,
+    print_and_save_metrics,
+    write_per_image_pixel_metrics,
+)
 from dinomaly_pipeline_common import (
     GROUPS,
     artifact_root,
@@ -659,15 +663,25 @@ def main(argv=None) -> int:
 
     if ground_truth_dir is not None:
         print("Evaluating score maps...", flush=True)
+        pixel_metric_records: List[Dict[str, object]] = []
         metrics = evaluate_stage(
             samples,
             ground_truth_dir,
             args.metric_size,
             score_map_key="score_path",
-            image_score_key="score",
             stage_name="score maps",
+            per_image_records=pixel_metric_records,
         )
         print_and_save_metrics({"score_maps": metrics}, output_dir)
+        write_per_image_pixel_metrics(
+            pixel_metric_records,
+            output_dir / "pixel_metrics.csv",
+        )
+        print(
+            f"Per-image pixel metrics written to "
+            f"{output_dir / 'pixel_metrics.csv'}",
+            flush=True,
+        )
     else:
         LOGGER.info(
             "Evaluation metrics skipped; no ground-truth directory found."

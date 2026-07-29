@@ -2,7 +2,9 @@
 
 The score maps are expected to come from ``dinomaly_score_visualization.py``.
 This entry point only resolves dataset metadata, loads the cached ``.npy``
-maps and computes the shared image- and pixel-level metrics.
+maps and computes the shared image- and pixel-level metrics.  It prints the
+aggregate metrics and writes per-image pixel metrics to ``pixel_metrics.csv``
+under the score output directory.
 """
 
 from __future__ import annotations
@@ -10,7 +12,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from dinomaly_evaluation import evaluate_stage, print_metrics
+from dinomaly_evaluation import (
+    evaluate_stage,
+    print_metrics,
+    write_per_image_pixel_metrics,
+)
 from dinomaly_pipeline_common import (
     collect_cached_score_samples,
     find_child_directory,
@@ -114,15 +120,19 @@ def main(argv=None) -> int:
         flush=True,
     )
     samples = collect_cached_score_samples(groups, score_output_dir)
+    pixel_metric_records = []
     metrics = evaluate_stage(
         samples,
         ground_truth_dir,
         args.metric_size,
         score_map_key="score_path",
-        image_score_key="score",
         stage_name="score maps",
+        per_image_records=pixel_metric_records,
     )
     print_metrics({"score_maps": metrics})
+    pixel_metrics_path = score_output_dir / "pixel_metrics.csv"
+    write_per_image_pixel_metrics(pixel_metric_records, pixel_metrics_path)
+    print(f"Per-image pixel metrics written to {pixel_metrics_path}", flush=True)
     print(
         f"Done. evaluated score maps for {len(samples)} images.",
         flush=True,

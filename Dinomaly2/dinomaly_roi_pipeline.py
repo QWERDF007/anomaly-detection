@@ -46,7 +46,11 @@ from skimage import measure
 from tqdm import tqdm
 from torchvision.ops import roi_align
 
-from dinomaly_evaluation import evaluate_stage, print_and_save_metrics
+from dinomaly_evaluation import (
+    evaluate_stage,
+    print_and_save_metrics,
+    write_per_image_pixel_metrics,
+)
 from dinomaly_pipeline_common import (
     GROUPS,
     artifact_root,
@@ -1472,14 +1476,15 @@ def main(argv=None) -> int:
     else:
         LOGGER.info("Visualization output disabled; pass --vis to enable")
     after_groups = score_values_by_group(samples, "after_score")
+    pixel_metric_records: List[Dict[str, object]] = []
     print("Evaluating before filtering...", flush=True)
     before_metrics = evaluate_stage(
         samples,
         ground_truth_dir,
         metric_size=args.metric_size,
         score_map_key="score_path",
-        image_score_key="before_score",
         stage_name="before filtering",
+        per_image_records=pixel_metric_records,
     )
     print("Evaluating after filtering...", flush=True)
     after_metrics = evaluate_stage(
@@ -1487,8 +1492,8 @@ def main(argv=None) -> int:
         ground_truth_dir,
         metric_size=args.metric_size,
         score_map_key="filtered_score_map",
-        image_score_key="after_score",
         stage_name="after filtering",
+        per_image_records=pixel_metric_records,
     )
     print_and_save_metrics(
         {
@@ -1496,6 +1501,12 @@ def main(argv=None) -> int:
             "after_distance_filtering": after_metrics,
         },
         output_dir,
+    )
+    pixel_metrics_path = output_dir / "pixel_metrics.csv"
+    write_per_image_pixel_metrics(pixel_metric_records, pixel_metrics_path)
+    print(
+        f"Per-image pixel metrics written to {pixel_metrics_path}",
+        flush=True,
     )
     plot_score_comparison(
         before_groups,

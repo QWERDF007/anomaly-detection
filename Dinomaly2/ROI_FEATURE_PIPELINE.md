@@ -115,6 +115,7 @@ Dinomaly2 模型，也不会重复推理。第一次运行或缓存不完整时�
 ├── distance_distribution.png
 ├── score_distribution_comparison.png
 ├── score_values.csv
+├── pixel_metrics.csv
 ├── roi_filter_report.csv
 ├── visualizations/
 │   ├── before/
@@ -218,4 +219,10 @@ python dinomaly_score_evaluation.py \
 
 脚本复用 `dinomaly_evaluation.py` 中的同一套
 `I-AUROC`、`I-AP`、`I-F1`、`P-AUROC`、`P-AP`、`P-F1` 和 `P-AUPRO`，
-并直接在终端打印评估结果，不写出 `metrics.json` 或 `metrics.csv`。
+并直接在终端打印汇总评估结果。除此之外，会在输入的
+`score_output_dir` 下写出 `pixel_metrics.csv`，其中每行对应一张测试图像，
+记录 `P-AUROC`、`P-AP`、`P-F1` 和 `P-AUPRO`。正常图像没有正 GT 区域，
+其无法定义的像素指标以 `nan` 记录。
+
+图像级分数和训练代码保持一致，使用评估图中最高 1% 像素分数的均值，
+而不是单个最大像素值。像素指标仍按训练评估流程在测试集像素上统一计算。
