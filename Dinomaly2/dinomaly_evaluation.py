@@ -253,6 +253,25 @@ def evaluate_stage(
     }
 
 
+def print_metrics(
+    results: Mapping[str, Mapping[str, float]],
+) -> None:
+    """Print a metric table without writing any files."""
+
+    print("\nEvaluation metrics")
+    print(
+        "stage                         "
+        + "  ".join(f"{name:>10}" for name in METRIC_NAMES)
+    )
+    for stage, metrics in results.items():
+        values = "  ".join(
+            f"{metrics.get(name, float('nan')):10.6f}"
+            for name in METRIC_NAMES
+        )
+        print(f"{stage:<29}{values}")
+    print()
+
+
 def print_and_save_metrics(
     results: Mapping[str, Mapping[str, float]],
     output_dir: Path,
@@ -294,15 +313,4 @@ def print_and_save_metrics(
                 }
             )
 
-    print("\nEvaluation metrics")
-    print(
-        "stage                         "
-        + "  ".join(f"{name:>10}" for name in METRIC_NAMES)
-    )
-    for stage, metrics in result.items():
-        values = "  ".join(
-            f"{metrics.get(name, float('nan')):10.6f}"
-            for name in METRIC_NAMES
-        )
-        print(f"{stage:<29}{values}")
-    print()
+    print_metrics(result)

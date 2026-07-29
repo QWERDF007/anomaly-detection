@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from dinomaly_evaluation import evaluate_stage, print_and_save_metrics
+from dinomaly_evaluation import evaluate_stage, print_metrics
 from dinomaly_pipeline_common import (
     collect_cached_score_samples,
     find_child_directory,
@@ -55,13 +55,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "-o",
-        "--output_dir",
-        type=Path,
-        default=None,
-        help="评估结果输出目录；默认写回 score_output_dir。",
-    )
-    parser.add_argument(
         "-gt",
         "--ground_truth_dir",
         type=Path,
@@ -85,11 +78,6 @@ def main(argv=None) -> int:
 
     data_root = args.data_root.expanduser().resolve()
     score_output_dir = args.score_output_dir.expanduser().resolve()
-    output_dir = (
-        args.output_dir.expanduser().resolve()
-        if args.output_dir is not None
-        else score_output_dir
-    )
     if not data_root.is_dir():
         raise FileNotFoundError(f"Data root does not exist: {data_root}")
     if not score_output_dir.is_dir():
@@ -134,10 +122,9 @@ def main(argv=None) -> int:
         image_score_key="score",
         stage_name="score maps",
     )
-    print_and_save_metrics({"score_maps": metrics}, output_dir)
+    print_metrics({"score_maps": metrics})
     print(
-        f"Done. evaluated score maps for {len(samples)} images; "
-        f"metrics={output_dir}",
+        f"Done. evaluated score maps for {len(samples)} images.",
         flush=True,
     )
     return 0

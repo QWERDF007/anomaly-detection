@@ -218,5 +218,4 @@ python dinomaly_score_evaluation.py \
 
 脚本复用 `dinomaly_evaluation.py` 中的同一套
 `I-AUROC`、`I-AP`、`I-F1`、`P-AUROC`、`P-AP`、`P-F1` 和 `P-AUPRO`，
-并将结果写入 `score_output_dir/metrics.json` 和
-`score_output_dir/metrics.csv`。通过 `--output_dir` 可以将指标写到其他目录。
+并直接在终端打印评估结果，不写出 `metrics.json` 或 `metrics.csv`。
