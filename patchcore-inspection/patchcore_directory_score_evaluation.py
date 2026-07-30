@@ -165,14 +165,14 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "每个 data_root 子目录必须有 images/，masks/ 可省略，省略即正常样本。\n"
             "score_output_dir 可指定一个或多个目录，脚本递归查找 .npy/.npz 并按图像 stem 匹配。\n"
-            "图像分数统一按分数图最高 1% 像素均值计算；不读取侧车元数据文件。"
+            "图像分数统一按分数图最高 1% 像素均值计算"
         ),
     )
     parser.add_argument("-i", "--data_root", type=Path, required=True)
     parser.add_argument("-s", "--score_output_dir", "--score_dir", type=Path, nargs="+", action="append", required=True)
     parser.add_argument("-o", "--output_dir", type=Path, default=None)
-    parser.add_argument("--resize", type=int, default=None, help="可选的 GT 变换 Resize；需同时指定 --imagesize。")
-    parser.add_argument("--imagesize", "--crop_size", dest="imagesize", type=int, default=None, help="可选的 GT 变换 CenterCrop。")
+    parser.add_argument("-imgsz", dest="resize", type=int, default=None, help="可选的 GT 变换 Resize；需同时指定 -csz。")
+    parser.add_argument("-csz", dest="imagesize", type=int, default=None, help="可选的 GT 变换 CenterCrop。")
     parser.add_argument("--metric_size", type=int, default=256, help="计算指标前统一缩放到的正方形边长（默认：256）。")
     parser.add_argument("--score_threshold", type=float, default=None, help="图像判定阈值；不指定时在所有子目录上按最大平衡准确率自动选择。")
     return parser
@@ -183,7 +183,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.metric_size is not None and args.metric_size < 1:
         raise ValueError("metric_size must be positive")
     if (args.resize is None) != (args.imagesize is None):
-        raise ValueError("--resize and --imagesize must be given together")
+        raise ValueError("-imgsz and -csz must be given together")
     if args.resize is not None and (args.resize < 1 or args.imagesize < 1):
         raise ValueError("resize and imagesize must be positive")
     data_root = args.data_root.expanduser().resolve()
