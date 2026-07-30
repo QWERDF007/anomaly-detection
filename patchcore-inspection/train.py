@@ -28,6 +28,7 @@ from typing import Dict, List, Optional, Sequence
 import torch
 
 from patchcore_evaluation import (
+    METRIC_NAMES,
     compute_evaluation_metrics,
     compute_pro,
     safe_average_precision,
@@ -182,7 +183,16 @@ def _write_predictions(path: Path, dataset, scores) -> None:
 def evaluate(model, dataloader, dataset, output_dir: Path) -> Dict[str, float]:
     scores, segmentations, labels_gt, masks_gt = model.predict(dataloader)
     _write_predictions(output_dir / "predictions.csv", dataset, scores)
-    return _compute_evaluation_metrics(scores, labels_gt, segmentations, masks_gt)
+    # Canonical metrics deliberately derive image scores from the maps rather
+    # than PatchCore's native score, and use Dinomaly2's 256px metric grid.
+    metrics = _compute_evaluation_metrics(
+        scores,
+        labels_gt,
+        segmentations,
+        masks_gt,
+        metric_size=256,
+    )
+    return {name: metrics[name] for name in METRIC_NAMES}
 
 
 def _category_output_name(category: Optional[str], args) -> str:

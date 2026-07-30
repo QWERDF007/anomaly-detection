@@ -7,16 +7,14 @@ The dataset layout follows MVTec AD and the custom PatchCore dataset::
     data_root/test/<anomaly_type>/
     data_root/ground_truth/<anomaly_type>/   # optional
 
-Raw score maps are saved under ``output_dir/scores``.  Every map has a
-``.npy.json`` sidecar containing PatchCore's native image score, allowing
-cache-only evaluation to use exactly the same image-level score as training.
+Raw score maps are saved under ``output_dir/scores``.  Their image scores are
+always recalculated from the maps with Dinomaly2's highest-1% pixel mean, so
+no sidecar metadata is created or consumed.
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
-import json
 import logging
 import sys
 from pathlib import Path
@@ -54,6 +52,7 @@ from patchcore_evaluation import (
     load_score_map,
     region_detection_metrics,
     select_optimal_threshold,
+    training_image_score,
     write_metrics,
     write_per_image_pixel_metrics,
 )
@@ -106,45 +105,6 @@ def _score_path(output_dir: Path, group_key: str, image_root: Path, image_path: 
     return root / image_path.relative_to(image_root).with_suffix(".npy")
 
 
-def _sidecar_path(score_path: Path) -> Path:
-    return score_path.with_suffix(score_path.suffix + ".json")
-
-
-def _load_cached_native_score(score_path: Path) -> Optional[float]:
-    sidecar = _sidecar_path(score_path)
-    if not sidecar.is_file():
-        return None
-    try:
-        with sidecar.open("r", encoding="utf-8") as file:
-            value = float(json.load(file)["image_score"])
-    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
-        return None
-    return value if np.isfinite(value) else None
-
-
-def _save_native_score(
-    score_path: Path,
-    image_score: float,
-    image_path: Path,
-    resize: Optional[int] = None,
-    imagesize: Optional[int] = None,
-) -> None:
-    sidecar = _sidecar_path(score_path)
-    sidecar.parent.mkdir(parents=True, exist_ok=True)
-    with sidecar.open("w", encoding="utf-8") as file:
-        json.dump(
-            {
-                "image_score": float(image_score),
-                "image_path": str(image_path),
-                "resize": resize,
-                "imagesize": imagesize,
-            },
-            file,
-            ensure_ascii=False,
-            indent=2,
-        )
-
-
 def _predict_jobs(models, jobs: Sequence[Tuple[str, Path, Path]], transform):
     """Predict all jobs, then apply the same ensemble aggregation as predict.py.
 
@@ -162,10 +122,10 @@ def _predict_jobs(models, jobs: Sequence[Tuple[str, Path, Path]], transform):
             scores, maps = model.predict(tensor)
             model_scores[index].append(float(scores[0]))
             model_maps[index].append(np.asarray(maps[0], dtype=np.float32))
-    scores, maps = _aggregate_outputs(model_scores, model_maps)
+    _scores, maps = _aggregate_outputs(model_scores, model_maps)
     return [
-        (float(score), np.squeeze(np.asarray(score_map, dtype=np.float32)))
-        for score, score_map in zip(scores, maps)
+        np.squeeze(np.asarray(score_map, dtype=np.float32))
+        for score_map in maps
     ]
 
 
@@ -182,10 +142,8 @@ def prepare_samples(
     models,
     transform,
     force_recompute: bool,
-    resize: int,
-    imagesize: int,
 ) -> List[Dict[str, object]]:
-    """Load cached maps or infer only the individual missing map/score pairs."""
+    """Load cached maps or infer only the individual missing score maps."""
 
     labels = dict(GROUPS)
     samples: List[Dict[str, object]] = []
@@ -193,10 +151,7 @@ def prepare_samples(
     cached = []
     for group_key, image_root, image_path in jobs:
         score_path = _score_path(output_dir, group_key, image_root, image_path)
-        image_score = None if force_recompute else _load_cached_native_score(score_path)
-        cached.append(
-            (score_path.is_file() and image_score is not None, score_path, image_score)
-        )
+        cached.append((score_path.is_file() and not force_recompute, score_path))
 
     # A single PatchCore model can fill only missing cache entries.  An
     # ensemble must recompute all entries when the cache is incomplete because
@@ -211,19 +166,17 @@ def prepare_samples(
     for index, (group_key, image_root, image_path) in enumerate(tqdm(
         jobs, desc="Prepare score cache", unit="image", dynamic_ncols=True
     )):
-        is_cached, score_path, image_score = cached[index]
+        is_cached, score_path = cached[index]
         if recompute_all:
-            image_score, score_map = predictions[index]
+            score_map = predictions[index]
             score_path.parent.mkdir(parents=True, exist_ok=True)
             np.save(score_path, score_map)
-            _save_native_score(score_path, image_score, image_path, resize, imagesize)
         elif is_cached:
             score_map = load_score_map(score_path)
         else:
-            image_score, score_map = _predict_jobs(models, [jobs[index]], transform)[0]
+            score_map = _predict_jobs(models, [jobs[index]], transform)[0]
             score_path.parent.mkdir(parents=True, exist_ok=True)
             np.save(score_path, score_map)
-            _save_native_score(score_path, image_score, image_path, resize, imagesize)
 
         samples.append(
             {
@@ -233,7 +186,6 @@ def prepare_samples(
                 "image_root": image_root,
                 "anomaly_type": image_root.name if group_key == "test_anomaly" else "",
                 "score_path": score_path,
-                "score": float(image_score),
                 "score_map_shape": tuple(score_map.shape),
             }
         )
@@ -323,6 +275,21 @@ def _group_scores(samples: Sequence[Dict[str, object]]) -> Dict[str, List[float]
     return group_score_values(samples)
 
 
+def attach_training_image_scores(
+    samples: Sequence[Dict[str, object]], metric_size: int
+) -> None:
+    """Attach Dinomaly2-compatible highest-1% scores to cached PatchCore maps."""
+
+    for sample in samples:
+        score_map = load_score_map(Path(sample["score_path"]))
+        resized_score = cv2.resize(
+            score_map,
+            (metric_size, metric_size),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        sample["score"] = training_image_score(resized_score)
+
+
 def _choose_threshold(
     samples: Sequence[Dict[str, object]], explicit: Optional[float]
 ) -> Tuple[float, str, Dict[str, float]]:
@@ -353,13 +320,15 @@ def _plot_distribution(
 
 
 def _save_score_table(samples: Sequence[Dict[str, object]], output_path: Path) -> None:
-    write_score_table(samples, output_path, include_score_path=True)
+    # Keep score_values.csv byte-for-byte schema-compatible with Dinomaly2.
+    write_score_table(samples, output_path)
 
 
 def _evaluate(
     samples: Sequence[Dict[str, object]],
     ground_truth_dir: Path,
     mask_transform,
+    metric_size: int,
     pixel_threshold: Optional[float] = None,
 ) -> Tuple[Dict[str, float], List[Dict[str, object]]]:
     labels = []
@@ -378,6 +347,16 @@ def _evaluate(
         else:
             mask_path = None
             gt_mask = np.zeros(score_map.shape, dtype=np.uint8)
+        score_map = cv2.resize(
+            score_map,
+            (metric_size, metric_size),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        gt_mask = cv2.resize(
+            gt_mask,
+            (metric_size, metric_size),
+            interpolation=cv2.INTER_NEAREST,
+        )
         image_label = int(sample["group_key"] == "test_anomaly")
         labels.append(image_label)
         scores.append(float(sample["score"]))
@@ -388,6 +367,7 @@ def _evaluate(
             {
                 "group": sample["group_label"],
                 "image_path": str(sample["image_path"]),
+                "mask_path": str(mask_path) if mask_path is not None else "",
                 "score_path": str(sample["score_path"]),
                 "image_label": image_label,
                 "image_score": float(sample["score"]),
@@ -460,8 +440,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "数据目录：data_root/train/good、data_root/test/good、"
             "data_root/test/<异常类型>，GT 可位于 data_root/ground_truth/<异常类型>。\n"
-            "缓存 .npy 的同名 .npy.json 保存 PatchCore 原生 image score，"
-            "离线评估可与训练的图像指标一致。"
+            "仅缓存 .npy 分数图；图像分数统一为分数图最高 1% 像素均值，"
+            "与 Dinomaly2 的训练、可视化和离线评估一致。"
         ),
     )
     parser.add_argument("-i", "--data_root", required=True, type=Path)
@@ -469,11 +449,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-o", "--output_dir", required=True, type=Path)
     parser.add_argument("-gt", "--ground_truth_dir", type=Path, default=None)
     parser.add_argument("--category", default=None, help="模型含多个类别时选择的类别。")
-    parser.add_argument("-imgsz", dest="resize", type=int, default=None, help="需与训练时 Resize 一致。")
-    parser.add_argument("-csz", dest="imagesize", type=int, default=None, help="需与训练时 CenterCrop 一致。")
+    parser.add_argument("-imgsz", dest="resize", type=int, default=256, help="需与训练时 Resize 一致（默认：256）。")
+    parser.add_argument("-csz", dest="imagesize", type=int, default=None, help="需与训练时 CenterCrop 一致；默认使用模型输入边长。")
     parser.add_argument("--gpu", "--cuda", dest="gpu", type=int, default=0)
     parser.add_argument("--faiss_num_workers", type=int, default=4)
     parser.add_argument("--bins", type=int, default=30)
+    parser.add_argument(
+        "--metric_size",
+        type=int,
+        default=256,
+        help="计算指标前统一缩放到的正方形边长（默认：256）。",
+    )
     parser.add_argument(
         "--score_threshold",
         type=float,
@@ -490,6 +476,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     if args.bins < 1:
         raise ValueError("bins must be positive")
+    if args.metric_size < 1:
+        raise ValueError("metric_size must be positive")
     data_root = args.data_root.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
     if not data_root.is_dir():
@@ -518,8 +506,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         models,
         transform,
         args.force_recompute,
-        resize,
-        imagesize,
     )
     if not samples:
         raise RuntimeError("No images found in the configured dataset groups.")
@@ -527,6 +513,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ground_truth_dir = args.ground_truth_dir.expanduser().resolve() if args.ground_truth_dir else _find_child_directory(data_root, "ground_truth")
     if ground_truth_dir is not None and not ground_truth_dir.is_dir():
         raise FileNotFoundError(f"Ground-truth directory does not exist: {ground_truth_dir}")
+    attach_training_image_scores(samples, args.metric_size)
     gt_scores = collect_gt_scores(samples, ground_truth_dir, mask_transform)
     score_groups = _group_scores(samples)
     threshold, threshold_method, threshold_metrics = _choose_threshold(
@@ -539,7 +526,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         threshold,
         threshold_method,
         threshold_metrics,
-        extra={"score_threshold": threshold, "gt_region_count": len(gt_scores)},
+        extra={
+            "score_threshold": threshold,
+            "groups": {label: len(values) for label, values in score_groups.items()},
+            "gt_anomaly_region_score_count": len(gt_scores),
+        },
     )
 
     if ground_truth_dir is not None:
@@ -547,9 +538,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             samples,
             ground_truth_dir,
             mask_transform,
+            args.metric_size,
             pixel_threshold=args.score_threshold,
         )
-        write_per_image_pixel_metrics(records, output_dir / "pixel_metrics.csv", extra_fields=("group",))
+        write_per_image_pixel_metrics(records, output_dir / "pixel_metrics.csv")
     else:
         metrics = _image_only_metrics(samples)
         LOGGER.info("No ground_truth directory; pixel-level metrics are unavailable.")

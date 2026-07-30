@@ -23,7 +23,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import Dict, List, Mapping, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -50,200 +50,16 @@ from score_workflow_common import (  # noqa: E402
     save_classification_threshold,
     select_optimal_threshold,
     write_metric_report,
-    write_per_image_report,
 )
 from dinomaly_evaluation import (
     METRIC_NAMES,
+    compute_evaluation_metrics,
     evaluate_pixel_metrics,
-    max_f1,
-    safe_ap,
-    safe_aupro,
-    safe_auroc,
     training_image_score,
+    write_per_image_pixel_metrics,
 )
 
-
-IMAGE_EXTENSIONS = {
-    ".bmp",
-    ".jpeg",
-    ".jpg",
-    ".png",
-    ".tif",
-    ".tiff",
-    ".webp",
-}
-MASK_EXTENSIONS = (".png", ".bmp", ".tif", ".tiff", ".jpg", ".jpeg")
-SCORE_EXTENSIONS = (".npy", ".npz")
 REPORT_METRIC_NAMES = report_metric_names(METRIC_NAMES)
-
-
-def _find_child_directory(root: Path, name: str) -> Path | None:
-    for child in root.iterdir():
-        if child.is_dir() and child.name.lower() == name.lower():
-            return child
-    return None
-
-
-def _iter_images(images_dir: Path) -> List[Path]:
-    return sorted(
-        [
-            path
-            for path in images_dir.rglob("*")
-            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
-        ],
-        key=lambda path: str(path).lower(),
-    )
-
-
-def _iter_data_directories(
-    data_root: Path,
-    excluded_directories: Sequence[Path] = (),
-) -> List[Tuple[Path, Path, Path | None]]:
-    excluded = {Path(path).resolve() for path in excluded_directories}
-    directories = []
-    for child in sorted(
-        [path for path in data_root.iterdir() if path.is_dir()],
-        key=lambda path: str(path).lower(),
-    ):
-        if child.resolve() in excluded:
-            continue
-        images_dir = _find_child_directory(child, "images")
-        masks_dir = _find_child_directory(child, "masks")
-        if images_dir is None:
-            raise FileNotFoundError(
-                f"Each data_root child must contain images/: {child}"
-            )
-        if not _iter_images(images_dir):
-            raise RuntimeError(f"No images found in {images_dir}")
-        directories.append((child, images_dir, masks_dir))
-    if not directories:
-        raise RuntimeError(
-            f"No child directories containing images/ found in "
-            f"{data_root}"
-        )
-    return directories
-
-
-def _find_mask(
-    image_path: Path,
-    images_dir: Path,
-    masks_dir: Path | None,
-) -> Path | None:
-    if masks_dir is None:
-        return None
-    relative = image_path.relative_to(images_dir)
-    candidates = [masks_dir / relative.with_suffix(extension) for extension in MASK_EXTENSIONS]
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-
-    stem = image_path.stem.lower()
-    matches = sorted(
-        [
-            path
-            for path in masks_dir.rglob("*")
-            if path.is_file()
-            and path.suffix.lower() in MASK_EXTENSIONS
-            and path.stem.lower() in {stem, f"{stem}_mask", f"{stem}-mask"}
-        ],
-        key=lambda path: str(path).lower(),
-    )
-    if len(matches) == 1:
-        return matches[0]
-    if not matches:
-        raise FileNotFoundError(
-            f"Mask not found for image {image_path} under {masks_dir}"
-        )
-    raise RuntimeError(
-        f"Multiple masks match image {image_path}: "
-        + ", ".join(str(path) for path in matches)
-    )
-
-
-def _score_keys(score_path: Path) -> Iterable[str]:
-    stem = score_path.stem.lower()
-    yield stem
-    for extension in IMAGE_EXTENSIONS:
-        suffix = extension.lower()
-        if stem.endswith(suffix):
-            yield stem[: -len(suffix)]
-
-
-def _build_score_index(score_output_dirs: Sequence[Path]):
-    index: Dict[str, List[Tuple[Path, Path]]] = {}
-    for score_output_dir in score_output_dirs:
-        for score_path in score_output_dir.rglob("*"):
-            if not score_path.is_file() or score_path.suffix.lower() not in SCORE_EXTENSIONS:
-                continue
-            for key in set(_score_keys(score_path)):
-                index.setdefault(key, []).append((score_output_dir, score_path))
-    if not index:
-        raise FileNotFoundError(
-            "No .npy or .npz score maps were found under the configured "
-            "score_output_dir."
-        )
-    return index
-
-
-def _find_score(
-    image_path: Path,
-    data_directory: Path,
-    score_index: Mapping[str, Sequence[Tuple[Path, Path]]],
-) -> Tuple[Path, Path]:
-    matches = list(score_index.get(image_path.stem.lower(), ()))
-    unique = {}
-    for score_output_dir, score_path in matches:
-        unique[score_path.resolve()] = (score_output_dir, score_path)
-    matches = list(unique.values())
-
-    if len(matches) > 1:
-        preferred = [
-            item
-            for item in matches
-            if item[0].name.lower() == data_directory.name.lower()
-            or data_directory.name.lower()
-            in {part.lower() for part in item[1].parts}
-        ]
-        if len(preferred) == 1:
-            matches = preferred
-
-    if not matches:
-        raise FileNotFoundError(
-            f"Score map not found by filename {image_path.name} under the "
-            "configured score_output_dir directories."
-        )
-    if len(matches) > 1:
-        raise RuntimeError(
-            f"Multiple score maps match {image_path.name}; "
-            "use non-overlapping score_output_dir directories or put the "
-            "matching score under a directory named after the data folder:\n"
-            + "\n".join(str(item[1]) for item in matches)
-        )
-    return matches[0][0], matches[0][1]
-
-
-def _load_score(score_path: Path) -> np.ndarray:
-    if score_path.suffix.lower() == ".npz":
-        archive = np.load(score_path)
-        try:
-            if not archive.files:
-                raise ValueError(f"Score archive is empty: {score_path}")
-            score_map = np.asarray(archive[archive.files[0]], dtype=np.float32)
-        finally:
-            archive.close()
-    else:
-        score_map = np.asarray(np.load(score_path), dtype=np.float32)
-    score_map = np.squeeze(score_map)
-    if score_map.ndim != 2:
-        raise ValueError(
-            f"Score map must be 2D: {score_path}; got {score_map.shape}"
-        )
-    return np.nan_to_num(
-        score_map,
-        nan=0.0,
-        posinf=np.finfo(np.float32).max,
-        neginf=0.0,
-    )
 
 
 def _load_mask(mask_path: Path, shape: Tuple[int, int]) -> np.ndarray:
@@ -316,40 +132,18 @@ def _evaluate_directory(
                 "image_label": int(image_label),
                 "image_score": image_score,
                 "gt_positive_pixels": int(resized_gt.astype(bool).sum()),
-                **evaluate_pixel_metrics(
-                    resized_gt,
-                    resized_score,
-                    show_progress=False,
-                ),
+                **evaluate_pixel_metrics(resized_gt, resized_score),
             }
         )
 
     gt_array = np.stack(gt_maps, axis=0)
     score_array = np.stack(score_maps, axis=0)
-    pixel_labels = gt_array.reshape(-1)
-    pixel_scores = score_array.reshape(-1)
-    metrics = {
-        "I-AUROC": safe_auroc(
-            np.asarray(image_labels, dtype=np.uint8),
-            np.asarray(image_scores, dtype=np.float32),
-        ),
-        "I-AP": safe_ap(
-            np.asarray(image_labels, dtype=np.uint8),
-            np.asarray(image_scores, dtype=np.float32),
-        ),
-        "I-F1": max_f1(
-            np.asarray(image_labels, dtype=np.uint8),
-            np.asarray(image_scores, dtype=np.float32),
-        ),
-        "P-AUROC": safe_auroc(pixel_labels, pixel_scores),
-        "P-AP": safe_ap(pixel_labels, pixel_scores),
-        "P-F1": max_f1(pixel_labels, pixel_scores),
-        "P-AUPRO": safe_aupro(
-            gt_array,
-            score_array,
-            show_progress=False,
-        ),
-    }
+    metrics = compute_evaluation_metrics(
+        image_scores,
+        image_labels,
+        score_array,
+        gt_array,
+    )
     return metrics, records, gt_array, score_array
 
 
@@ -360,25 +154,7 @@ def _write_results(
 ) -> None:
     write_metric_report(results, output_dir, METRIC_NAMES, "directory")
 
-    pixel_fields = [
-        "directory",
-        "image_path",
-        "mask_path",
-        "score_path",
-        "image_label",
-        "image_score",
-        "gt_positive_pixels",
-        "gt_region_count",
-        "detected_region_count",
-        "missed_region_count",
-        "P-AUROC",
-        "P-AP",
-        "P-F1",
-        "P-AUPRO",
-        "R-MissRate",
-        "R-PixelCoverage",
-    ]
-    write_per_image_report(records, output_dir / "pixel_metrics.csv", pixel_fields)
+    write_per_image_pixel_metrics(records, output_dir / "pixel_metrics.csv")
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import json
+import warnings
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -279,8 +280,9 @@ def pixel_f1_score_and_threshold(masks, score_maps) -> Tuple[float, float]:
     """Return the pixel P-F1 and its threshold from one PR-curve sweep.
 
     The threshold is selected from every evaluated pixel together, which makes
-    all per-image region metrics comparable.  The terminal PR point without a
-    corresponding threshold is intentionally excluded.
+    all per-image region metrics comparable.  This intentionally matches
+    Dinomaly2 ``f1_score_max``: the terminal PR point without a corresponding
+    threshold is excluded, while a single-class all-normal input reports F1=0.
     """
 
     masks = np.asarray(masks, dtype=np.uint8)
@@ -289,10 +291,12 @@ def pixel_f1_score_and_threshold(masks, score_maps) -> Tuple[float, float]:
         return float("nan"), float("nan")
     labels = (masks > 0).reshape(-1).astype(np.uint8)
     scores = score_maps.reshape(-1)
-    if len(np.unique(labels)) < 2 or not np.all(np.isfinite(scores)):
+    if not np.all(np.isfinite(scores)):
         return float("nan"), float("nan")
     try:
-        precision, recall, thresholds = precision_recall_curve(labels, scores)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            precision, recall, thresholds = precision_recall_curve(labels, scores)
     except ValueError:
         return float("nan"), float("nan")
     if thresholds.size == 0:

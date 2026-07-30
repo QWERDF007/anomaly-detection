@@ -1,3 +1,6 @@
+import sys
+from pathlib import Path
+
 import torch
 
 import numpy as np
@@ -14,6 +17,14 @@ from functools import partial
 import math
 import warnings
 from adeval import EvalAccumulatorCuda
+
+
+_SHARED_UTILS = Path(__file__).resolve().parent.parent / "utils"
+if str(_SHARED_UTILS) not in sys.path:
+    # This module is itself named utils.py, so import the shared module by
+    # filename after adding its directory instead of using ``utils.*``.
+    sys.path.insert(1, str(_SHARED_UTILS))
+from anomaly_evaluation import compute_evaluation_metrics  # noqa: E402
 
 
 def modify_grad(x, inds, factor=0.):
@@ -186,19 +197,23 @@ def evaluation_batch(model, dataloader, device, _class_=None, max_ratio=0, resiz
         gt_list_sp = torch.cat(gt_list_sp).flatten().cpu().numpy()
         pr_list_sp = torch.cat(pr_list_sp).flatten().cpu().numpy()
 
-        aupro_px = compute_pro(gt_list_px, pr_list_px)
+        metrics = compute_evaluation_metrics(
+            pr_list_sp,
+            gt_list_sp,
+            pr_list_px,
+            gt_list_px,
+            image_score_ratio=(max_ratio if max_ratio > 0 else None),
+        )
 
-        gt_list_px, pr_list_px = gt_list_px.ravel(), pr_list_px.ravel()
-
-        auroc_px = roc_auc_score(gt_list_px, pr_list_px)
-        auroc_sp = roc_auc_score(gt_list_sp, pr_list_sp)
-        ap_px = average_precision_score(gt_list_px, pr_list_px)
-        ap_sp = average_precision_score(gt_list_sp, pr_list_sp)
-
-        f1_sp = f1_score_max(gt_list_sp, pr_list_sp)
-        f1_px = f1_score_max(gt_list_px, pr_list_px)
-
-    return [auroc_sp, ap_sp, f1_sp, auroc_px, ap_px, f1_px, aupro_px]
+    return [
+        metrics["I-AUROC"],
+        metrics["I-AP"],
+        metrics["I-F1"],
+        metrics["P-AUROC"],
+        metrics["P-AP"],
+        metrics["P-F1"],
+        metrics["P-AUPRO"],
+    ]
 
 
 def evaluation_batch_noseg(model, dataloader, device, _class_=None, max_ratio=0, resize_mask=None,
@@ -238,12 +253,14 @@ def evaluation_batch_noseg(model, dataloader, device, _class_=None, max_ratio=0,
 
         gt_list_sp = torch.cat(gt_list_sp).flatten().cpu().numpy()
         pr_list_sp = torch.cat(pr_list_sp).flatten().cpu().numpy()
+        metrics = compute_evaluation_metrics(
+            pr_list_sp,
+            gt_list_sp,
+            np.asarray([], dtype=np.float32),
+            np.asarray([], dtype=np.uint8),
+        )
 
-        auroc_sp = roc_auc_score(gt_list_sp, pr_list_sp)
-        ap_sp = average_precision_score(gt_list_sp, pr_list_sp)
-        f1_sp = f1_score_max(gt_list_sp, pr_list_sp)
-
-    return [auroc_sp, ap_sp, f1_sp]
+    return [metrics["I-AUROC"], metrics["I-AP"], metrics["I-F1"]]
 
 
 def evaluation_batch_multiview(model, dataloader, device, _class_=None, max_ratio_image=0, max_ratio_object=0,

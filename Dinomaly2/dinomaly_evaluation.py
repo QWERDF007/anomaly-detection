@@ -1,9 +1,8 @@
-"""Shared evaluation utilities for Dinomaly2 score maps.
+"""Dinomaly2 adapter for the canonical shared anomaly evaluator.
 
-The evaluator operates on already-generated score maps.  It is intentionally
-independent of model construction and inference so score-map pipelines and a
-standalone evaluation entry point can use exactly the same metrics.  Its
-image-level score follows the training evaluator's highest-1% pixel mean.
+The common metric definitions are in ``utils/anomaly_evaluation.py``.  This
+file only resolves Dinomaly2 ground-truth masks and keeps the historical
+``evaluate_stage`` API used by the score and ROI pipelines.
 """
 
 from __future__ import annotations
@@ -14,225 +13,56 @@ from typing import Dict, Mapping, Optional, Sequence
 
 import cv2
 import numpy as np
-from sklearn.metrics import (
-    average_precision_score,
-    auc,
-    precision_recall_curve,
-    roc_auc_score,
-)
-from skimage import measure
 from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parent
-PROJECT_ROOT = ROOT.parent
-SHARED_UTILS = PROJECT_ROOT / "utils"
+SHARED_UTILS = ROOT.parent / "utils"
 if str(SHARED_UTILS) not in sys.path:
+    # Do not use ``from utils...`` here: Dinomaly2 itself has utils.py.
     sys.path.insert(1, str(SHARED_UTILS))
 
-from score_workflow_common import (  # noqa: E402
+from anomaly_evaluation import (  # noqa: E402,F401
     CLASSIFICATION_METRIC_NAMES,
+    METRIC_NAMES,
+    PIXEL_METRIC_NAMES,
+    REPORT_METRIC_NAMES,
+    TRAINING_IMAGE_SCORE_RATIO,
     classification_metrics,
+    compute_evaluation_metrics,
+    compute_pro_fast,
+    evaluate_pixel_metrics,
+    load_score_map,
+    max_f1,
     pixel_f1_score_and_threshold,
     region_detection_metrics,
     report_metric_names,
+    safe_ap,
+    safe_aupro,
+    safe_auroc,
     select_optimal_threshold,
-    write_metric_report,
-    write_per_image_report,
+    training_image_score,
+    write_metrics,
+    write_per_image_pixel_metrics,
 )
-from dinomaly_pipeline_common import load_ground_truth, load_score_map
-
-
-METRIC_NAMES = (
-    "I-AUROC",
-    "I-AP",
-    "I-F1",
-    "P-AUROC",
-    "P-AP",
-    "P-F1",
-    "P-AUPRO",
-)
-
-PIXEL_METRIC_NAMES = (
-    "P-AUROC",
-    "P-AP",
-    "P-F1",
-    "P-AUPRO",
-)
-REPORT_METRIC_NAMES = report_metric_names(METRIC_NAMES)
-
-# This is the same ratio passed to ``evaluation_batch`` by the training
-# entry point (dinomaly_2D.py).  The image-level score is therefore the mean
-# of the highest 1% pixels, rather than the single maximum pixel.
-TRAINING_IMAGE_SCORE_RATIO = 0.01
-
-
-def safe_auroc(labels: np.ndarray, scores: np.ndarray) -> float:
-    try:
-        return float(roc_auc_score(labels, scores))
-    except ValueError:
-        return float("nan")
-
-
-def safe_ap(labels: np.ndarray, scores: np.ndarray) -> float:
-    try:
-        return float(average_precision_score(labels, scores))
-    except ValueError:
-        return float("nan")
-
-
-def max_f1(labels: np.ndarray, scores: np.ndarray) -> float:
-    try:
-        precision, recall, _ = precision_recall_curve(labels, scores)
-    except ValueError:
-        return float("nan")
-    f1 = 2.0 * precision * recall / (precision + recall + 1e-7)
-    return float(np.nanmax(f1))
-
-
-def safe_aupro(
-    masks: np.ndarray,
-    scores: np.ndarray,
-    show_progress: bool = True,
-) -> float:
-    if not np.any(masks):
-        return float("nan")
-    if float(scores.max()) <= float(scores.min()):
-        return 0.0
-    try:
-        return float(
-            compute_pro_fast(
-                masks.astype(np.uint8),
-                scores,
-                show_progress=show_progress,
-            )
-        )
-    except (AssertionError, ValueError, ZeroDivisionError):
-        return float("nan")
-
-
-def compute_pro_fast(
-    masks: np.ndarray,
-    amaps: np.ndarray,
-    num_th: int = 200,
-    show_progress: bool = True,
-) -> float:
-    """Compute PRO with the threshold sweep used by both pipelines."""
-
-    masks = np.asarray(masks)
-    amaps = np.asarray(amaps)
-    if masks.ndim != 3 or amaps.ndim != 3 or masks.shape != amaps.shape:
-        raise ValueError("masks and amaps must be equally shaped 3D arrays")
-    if set(np.unique(masks).tolist()) != {0, 1}:
-        raise AssertionError("masks must contain exactly 0 and 1")
-    if not isinstance(num_th, int) or num_th <= 0:
-        raise ValueError("num_th must be a positive integer")
-
-    region_labels = []
-    region_areas = []
-    for mask in masks:
-        labels = measure.label(mask)
-        areas = np.bincount(labels.reshape(-1))[1:].astype(np.float64)
-        region_labels.append(labels)
-        region_areas.append(areas)
-
-    min_th = amaps.min()
-    max_th = amaps.max()
-    delta = (max_th - min_th) / num_th
-    if delta <= 0:
-        return 0.0
-
-    inverse_pixels = np.logical_not(masks.astype(bool))
-    inverse_count = int(inverse_pixels.sum())
-    total_regions = sum(len(areas) for areas in region_areas)
-    if total_regions == 0 or inverse_count == 0:
-        return float("nan")
-
-    thresholds = np.arange(min_th, max_th, delta)
-    pro_sums = np.zeros(thresholds.shape, dtype=np.float64)
-    false_positive_counts = np.zeros(thresholds.shape, dtype=np.int64)
-
-    entries = zip(region_labels, region_areas, amaps, inverse_pixels)
-    if show_progress:
-        entries = tqdm(
-            entries,
-            total=len(amaps),
-            desc="Compute PRO",
-            unit="image",
-            dynamic_ncols=True,
-            leave=False,
-        )
-    for label_map, areas, amap, inverse_mask in entries:
-        outside_values = np.sort(amap[inverse_mask])
-        false_positive_counts += (
-            outside_values.size
-            - np.searchsorted(outside_values, thresholds, side="right")
-        )
-        for region_id, area in enumerate(areas, start=1):
-            region_values = np.sort(amap[label_map == region_id])
-            hits = region_values.size - np.searchsorted(
-                region_values,
-                thresholds,
-                side="right",
-            )
-            pro_sums += hits / area
-
-    pros = pro_sums / total_regions
-    fprs = false_positive_counts / inverse_count
-    valid = fprs < 0.3
-    if not np.any(valid):
-        return float("nan")
-    fprs = fprs[valid]
-    pros = pros[valid]
-    max_fpr = fprs.max()
-    if max_fpr <= 0:
-        return float("nan")
-    return float(auc(fprs / max_fpr, pros))
+from dinomaly_pipeline_common import load_ground_truth
 
 
 def _load_stage_score_map(sample: Dict, score_map_key: str) -> np.ndarray:
     try:
         source = sample[score_map_key]
     except KeyError as error:
-        raise KeyError(
-            f"Sample does not contain score-map field {score_map_key!r}."
-        ) from error
-
+        raise KeyError(f"Sample does not contain score-map field {score_map_key!r}.") from error
     if isinstance(source, (str, Path)):
         return load_score_map(Path(source))
-
-    score_map = np.asarray(source, dtype=np.float32)
-    score_map = np.squeeze(score_map)
+    score_map = np.squeeze(np.asarray(source, dtype=np.float32))
     if score_map.ndim != 2:
-        raise ValueError(
-            f"Score map in {score_map_key!r} must be 2D; got {score_map.shape}"
-        )
+        raise ValueError(f"Score map in {score_map_key!r} must be 2D; got {score_map.shape}")
     return np.nan_to_num(
         score_map,
         nan=0.0,
         posinf=np.finfo(np.float32).max,
         neginf=0.0,
     )
-
-
-def training_image_score(
-    score_map: np.ndarray,
-    top_ratio: float = TRAINING_IMAGE_SCORE_RATIO,
-) -> float:
-    """Calculate an image score with the same rule as ``evaluation_batch``.
-
-    The training evaluator uses ``max_ratio=0.01``.  It sorts all pixels in
-    descending order and averages the highest 1%; this function is the NumPy
-    equivalent for cached score maps.
-    """
-
-    score_map = np.asarray(score_map, dtype=np.float32)
-    if score_map.size == 0:
-        raise ValueError("Cannot calculate an image score from an empty map.")
-    if not 0.0 < float(top_ratio) <= 1.0:
-        raise ValueError("top_ratio must be in (0, 1].")
-    top_count = max(1, int(score_map.size * float(top_ratio)))
-    sorted_scores = np.sort(score_map.reshape(-1))
-    return float(sorted_scores[-top_count:].mean())
 
 
 def evaluate_stage(
@@ -245,18 +75,15 @@ def evaluate_stage(
     per_image_records: Optional[list[Dict[str, object]]] = None,
     pixel_threshold: Optional[float] = None,
 ) -> Dict[str, float]:
-    """Evaluate one score-map stage.
+    """Evaluate already-generated Dinomaly2 maps with canonical metrics.
 
-    ``score_map_key`` may point to a cached ``.npy`` path or an in-memory
-    NumPy array.  If ``image_score_key`` is omitted, the image score uses the
-    training evaluator's highest-1% pixel mean; otherwise the named sample
-    field is used.  ``per_image_records`` can be supplied to collect one row
-    of pixel metrics for every evaluated image.
+    ``image_score_key`` remains accepted for source compatibility but is
+    intentionally ignored when score maps are available: image scores always
+    use the Dinomaly2 highest-1% rule.
     """
 
     if metric_size < 1:
         raise ValueError("metric_size must be positive")
-
     evaluation_samples = [
         sample
         for sample in samples
@@ -276,74 +103,53 @@ def evaluate_stage(
         dynamic_ncols=True,
     ) as progress:
         for sample in progress:
+            score_source = sample[score_map_key]
             score_map = _load_stage_score_map(sample, score_map_key)
-            gt_mask = load_ground_truth(
-                sample,
-                ground_truth_dir,
-                score_map.shape,
-            )
-            image_labels.append(sample["group_key"] == "test_anomaly")
-
+            gt_mask = load_ground_truth(sample, ground_truth_dir, score_map.shape)
             resized_gt = cv2.resize(
-                gt_mask,
-                (metric_size, metric_size),
-                interpolation=cv2.INTER_NEAREST,
+                gt_mask, (metric_size, metric_size), interpolation=cv2.INTER_NEAREST
             )
             resized_score = cv2.resize(
-                score_map,
-                (metric_size, metric_size),
-                interpolation=cv2.INTER_LINEAR,
+                score_map, (metric_size, metric_size), interpolation=cv2.INTER_LINEAR
             )
-            if image_score_key is None:
-                # evaluation_batch resizes the anomaly map first and then
-                # takes the mean of its highest 1% pixels.
-                image_scores.append(training_image_score(resized_score))
-            else:
-                image_scores.append(float(sample[image_score_key]))
-            gt_pixels.append(resized_gt)
+            image_label = int(sample["group_key"] == "test_anomaly")
+            image_score = training_image_score(resized_score)
+            image_labels.append(image_label)
+            image_scores.append(image_score)
+            gt_pixels.append((resized_gt > 0).astype(np.uint8))
             score_pixels.append(resized_score)
 
             if per_image_records is not None:
                 per_image_records.append(
                     {
                         "stage": stage_name,
-                        "group": sample.get(
-                            "group_label",
-                            sample["group_key"],
-                        ),
+                        "group": sample.get("group_label", sample["group_key"]),
                         "image_path": str(sample["image_path"]),
-                        "image_score": training_image_score(resized_score),
-                        "gt_positive_pixels": int(resized_gt.astype(bool).sum()),
-                        **evaluate_pixel_metrics(
-                            resized_gt,
-                            resized_score,
-                            show_progress=False,
+                        "score_path": (
+                            str(score_source)
+                            if isinstance(score_source, (str, Path))
+                            else ""
                         ),
+                        "image_label": image_label,
+                        "image_score": image_score,
+                        "gt_positive_pixels": int(np.asarray(resized_gt, dtype=bool).sum()),
+                        **evaluate_pixel_metrics(resized_gt, resized_score),
                     }
                 )
 
-    image_labels_array = np.asarray(image_labels, dtype=np.uint8)
-    image_scores_array = np.asarray(image_scores, dtype=np.float32)
-    gt_pixels_array = np.stack(gt_pixels, axis=0)
-    score_pixels_array = np.stack(score_pixels, axis=0)
-    pixel_labels = gt_pixels_array.reshape(-1)
-    pixel_scores = score_pixels_array.reshape(-1)
-    pixel_f1, p_f1_threshold = pixel_f1_score_and_threshold(
-        gt_pixels_array, score_pixels_array
+    gt_array = np.stack(gt_pixels, axis=0)
+    score_array = np.stack(score_pixels, axis=0)
+    metrics = compute_evaluation_metrics(
+        image_scores,
+        image_labels,
+        score_array,
+        gt_array,
     )
-    metrics = {
-        "I-AUROC": safe_auroc(image_labels_array, image_scores_array),
-        "I-AP": safe_ap(image_labels_array, image_scores_array),
-        "I-F1": max_f1(image_labels_array, image_scores_array),
-        "P-AUROC": safe_auroc(pixel_labels, pixel_scores),
-        "P-AP": safe_ap(pixel_labels, pixel_scores),
-        "P-F1": pixel_f1,
-        "P-AUPRO": safe_aupro(gt_pixels_array, score_pixels_array),
-    }
+    p_f1_threshold = metrics["P-F1-Threshold"]
     metrics.update(
         region_detection_metrics(
-            gt_pixels_array,
-            score_pixels_array,
+            gt_array,
+            score_array,
             p_f1_threshold if pixel_threshold is None else float(pixel_threshold),
             per_image_records,
             p_f1_threshold=p_f1_threshold,
@@ -352,101 +158,20 @@ def evaluate_stage(
     return metrics
 
 
-def evaluate_pixel_metrics(
-    gt_mask: np.ndarray,
-    score_map: np.ndarray,
-    show_progress: bool = False,
-) -> Dict[str, float]:
-    """Calculate pixel metrics for one image.
+def print_metrics(results: Mapping[str, Mapping[str, float]]) -> None:
+    """Print standardized metrics without writing files."""
 
-    A normal image has no positive GT pixels, so AUROC/AP/AUPRO are not
-    defined for that image and are reported as ``nan``.  F1 remains the value
-    obtained from the same maximum-F1 sweep used by the training evaluator.
-    """
-
-    gt_mask = np.asarray(gt_mask)
-    score_map = np.asarray(score_map, dtype=np.float32)
-    if gt_mask.shape != score_map.shape:
-        raise ValueError(
-            "gt_mask and score_map must have the same shape; "
-            f"got {gt_mask.shape} and {score_map.shape}"
-        )
-    if gt_mask.ndim != 2:
-        raise ValueError(
-            f"Per-image pixel metrics expect 2D arrays; got {gt_mask.shape}"
-        )
-
-    labels = gt_mask.astype(bool, copy=False).reshape(-1).astype(np.uint8)
-    scores = score_map.reshape(-1)
-    has_positive = bool(np.any(labels))
-    has_negative = bool(np.any(labels == 0))
-    return {
-        "P-AUROC": (
-            safe_auroc(labels, scores)
-            if has_positive and has_negative
-            else float("nan")
-        ),
-        "P-AP": (
-            safe_ap(labels, scores)
-            if has_positive and has_negative
-            else float("nan")
-        ),
-        "P-F1": max_f1(labels, scores) if has_positive else 0.0,
-        "P-AUPRO": (
-            safe_aupro(
-                labels.reshape(1, *gt_mask.shape),
-                score_map.reshape(1, *score_map.shape),
-                show_progress=show_progress,
-            )
-            if has_positive and has_negative
-            else float("nan")
-        ),
-    }
-
-
-def write_per_image_pixel_metrics(
-    records: Sequence[Mapping[str, object]],
-    output_path: Path,
-) -> None:
-    """Write per-image pixel metrics to a CSV file."""
-
-    fieldnames = [
-        "stage",
-        "group",
-        "image_path",
-        "image_score",
-        "gt_positive_pixels",
-        "gt_region_count",
-        "detected_region_count",
-        "missed_region_count",
-        *PIXEL_METRIC_NAMES,
-        "R-MissRate",
-        "R-PixelCoverage",
-    ]
-    write_per_image_report(records, output_path, fieldnames)
-
-
-def print_metrics(
-    results: Mapping[str, Mapping[str, float]],
-) -> None:
-    """Print a metric table without writing any files."""
-
-    # Kept as a compatibility entry point for callers that only print.
-    metric_names = REPORT_METRIC_NAMES
     print("\nEvaluation metrics")
-    print("stage                         " + "  ".join(f"{name:>10}" for name in metric_names))
+    print("stage                         " + "  ".join(f"{name:>10}" for name in REPORT_METRIC_NAMES))
     for stage, metrics in results.items():
-        values = "  ".join(
-            f"{metrics.get(name, float('nan')):10.6f}" for name in metric_names
-        )
+        values = "  ".join(f"{metrics.get(name, float('nan')):10.6f}" for name in REPORT_METRIC_NAMES)
         print(f"{stage:<29}{values}")
     print()
 
 
 def print_and_save_metrics(
-    results: Mapping[str, Mapping[str, float]],
-    output_dir: Path,
+    results: Mapping[str, Mapping[str, float]], output_dir: Path
 ) -> None:
-    """Save metrics as JSON/CSV and print the shared table format."""
+    """Save and print the standardized metrics report."""
 
-    write_metric_report(results, output_dir, METRIC_NAMES, "stage")
+    write_metrics(results, output_dir, "stage")

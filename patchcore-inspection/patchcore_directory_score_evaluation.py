@@ -5,19 +5,17 @@
 maps are searched recursively in one or more output directories and matched
 by image filename stem.
 
-When a score map was made by ``patchcore_score_visualization.py``, its
-``.npy.json`` sidecar supplies the native PatchCore image score.  That makes
-image-level metrics identical to ``train.py``.  External maps without this
-sidecar fall back to the map maximum and are marked in ``pixel_metrics.csv``.
+Image scores are always calculated from the score map's highest 1% pixels,
+which is the Dinomaly2 training definition used by both model families.  No
+sidecar metadata is read.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -42,8 +40,8 @@ from score_workflow_common import (  # noqa: E402
     load_score_map as common_load_score_map,
     pixel_f1_score_and_threshold,
     region_detection_metrics,
+    save_classification_threshold,
     write_metric_report,
-    write_per_image_report,
 )
 
 from patchcore_evaluation import (
@@ -53,156 +51,17 @@ from patchcore_evaluation import (
     classification_metrics,
     compute_evaluation_metrics,
     evaluate_pixel_metrics,
-    load_score_map,
     select_optimal_threshold,
+    training_image_score,
+    write_per_image_pixel_metrics,
 )
 from patchcore.datasets.custom import get_data_transforms
 
+def _mask_transform(args):
+    """Return PatchCore's optional GT transform from explicit CLI settings."""
 
-IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
-MASK_EXTENSIONS = (".png", ".bmp", ".tif", ".tiff", ".jpg", ".jpeg")
-SCORE_EXTENSIONS = (".npy", ".npz")
-
-
-def _find_child_directory(root: Path, name: str) -> Optional[Path]:
-    for child in root.iterdir():
-        if child.is_dir() and child.name.lower() == name.lower():
-            return child
-    return None
-
-
-def _iter_images(images_dir: Path) -> List[Path]:
-    return sorted(
-        (
-            path
-            for path in images_dir.rglob("*")
-            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
-        ),
-        key=lambda path: str(path).lower(),
-    )
-
-
-def _iter_data_directories(
-    data_root: Path, excluded_directories: Sequence[Path] = ()
-) -> List[Tuple[Path, Path, Optional[Path]]]:
-    excluded = {Path(path).resolve() for path in excluded_directories}
-    result = []
-    for child in sorted(
-        (path for path in data_root.iterdir() if path.is_dir()), key=lambda path: str(path).lower()
-    ):
-        if child.resolve() in excluded:
-            continue
-        images_dir = _find_child_directory(child, "images")
-        masks_dir = _find_child_directory(child, "masks")
-        if images_dir is None:
-            raise FileNotFoundError(f"Each data_root child must contain images/: {child}")
-        if not _iter_images(images_dir):
-            raise RuntimeError(f"No images found in {images_dir}")
-        result.append((child, images_dir, masks_dir))
-    if not result:
-        raise RuntimeError(f"No child directories containing images/ found in {data_root}")
-    return result
-
-
-def _find_mask(image_path: Path, images_dir: Path, masks_dir: Optional[Path]) -> Optional[Path]:
-    if masks_dir is None:
-        return None
-    relative = image_path.relative_to(images_dir)
-    for extension in MASK_EXTENSIONS:
-        candidate = masks_dir / relative.with_suffix(extension)
-        if candidate.is_file():
-            return candidate
-    stem = image_path.stem.lower()
-    matches = sorted(
-        (
-            path
-            for path in masks_dir.rglob("*")
-            if path.is_file()
-            and path.suffix.lower() in MASK_EXTENSIONS
-            and path.stem.lower() in {stem, f"{stem}_mask", f"{stem}-mask"}
-        ),
-        key=lambda path: str(path).lower(),
-    )
-    if len(matches) == 1:
-        return matches[0]
-    if not matches:
-        raise FileNotFoundError(f"Mask not found for image {image_path} under {masks_dir}")
-    raise RuntimeError(f"Multiple masks match {image_path}: " + ", ".join(map(str, matches)))
-
-
-def _score_keys(score_path: Path) -> Iterable[str]:
-    stem = score_path.stem.lower()
-    yield stem
-    for extension in IMAGE_EXTENSIONS:
-        if stem.endswith(extension):
-            yield stem[: -len(extension)]
-
-
-def _build_score_index(score_output_dirs: Sequence[Path]) -> Dict[str, List[Tuple[Path, Path]]]:
-    index: Dict[str, List[Tuple[Path, Path]]] = {}
-    for root in score_output_dirs:
-        for score_path in root.rglob("*"):
-            if not score_path.is_file() or score_path.suffix.lower() not in SCORE_EXTENSIONS:
-                continue
-            for key in set(_score_keys(score_path)):
-                index.setdefault(key, []).append((root, score_path))
-    if not index:
-        raise FileNotFoundError("No .npy or .npz score maps found under score_output_dir.")
-    return index
-
-
-def _find_score(
-    image_path: Path, data_directory: Path, score_index: Mapping[str, Sequence[Tuple[Path, Path]]]
-) -> Path:
-    matches = list(score_index.get(image_path.stem.lower(), ()))
-    unique = {score_path.resolve(): score_path for _root, score_path in matches}
-    matches = list(unique.values())
-    if len(matches) > 1:
-        directory_name = data_directory.name.lower()
-        preferred = [
-            path
-            for path in matches
-            if directory_name in {part.lower() for part in path.parts}
-        ]
-        if len(preferred) == 1:
-            matches = preferred
-    if not matches:
-        raise FileNotFoundError(
-            f"Score map not found by filename {image_path.name} under score_output_dir."
-        )
-    if len(matches) > 1:
-        raise RuntimeError(
-            f"Multiple score maps match {image_path.name}:\n" + "\n".join(map(str, matches))
-        )
-    return matches[0]
-
-
-def _load_sidecar(score_path: Path) -> Dict[str, object]:
-    sidecar = score_path.with_suffix(score_path.suffix + ".json")
-    if not sidecar.is_file():
-        return {}
-    try:
-        with sidecar.open("r", encoding="utf-8") as file:
-            value = json.load(file)
-    except (OSError, ValueError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
-def _native_image_score(score_path: Path, score_map: np.ndarray) -> Tuple[float, str, Dict[str, object]]:
-    metadata = _load_sidecar(score_path)
-    try:
-        score = float(metadata["image_score"])
-    except (KeyError, TypeError, ValueError):
-        score = float("nan")
-    if np.isfinite(score):
-        return score, "patchcore-native-sidecar", metadata
-    return float(score_map.max()), "score-map-max-fallback", metadata
-
-
-def _metadata_transform(metadata: Mapping[str, object], args):
-    resize = args.resize if args.resize is not None else metadata.get("resize")
-    imagesize = args.imagesize if args.imagesize is not None else metadata.get("imagesize")
+    resize = args.resize
+    imagesize = args.imagesize
     try:
         resize = int(resize) if resize is not None else None
         imagesize = int(imagesize) if imagesize is not None else None
@@ -255,9 +114,8 @@ def _evaluate_directory(
     ):
         score_path = find_score(image_path, data_directory, score_index)
         score_map = common_load_score_map(score_path)
-        image_score, image_score_source, metadata = _native_image_score(score_path, score_map)
         mask_path = find_mask(image_path, images_dir, masks_dir)
-        mask_transform = _metadata_transform(metadata, args)
+        mask_transform = _mask_transform(args)
         gt_mask = (
             _load_mask(mask_path, score_map.shape, mask_transform)
             if mask_path is not None
@@ -265,6 +123,7 @@ def _evaluate_directory(
         )
         score_map, gt_mask = _resize_for_metrics(score_map, gt_mask, args.metric_size)
         image_label = int(gt_mask.any())
+        image_score = training_image_score(score_map)
         pixel_metrics = evaluate_pixel_metrics(gt_mask, score_map)
         gt_maps.append(gt_mask)
         score_maps.append(score_map)
@@ -278,7 +137,6 @@ def _evaluate_directory(
                 "score_path": str(score_path),
                 "image_label": image_label,
                 "image_score": image_score,
-                "image_score_source": image_score_source,
                 "gt_positive_pixels": int(gt_mask.sum()),
                 **{name: pixel_metrics[name] for name in pixel_metrics if name.startswith("P-")},
             }
@@ -297,26 +155,7 @@ def _write_results(
     results: Mapping[str, Mapping[str, float]], records: Sequence[Mapping[str, object]], output_dir: Path
 ) -> None:
     write_metric_report(results, output_dir, METRIC_NAMES, "directory")
-    fields = (
-        "directory",
-        "mask_path",
-        "image_score_source",
-        "image_path",
-        "score_path",
-        "image_label",
-        "image_score",
-        "gt_positive_pixels",
-        "gt_region_count",
-        "detected_region_count",
-        "missed_region_count",
-        "P-AUROC",
-        "P-AP",
-        "P-F1",
-        "P-AUPRO",
-        "R-MissRate",
-        "R-PixelCoverage",
-    )
-    write_per_image_report(records, output_dir / "pixel_metrics.csv", fields)
+    write_per_image_pixel_metrics(records, output_dir / "pixel_metrics.csv")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -326,15 +165,15 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "每个 data_root 子目录必须有 images/，masks/ 可省略，省略即正常样本。\n"
             "score_output_dir 可指定一个或多个目录，脚本递归查找 .npy/.npz 并按图像 stem 匹配。\n"
-            "由 patchcore_score_visualization.py 生成的 .npy.json 会提供训练同口径的 image score。"
+            "图像分数统一按分数图最高 1% 像素均值计算；不读取侧车元数据文件。"
         ),
     )
     parser.add_argument("-i", "--data_root", type=Path, required=True)
     parser.add_argument("-s", "--score_output_dir", "--score_dir", type=Path, nargs="+", action="append", required=True)
     parser.add_argument("-o", "--output_dir", type=Path, default=None)
-    parser.add_argument("--resize", type=int, default=None, help="GT 变换 Resize；默认读取 score sidecar。")
-    parser.add_argument("--imagesize", "--crop_size", dest="imagesize", type=int, default=None, help="GT 变换 CenterCrop；默认读取 score sidecar。")
-    parser.add_argument("--metric_size", type=int, default=None, help="可选统一指标大小；设置后像素指标不再是训练的原始分辨率。")
+    parser.add_argument("--resize", type=int, default=None, help="可选的 GT 变换 Resize；需同时指定 --imagesize。")
+    parser.add_argument("--imagesize", "--crop_size", dest="imagesize", type=int, default=None, help="可选的 GT 变换 CenterCrop。")
+    parser.add_argument("--metric_size", type=int, default=256, help="计算指标前统一缩放到的正方形边长（默认：256）。")
     parser.add_argument("--score_threshold", type=float, default=None, help="图像判定阈值；不指定时在所有子目录上按最大平衡准确率自动选择。")
     return parser
 
@@ -426,22 +265,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             flush=True,
         )
     _write_results(results, records, output_dir)
-    with (output_dir / "classification_threshold.json").open(
-        "w", encoding="utf-8"
-    ) as file:
-        json.dump(
-            {
-                "threshold": threshold,
-                "method": threshold_method,
-                **{
-                    name: global_threshold_metrics[name]
-                    for name in CLASSIFICATION_METRIC_NAMES
-                },
-            },
-            file,
-            ensure_ascii=False,
-            indent=2,
-        )
+    save_classification_threshold(
+        output_dir / "classification_threshold.json",
+        threshold,
+        threshold_method,
+        global_threshold_metrics,
+    )
     print(
         f"\nImage threshold={threshold:.6f} ({threshold_method}); "
         f"FPR={global_threshold_metrics['FPR']:.6f}, "
