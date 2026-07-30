@@ -243,6 +243,7 @@ def evaluate_stage(
     image_score_key: Optional[str] = None,
     stage_name: str = "score maps",
     per_image_records: Optional[list[Dict[str, object]]] = None,
+    pixel_threshold: Optional[float] = None,
 ) -> Dict[str, float]:
     """Evaluate one score-map stage.
 
@@ -327,7 +328,7 @@ def evaluate_stage(
     score_pixels_array = np.stack(score_pixels, axis=0)
     pixel_labels = gt_pixels_array.reshape(-1)
     pixel_scores = score_pixels_array.reshape(-1)
-    pixel_f1, pixel_threshold = pixel_f1_score_and_threshold(
+    pixel_f1, p_f1_threshold = pixel_f1_score_and_threshold(
         gt_pixels_array, score_pixels_array
     )
     metrics = {
@@ -343,8 +344,9 @@ def evaluate_stage(
         region_detection_metrics(
             gt_pixels_array,
             score_pixels_array,
-            pixel_threshold,
+            p_f1_threshold if pixel_threshold is None else float(pixel_threshold),
             per_image_records,
+            p_f1_threshold=p_f1_threshold,
         )
     )
     return metrics

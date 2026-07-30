@@ -359,7 +359,10 @@ def _save_score_table(samples: Sequence[Dict[str, object]], output_path: Path) -
 
 
 def _evaluate(
-    samples: Sequence[Dict[str, object]], ground_truth_dir: Path, mask_transform
+    samples: Sequence[Dict[str, object]],
+    ground_truth_dir: Path,
+    mask_transform,
+    pixel_threshold: Optional[float] = None,
 ) -> Tuple[Dict[str, float], List[Dict[str, object]]]:
     labels = []
     scores = []
@@ -395,12 +398,14 @@ def _evaluate(
             }
         )
     metrics = compute_evaluation_metrics(scores, labels, np.stack(maps), np.stack(masks))
+    p_f1_threshold = metrics["P-F1-Threshold"]
     metrics.update(
         region_detection_metrics(
             np.stack(masks),
             np.stack(maps),
-            metrics["P-F1-Threshold"],
+            p_f1_threshold if pixel_threshold is None else float(pixel_threshold),
             records,
+            p_f1_threshold=p_f1_threshold,
         )
     )
     return metrics, records
@@ -466,10 +471,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-o", "--output_dir", required=True, type=Path)
     parser.add_argument("-gt", "--ground_truth_dir", type=Path, default=None)
     parser.add_argument("--category", default=None, help="模型含多个类别时选择的类别。")
-    parser.add_argument("--resize", "--image_size", dest="resize", type=int, default=None, help="需与训练时 Resize 一致。")
-    parser.add_argument("--imagesize", "--crop_size", dest="imagesize", type=int, default=None, help="需与训练时 CenterCrop 一致。")
+    parser.add_argument("-imgsz", dest="resize", type=int, default=None, help="需与训练时 Resize 一致。")
+    parser.add_argument("-csz", dest="imagesize", type=int, default=None, help="需与训练时 CenterCrop 一致。")
     parser.add_argument("--gpu", "--cuda", dest="gpu", type=int, default=0)
-    parser.add_argument("--faiss_on_gpu", action="store_true")
     parser.add_argument("--faiss_num_workers", type=int, default=4)
     parser.add_argument("--bins", type=int, default=30)
     parser.add_argument(
@@ -496,7 +500,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
     device = select_device(args.gpu)
-    models = load_models(args.model, device, args.faiss_on_gpu, args.faiss_num_workers, args.category)
+    if device.type != "cuda":
+        raise RuntimeError("GPU FAISS is required, but CUDA is not available.")
+    models = load_models(
+        args.model,
+        device,
+        faiss_on_gpu=True,
+        faiss_num_workers=args.faiss_num_workers,
+        category=args.category,
+    )
     input_height = int(models[0].input_shape[-2])
     resize = args.resize or input_height
     imagesize = args.imagesize or input_height
@@ -533,7 +545,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     if ground_truth_dir is not None:
-        metrics, records = _evaluate(samples, ground_truth_dir, mask_transform)
+        metrics, records = _evaluate(
+            samples,
+            ground_truth_dir,
+            mask_transform,
+            pixel_threshold=args.score_threshold,
+        )
         write_per_image_pixel_metrics(records, output_dir / "pixel_metrics.csv", extra_fields=("group",))
     else:
         metrics = _image_only_metrics(samples)

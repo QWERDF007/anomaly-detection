@@ -40,6 +40,7 @@ MASK_EXTENSIONS = (".png", ".bmp", ".tif", ".tiff", ".jpg", ".jpeg")
 SCORE_EXTENSIONS = (".npy", ".npz")
 CLASSIFICATION_METRIC_NAMES = ("Threshold", "FPR", "TNR", "Accuracy")
 REGION_METRIC_NAMES = (
+    "P-Threshold",
     "P-F1-Threshold",
     "R-MissRate",
     "R-PixelCoverage",
@@ -315,6 +316,7 @@ def region_detection_metrics(
     score_maps,
     threshold: float,
     per_image_records: Optional[Sequence[Dict[str, object]]] = None,
+    p_f1_threshold: Optional[float] = None,
 ) -> Dict[str, float]:
     """Measure GT-region misses and pixel coverage at the P-F1 threshold.
 
@@ -374,7 +376,10 @@ def region_detection_metrics(
             )
 
     return {
-        "P-F1-Threshold": float(threshold),
+        "P-Threshold": float(threshold),
+        "P-F1-Threshold": float(
+            threshold if p_f1_threshold is None else p_f1_threshold
+        ),
         "R-MissRate": (
             float(np.mean(image_miss_rates)) if image_miss_rates else float("nan")
         ),

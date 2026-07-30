@@ -388,6 +388,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         np.concatenate([item[0].reshape(-1) for item in region_inputs.values()]),
         np.concatenate([item[1].reshape(-1) for item in region_inputs.values()]),
     )
+    effective_pixel_threshold = (
+        float(args.score_threshold)
+        if args.score_threshold is not None
+        else global_pixel_threshold
+    )
 
     for directory, metrics in results.items():
         directory_records = [
@@ -406,8 +411,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             region_detection_metrics(
                 gt_maps,
                 score_maps,
-                global_pixel_threshold,
+                effective_pixel_threshold,
                 directory_records,
+                p_f1_threshold=global_pixel_threshold,
             )
         )
         print(f"\n===== {directory} =====", flush=True)

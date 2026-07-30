@@ -715,6 +715,7 @@ def main(argv=None) -> int:
             score_map_key="score_path",
             stage_name="score maps",
             per_image_records=pixel_metric_records,
+            pixel_threshold=args.score_threshold,
         )
         write_per_image_pixel_metrics(
             pixel_metric_records,
