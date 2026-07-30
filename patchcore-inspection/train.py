@@ -24,10 +24,15 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
-import numpy as np
 import torch
-from skimage import measure
-from sklearn import metrics as sklearn_metrics
+
+from patchcore_evaluation import (
+    compute_evaluation_metrics,
+    compute_pro,
+    safe_average_precision,
+    safe_auroc,
+    safe_f1_max,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -156,146 +161,13 @@ def build_patchcore(
     return model
 
 
-def _safe_auroc(labels, scores):
-    labels = np.asarray(labels, dtype=np.int64).reshape(-1)
-    scores = np.asarray(scores, dtype=np.float32).reshape(-1)
-    if len(labels) == 0 or len(labels) != len(scores) or len(np.unique(labels)) < 2:
-        return float("nan")
-    try:
-        return float(sklearn_metrics.roc_auc_score(labels, scores))
-    except (ValueError, RuntimeError):
-        return float("nan")
-
-
-def _safe_average_precision(labels, scores):
-    labels = np.asarray(labels, dtype=np.int64).reshape(-1)
-    scores = np.asarray(scores, dtype=np.float32).reshape(-1)
-    if len(labels) == 0 or len(labels) != len(scores) or len(np.unique(labels)) < 2:
-        return float("nan")
-    try:
-        return float(sklearn_metrics.average_precision_score(labels, scores))
-    except (ValueError, RuntimeError):
-        return float("nan")
-
-
-def _safe_f1_max(labels, scores):
-    labels = np.asarray(labels, dtype=np.int64).reshape(-1)
-    scores = np.asarray(scores, dtype=np.float32).reshape(-1)
-    if len(labels) == 0 or len(labels) != len(scores) or len(np.unique(labels)) < 2:
-        return float("nan")
-    try:
-        precision, recall, _ = sklearn_metrics.precision_recall_curve(labels, scores)
-        f1 = 2.0 * precision * recall / (precision + recall + 1e-7)
-        if len(f1) > 1:
-            f1 = f1[:-1]
-        return float(np.nanmax(f1))
-    except (ValueError, RuntimeError):
-        return float("nan")
-
-
-def _prepare_pixel_arrays(segmentations, masks):
-    segmentations = np.asarray(segmentations, dtype=np.float32)
-    masks = np.asarray(masks, dtype=np.float32)
-    if segmentations.size == 0 or masks.size == 0:
-        return None, None
-
-    # PatchCore returns [N,H,W], while dataset masks are usually [N,1,H,W].
-    if segmentations.ndim == 4 and segmentations.shape[1] == 1:
-        segmentations = segmentations[:, 0]
-    if masks.ndim == 4:
-        masks = masks[:, 0] if masks.shape[1] == 1 else masks.max(axis=1)
-    if segmentations.ndim != 3 or masks.ndim != 3:
-        return None, None
-    if segmentations.shape != masks.shape:
-        return None, None
-
-    return segmentations, (masks > 0).astype(np.uint8)
-
-
-def _compute_pro(masks, anomaly_maps, num_thresholds=200):
-    """Compute PRO AUC for the FPR range [0, 0.3], as in Dinomaly2."""
-
-    if masks is None or anomaly_maps is None:
-        return float("nan")
-    if masks.ndim != 3 or anomaly_maps.ndim != 3 or masks.shape != anomaly_maps.shape:
-        return float("nan")
-    if not np.any(masks) or np.all(masks):
-        return float("nan")
-
-    min_score = float(anomaly_maps.min())
-    max_score = float(anomaly_maps.max())
-    if not np.isfinite(min_score) or not np.isfinite(max_score) or max_score <= min_score:
-        return float("nan")
-
-    thresholds = np.linspace(min_score, max_score, num_thresholds, endpoint=False)
-    pros = []
-    fprs = []
-    background = masks == 0
-    background_pixels = int(background.sum())
-    if background_pixels == 0:
-        return float("nan")
-
-    regions_per_image = [
-        measure.regionprops(measure.label(mask.astype(np.uint8)))
-        for mask in masks
-    ]
-    if not any(regions_per_image):
-        return float("nan")
-
-    for threshold in thresholds:
-        binary_maps = anomaly_maps > threshold
-        region_overlaps = []
-        for binary_map, regions in zip(binary_maps, regions_per_image):
-            for region in regions:
-                coords = region.coords
-                region_overlaps.append(
-                    float(binary_map[coords[:, 0], coords[:, 1]].sum()) / region.area
-                )
-        if not region_overlaps:
-            continue
-
-        false_positive_rate = float(
-            np.logical_and(background, binary_maps).sum()
-        ) / background_pixels
-        if false_positive_rate <= 0.3:
-            pros.append(float(np.mean(region_overlaps)))
-            fprs.append(false_positive_rate)
-
-    if len(fprs) < 2 or max(fprs) <= 0:
-        return float("nan")
-
-    fprs = np.asarray(fprs, dtype=np.float64)
-    pros = np.asarray(pros, dtype=np.float64)
-    order = np.argsort(fprs)
-    fprs = fprs[order]
-    pros = pros[order]
-    fprs = fprs / fprs.max()
-    return float(sklearn_metrics.auc(fprs, pros))
-
-
-def _compute_evaluation_metrics(scores, labels, segmentations, masks):
-    image_scores = np.asarray(scores, dtype=np.float32).reshape(-1)
-    image_labels = np.asarray(labels, dtype=np.int64).reshape(-1)
-    anomaly_maps, gt_masks = _prepare_pixel_arrays(segmentations, masks)
-
-    if anomaly_maps is None or gt_masks is None:
-        pixel_scores = np.asarray([], dtype=np.float32)
-        pixel_labels = np.asarray([], dtype=np.uint8)
-        p_aupro = float("nan")
-    else:
-        pixel_scores = anomaly_maps.reshape(-1)
-        pixel_labels = gt_masks.reshape(-1)
-        p_aupro = _compute_pro(gt_masks, anomaly_maps)
-
-    return {
-        "I-AUROC": _safe_auroc(image_labels, image_scores),
-        "I-AP": _safe_average_precision(image_labels, image_scores),
-        "I-F1": _safe_f1_max(image_labels, image_scores),
-        "P-AUROC": _safe_auroc(pixel_labels, pixel_scores),
-        "P-AP": _safe_average_precision(pixel_labels, pixel_scores),
-        "P-F1": _safe_f1_max(pixel_labels, pixel_scores),
-        "P-AUPRO": p_aupro,
-    }
+# Backward-compatible private aliases.  The implementations live in the
+# shared module so offline score-map evaluation cannot drift from training.
+_safe_auroc = safe_auroc
+_safe_average_precision = safe_average_precision
+_safe_f1_max = safe_f1_max
+_compute_pro = compute_pro
+_compute_evaluation_metrics = compute_evaluation_metrics
 
 
 def _write_predictions(path: Path, dataset, scores) -> None:
