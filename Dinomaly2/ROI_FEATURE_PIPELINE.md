@@ -226,3 +226,21 @@ python dinomaly_score_evaluation.py \
 
 图像级分数和训练代码保持一致，使用评估图中最高 1% 像素分数的均值，
 而不是单个最大像素值。像素指标仍按训练评估流程在测试集像素上统一计算。
+
+## 九、按子目录评估 images/masks
+
+如果数据根目录的每个子目录都包含 `images/`，并且有 GT 的目录包含
+`masks/`，可使用新的
+`dinomaly_directory_score_evaluation.py`：
+
+```bash
+python dinomaly_directory_score_evaluation.py \
+    --data_root /data/grouped_dataset \
+    --score_output_dir /data/score_pipeline_a /data/score_pipeline_b \
+    --output_dir /data/grouped_evaluation
+```
+
+没有 `masks/` 的子目录自动视为正常样本并使用全零 GT。脚本会递归搜索一个或多个
+`score_output_dir` 下的 `.npy/.npz`，按图像文件名
+（stem）匹配 score map。每个 `data_root` 子目录单独打印指标；汇总结果写入
+`metrics.csv`、`metrics.json`，逐图像素指标写入 `pixel_metrics.csv`。
