@@ -21,8 +21,7 @@ each child directory and written to ``metrics.csv``, ``metrics.json`` and
 from __future__ import annotations
 
 import argparse
-import csv
-import json
+import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
@@ -30,6 +29,27 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
+ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = ROOT.parent
+SHARED_UTILS = PROJECT_ROOT / "utils"
+if str(SHARED_UTILS) not in sys.path:
+    sys.path.insert(1, str(SHARED_UTILS))
+
+from score_workflow_common import (  # noqa: E402
+    CLASSIFICATION_METRIC_NAMES,
+    build_score_index,
+    classification_metrics,
+    find_mask,
+    find_score,
+    iter_data_directories,
+    iter_images,
+    load_score_map,
+    report_metric_names,
+    save_classification_threshold,
+    select_optimal_threshold,
+    write_metric_report,
+    write_per_image_report,
+)
 from dinomaly_evaluation import (
     METRIC_NAMES,
     evaluate_pixel_metrics,
@@ -52,6 +72,7 @@ IMAGE_EXTENSIONS = {
 }
 MASK_EXTENSIONS = (".png", ".bmp", ".tif", ".tiff", ".jpg", ".jpeg")
 SCORE_EXTENSIONS = (".npy", ".npz")
+REPORT_METRIC_NAMES = report_metric_names(METRIC_NAMES)
 
 
 def _find_child_directory(root: Path, name: str) -> Path | None:
@@ -248,7 +269,7 @@ def _evaluate_directory(
     image_labels = []
     image_scores = []
     records: List[Dict[str, object]] = []
-    image_paths = _iter_images(images_dir)
+    image_paths = iter_images(images_dir)
 
     for image_path in tqdm(
         image_paths,
@@ -256,13 +277,13 @@ def _evaluate_directory(
         unit="image",
         dynamic_ncols=True,
     ):
-        _score_output_dir, score_path = _find_score(
+        score_path = find_score(
             image_path,
             data_directory,
             score_index,
         )
-        score_map = _load_score(score_path)
-        mask_path = _find_mask(image_path, images_dir, masks_dir)
+        score_map = load_score_map(score_path)
+        mask_path = find_mask(image_path, images_dir, masks_dir)
         gt_mask = (
             _load_mask(mask_path, score_map.shape)
             if mask_path is not None
@@ -335,33 +356,7 @@ def _write_results(
     records: Sequence[Mapping[str, object]],
     output_dir: Path,
 ) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    with (output_dir / "metrics.json").open("w", encoding="utf-8") as file:
-        json.dump(
-            {directory: dict(metrics) for directory, metrics in results.items()},
-            file,
-            ensure_ascii=False,
-            indent=2,
-            allow_nan=True,
-        )
-
-    with (output_dir / "metrics.csv").open(
-        "w",
-        newline="",
-        encoding="utf-8",
-    ) as file:
-        writer = csv.DictWriter(file, fieldnames=["directory", *METRIC_NAMES])
-        writer.writeheader()
-        for directory, metrics in results.items():
-            writer.writerow(
-                {
-                    "directory": directory,
-                    **{
-                        name: metrics.get(name, float("nan"))
-                        for name in METRIC_NAMES
-                    },
-                }
-            )
+    write_metric_report(results, output_dir, METRIC_NAMES, "directory")
 
     pixel_fields = [
         "directory",
@@ -376,20 +371,7 @@ def _write_results(
         "P-F1",
         "P-AUPRO",
     ]
-    with (output_dir / "pixel_metrics.csv").open(
-        "w",
-        newline="",
-        encoding="utf-8",
-    ) as file:
-        writer = csv.DictWriter(file, fieldnames=pixel_fields)
-        writer.writeheader()
-        for record in records:
-            writer.writerow(
-                {
-                    field: record.get(field, float("nan"))
-                    for field in pixel_fields
-                }
-            )
+    write_per_image_report(records, output_dir / "pixel_metrics.csv", pixel_fields)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -441,6 +423,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=256,
         help="计算指标前统一缩放到的正方形边长（默认：256）。",
     )
+    parser.add_argument(
+        "--score_threshold",
+        type=float,
+        default=None,
+        help="图像判定阈值；不指定时在全部子目录上按最大平衡准确率自动选择。",
+    )
     return parser
 
 
@@ -470,16 +458,15 @@ def main(argv=None) -> int:
         if args.output_dir is not None
         else data_root / "evaluation_metrics"
     )
-    data_directories = _iter_data_directories(
+    data_directories = iter_data_directories(
         data_root,
         excluded_directories=[output_dir, *score_output_dirs],
     )
-    score_index = _build_score_index(score_output_dirs)
+    score_index = build_score_index(score_output_dirs)
     results: Dict[str, Dict[str, float]] = {}
     all_records: List[Dict[str, object]] = []
 
     for data_directory, images_dir, masks_dir in data_directories:
-        print(f"\n===== {data_directory} =====", flush=True)
         metrics, records = _evaluate_directory(
             data_directory,
             images_dir,
@@ -490,15 +477,60 @@ def main(argv=None) -> int:
         directory_key = str(data_directory)
         results[directory_key] = metrics
         all_records.extend(records)
+    labels = np.asarray(
+        [record["image_label"] for record in all_records], dtype=np.uint8
+    )
+    scores = np.asarray(
+        [record["image_score"] for record in all_records], dtype=np.float32
+    )
+    if args.score_threshold is None:
+        threshold, threshold_method, global_threshold_metrics = select_optimal_threshold(
+            labels, scores
+        )
+    else:
+        threshold = float(args.score_threshold)
+        threshold_method = "manual"
+        global_threshold_metrics = classification_metrics(labels, scores, threshold)
+
+    for directory, metrics in results.items():
+        directory_records = [
+            record for record in all_records if record["directory"] == directory
+        ]
+        directory_threshold_metrics = classification_metrics(
+            [record["image_label"] for record in directory_records],
+            [record["image_score"] for record in directory_records],
+            threshold,
+        )
+        metrics.update(
+            {
+                name: directory_threshold_metrics[name]
+                for name in CLASSIFICATION_METRIC_NAMES
+            }
+        )
+        print(f"\n===== {directory} =====", flush=True)
         print(
             "  "
             + "  ".join(
-                f"{name}={metrics[name]:.6f}" for name in METRIC_NAMES
+                f"{name}={metrics.get(name, float('nan')):.6f}"
+                for name in REPORT_METRIC_NAMES
             ),
             flush=True,
         )
 
     _write_results(results, all_records, output_dir)
+    save_classification_threshold(
+        output_dir / "classification_threshold.json",
+        threshold,
+        threshold_method,
+        global_threshold_metrics,
+    )
+    print(
+        f"\nImage threshold={threshold:.6f} ({threshold_method}); "
+        f"FPR={global_threshold_metrics['FPR']:.6f}, "
+        f"TNR={global_threshold_metrics['TNR']:.6f}, "
+        f"Accuracy={global_threshold_metrics['Accuracy']:.6f}",
+        flush=True,
+    )
     print(f"\nMetrics written to {output_dir / 'metrics.csv'}")
     print(f"Per-image pixel metrics written to {output_dir / 'pixel_metrics.csv'}")
     return 0

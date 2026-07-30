@@ -8,8 +8,7 @@ generally identical.
 
 from __future__ import annotations
 
-import csv
-import json
+import sys
 from pathlib import Path
 from typing import Dict, Mapping, Sequence
 
@@ -17,6 +16,21 @@ import numpy as np
 from skimage import measure
 from sklearn import metrics as sklearn_metrics
 
+ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = ROOT.parent
+SHARED_UTILS = PROJECT_ROOT / "utils"
+if str(SHARED_UTILS) not in sys.path:
+    sys.path.insert(0, str(SHARED_UTILS))
+
+from score_workflow_common import (  # noqa: E402
+    CLASSIFICATION_METRIC_NAMES,
+    classification_metrics,
+    load_score_map,
+    report_metric_names,
+    select_optimal_threshold,
+    write_metric_report,
+    write_per_image_report,
+)
 
 METRIC_NAMES = (
     "I-AUROC",
@@ -29,6 +43,7 @@ METRIC_NAMES = (
 )
 
 PIXEL_METRIC_NAMES = ("P-AUROC", "P-AP", "P-F1", "P-AUPRO")
+REPORT_METRIC_NAMES = report_metric_names(METRIC_NAMES)
 
 
 def safe_auroc(labels, scores) -> float:
@@ -199,62 +214,12 @@ def evaluate_pixel_metrics(gt_mask, score_map) -> Dict[str, float]:
     return {name: metrics[name] for name in PIXEL_METRIC_NAMES}
 
 
-def load_score_map(score_path: Path) -> np.ndarray:
-    """Load a 2D ``.npy``/``.npz`` score map and make non-finite values safe."""
-
-    score_path = Path(score_path)
-    if score_path.suffix.lower() == ".npz":
-        archive = np.load(score_path)
-        try:
-            if not archive.files:
-                raise ValueError(f"Score archive is empty: {score_path}")
-            score_map = np.asarray(archive[archive.files[0]], dtype=np.float32)
-        finally:
-            archive.close()
-    else:
-        score_map = np.asarray(np.load(score_path), dtype=np.float32)
-    score_map = np.squeeze(score_map)
-    if score_map.ndim != 2:
-        raise ValueError(f"Score map must be 2D: {score_path}; got {score_map.shape}")
-    return np.nan_to_num(
-        score_map,
-        nan=0.0,
-        posinf=np.finfo(np.float32).max,
-        neginf=0.0,
-    )
-
-
 def write_metrics(
     results: Mapping[str, Mapping[str, float]],
     output_dir: Path,
     label_name: str = "stage",
 ) -> None:
-    """Print and save a metric table in JSON and CSV form."""
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    result = {str(label): dict(metrics) for label, metrics in results.items()}
-    with (output_dir / "metrics.json").open("w", encoding="utf-8") as file:
-        json.dump(result, file, ensure_ascii=False, indent=2, allow_nan=True)
-    with (output_dir / "metrics.csv").open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=[label_name, *METRIC_NAMES])
-        writer.writeheader()
-        for label, metrics in result.items():
-            writer.writerow(
-                {
-                    label_name: label,
-                    **{name: metrics.get(name, float("nan")) for name in METRIC_NAMES},
-                }
-            )
-
-    print("\nEvaluation metrics")
-    print(f"{label_name:<29}" + "  ".join(f"{name:>10}" for name in METRIC_NAMES))
-    for label, metrics in result.items():
-        values = "  ".join(
-            f"{metrics.get(name, float('nan')):10.6f}" for name in METRIC_NAMES
-        )
-        print(f"{label:<29}{values}")
-    print()
+    write_metric_report(results, output_dir, METRIC_NAMES, label_name)
 
 
 def write_per_image_pixel_metrics(
@@ -262,8 +227,6 @@ def write_per_image_pixel_metrics(
 ) -> None:
     """Write one pixel-metric row for every evaluated image."""
 
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         *extra_fields,
         "image_path",
@@ -273,8 +236,4 @@ def write_per_image_pixel_metrics(
         "gt_positive_pixels",
         *PIXEL_METRIC_NAMES,
     ]
-    with output_path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=fields)
-        writer.writeheader()
-        for record in records:
-            writer.writerow({field: record.get(field, float("nan")) for field in fields})
+    write_per_image_report(records, output_path, fields)

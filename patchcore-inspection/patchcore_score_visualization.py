@@ -18,25 +18,41 @@ import argparse
 import csv
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import cv2
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from PIL import Image
 from skimage import measure
 from tqdm import tqdm
 
+ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = ROOT.parent
+SHARED_UTILS = PROJECT_ROOT / "utils"
+if str(SHARED_UTILS) not in sys.path:
+    sys.path.insert(0, str(SHARED_UTILS))
+
+from score_workflow_common import (  # noqa: E402
+    IMAGE_EXTENSIONS,
+    MASK_EXTENSIONS,
+    STANDARD_GROUPS,
+    find_child_directory as common_find_child_directory,
+    group_score_values,
+    iter_images as common_iter_images,
+    plot_score_distribution as plot_common_score_distribution,
+    save_classification_threshold,
+    write_score_table,
+)
 from patchcore_evaluation import (
-    METRIC_NAMES,
+    CLASSIFICATION_METRIC_NAMES,
+    classification_metrics,
     compute_evaluation_metrics,
     evaluate_pixel_metrics,
     load_score_map,
+    select_optimal_threshold,
     write_metrics,
     write_per_image_pixel_metrics,
 )
@@ -45,34 +61,15 @@ from patchcore.datasets.custom import get_data_transforms
 
 
 LOGGER = logging.getLogger("patchcore.score_visualization")
-IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
-MASK_EXTENSIONS = (".png", ".bmp", ".tif", ".tiff", ".jpg", ".jpeg")
-GROUPS = (
-    ("train_good", "Train / Good"),
-    ("test_good", "Test / Good"),
-    ("test_anomaly", "Test / Anomaly"),
-)
-_RESAMPLING = getattr(Image, "Resampling", Image)
+GROUPS = STANDARD_GROUPS
 
 
 def _find_child_directory(root: Path, name: str) -> Optional[Path]:
-    if not root.is_dir():
-        return None
-    for child in root.iterdir():
-        if child.is_dir() and child.name.lower() == name.lower():
-            return child
-    return None
+    return common_find_child_directory(root, name)
 
 
 def _iter_images(root: Path) -> List[Path]:
-    return sorted(
-        (
-            path
-            for path in root.rglob("*")
-            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
-        ),
-        key=lambda path: str(path).lower(),
-    )
+    return common_iter_images(root)
 
 
 def _resolve_groups(data_root: Path) -> Dict[str, List[Path]]:
@@ -324,75 +321,40 @@ def collect_gt_scores(samples: Sequence[Dict[str, object]], ground_truth_dir: Op
 
 
 def _group_scores(samples: Sequence[Dict[str, object]]) -> Dict[str, List[float]]:
-    result = {label: [] for _key, label in GROUPS}
-    for sample in samples:
-        result[str(sample["group_label"])].append(float(sample["score"]))
-    return result
+    return group_score_values(samples)
 
 
-def _choose_threshold(groups: Dict[str, List[float]], explicit: Optional[float]) -> Tuple[float, str]:
+def _choose_threshold(
+    samples: Sequence[Dict[str, object]], explicit: Optional[float]
+) -> Tuple[float, str, Dict[str, float]]:
+    evaluation_samples = [sample for sample in samples if sample["group_key"] != "train_good"]
+    labels = np.asarray(
+        [sample["group_key"] == "test_anomaly" for sample in evaluation_samples],
+        dtype=np.uint8,
+    )
+    scores = np.asarray([sample["score"] for sample in evaluation_samples], dtype=np.float32)
     if explicit is not None:
-        return float(explicit), "manual"
-    normal = groups.get("Train / Good", []) + groups.get("Test / Good", [])
-    anomalous = groups.get("Test / Anomaly", [])
-    if not normal or not anomalous:
-        raise RuntimeError(
-            "Automatic threshold needs both normal and anomalous test scores; pass --score_threshold."
-        )
-    normal = np.asarray(normal, dtype=np.float64)
-    anomalous = np.asarray(anomalous, dtype=np.float64)
-    if float(normal.max()) <= float(anomalous.min()):
-        return float((normal.max() + anomalous.min()) / 2.0), "normal-max/anomaly-min"
-    return float((np.median(normal) + np.median(anomalous)) / 2.0), "median-midpoint"
+        threshold = float(explicit)
+        return threshold, "manual", classification_metrics(labels, scores, threshold)
+    return select_optimal_threshold(labels, scores)
 
 
 def _plot_distribution(
     groups: Dict[str, List[float]], gt_scores: Sequence[float], threshold: float, output_path: Path, bins: int
 ) -> None:
-    entries = [*GROUPS, ("test_gt", "Test / GT")]
-    values = {**groups, "Test / GT": list(gt_scores)}
-    figure, axes = plt.subplots(4, 1, figsize=(10, 15), sharex=True)
-    for axis, (_key, label) in zip(axes, entries):
-        group_values = np.asarray(values.get(label, []), dtype=np.float64)
-        group_values = group_values[np.isfinite(group_values)]
-        if group_values.size:
-            axis.hist(group_values, bins=max(1, bins), alpha=0.7, color="crimson" if label == "Test / GT" else "steelblue")
-        else:
-            axis.text(0.5, 0.5, "No samples", ha="center", va="center", transform=axis.transAxes)
-        axis.axvline(threshold, color="black", linestyle="--", linewidth=1.2, label=f"threshold={threshold:.6f}")
-        axis.set_title(f"PatchCore {label} (n={group_values.size})")
-        axis.set_ylabel("Count")
-        axis.grid(True, alpha=0.3)
-        axis.legend()
-    axes[-1].set_xlabel("PatchCore anomaly score")
-    figure.tight_layout()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close(figure)
+    plot_common_score_distribution(
+        groups,
+        output_path,
+        threshold,
+        bins,
+        title="PatchCore score distribution",
+        xlabel="PatchCore anomaly score",
+        gt_score_values=gt_scores,
+    )
 
 
 def _save_score_table(samples: Sequence[Dict[str, object]], output_path: Path) -> None:
-    with output_path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=["group", "image_path", "score", "score_path"])
-        writer.writeheader()
-        for sample in samples:
-            writer.writerow(
-                {
-                    "group": sample["group_label"],
-                    "image_path": str(sample["image_path"]),
-                    "score": float(sample["score"]),
-                    "score_path": str(sample["score_path"]),
-                }
-            )
-            if sample.get("gt_score") is not None:
-                writer.writerow(
-                    {
-                        "group": "Test / GT",
-                        "image_path": str(sample["image_path"]),
-                        "score": float(sample["gt_score"]),
-                        "score_path": str(sample["score_path"]),
-                    }
-                )
+    write_score_table(samples, output_path, include_score_path=True)
 
 
 def _evaluate(
@@ -432,6 +394,18 @@ def _evaluate(
             }
         )
     return compute_evaluation_metrics(scores, labels, np.stack(maps), np.stack(masks)), records
+
+
+def _image_only_metrics(samples: Sequence[Dict[str, object]]) -> Dict[str, float]:
+    """Calculate image metrics when pixel GT is unavailable."""
+
+    evaluation_samples = [sample for sample in samples if sample["group_key"] != "train_good"]
+    return compute_evaluation_metrics(
+        [float(sample["score"]) for sample in evaluation_samples],
+        [sample["group_key"] == "test_anomaly" for sample in evaluation_samples],
+        np.asarray([], dtype=np.float32),
+        np.asarray([], dtype=np.uint8),
+    )
 
 
 def _save_visualizations(samples: Sequence[Dict[str, object]], output_dir: Path, threshold: float) -> None:
@@ -488,7 +462,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--faiss_on_gpu", action="store_true")
     parser.add_argument("--faiss_num_workers", type=int, default=4)
     parser.add_argument("--bins", type=int, default=30)
-    parser.add_argument("--score_threshold", type=float, default=None)
+    parser.add_argument(
+        "--score_threshold",
+        type=float,
+        default=None,
+        help="图像判定阈值；不指定时按最大平衡准确率自动选择。",
+    )
     parser.add_argument("--vis", dest="save_visualizations", action="store_true")
     parser.add_argument("--force_recompute", action="store_true")
     parser.set_defaults(save_visualizations=False)
@@ -530,18 +509,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise FileNotFoundError(f"Ground-truth directory does not exist: {ground_truth_dir}")
     gt_scores = collect_gt_scores(samples, ground_truth_dir, mask_transform)
     score_groups = _group_scores(samples)
-    threshold, threshold_method = _choose_threshold(score_groups, args.score_threshold)
+    threshold, threshold_method, threshold_metrics = _choose_threshold(
+        samples, args.score_threshold
+    )
     _plot_distribution(score_groups, gt_scores, threshold, output_dir / "score_distribution.png", args.bins)
     _save_score_table(samples, output_dir / "score_values.csv")
-    with (output_dir / "score_threshold.json").open("w", encoding="utf-8") as file:
-        json.dump({"score_threshold": threshold, "method": threshold_method, "gt_region_count": len(gt_scores)}, file, ensure_ascii=False, indent=2)
+    save_classification_threshold(
+        output_dir / "score_threshold.json",
+        threshold,
+        threshold_method,
+        threshold_metrics,
+        extra={"score_threshold": threshold, "gt_region_count": len(gt_scores)},
+    )
 
     if ground_truth_dir is not None:
         metrics, records = _evaluate(samples, ground_truth_dir, mask_transform)
-        write_metrics({"score_maps": metrics}, output_dir)
         write_per_image_pixel_metrics(records, output_dir / "pixel_metrics.csv", extra_fields=("group",))
     else:
-        LOGGER.info("No ground_truth directory; evaluation metrics skipped.")
+        metrics = _image_only_metrics(samples)
+        LOGGER.info("No ground_truth directory; pixel-level metrics are unavailable.")
+    metrics.update(
+        {name: threshold_metrics[name] for name in CLASSIFICATION_METRIC_NAMES}
+    )
+    write_metrics({"score_maps": metrics}, output_dir)
 
     if args.save_visualizations:
         _save_visualizations(samples, output_dir, threshold)

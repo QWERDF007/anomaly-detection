@@ -247,14 +247,12 @@ def train(args) -> List[Dict[str, object]]:
         LOGGER.info("Fitting PatchCore with %d training images", len(train_dataset))
         model.fit(train_loader)
 
-        category_dir = output_root / "models" / category_name
-        category_dir.mkdir(parents=True, exist_ok=True)
-        model.save_to_path(str(category_dir))
-        LOGGER.info("Saved model to %s", category_dir)
+        model.save_to_path(str(output_root))
+        LOGGER.info("Saved model to %s", output_root)
 
         metrics: Dict[str, float] = {}
         if test_loader is not None:
-            metrics = evaluate(model, test_loader, test_dataset, category_dir)
+            metrics = evaluate(model, test_loader, test_dataset, output_root)
             metric_text = ", ".join(
                 f"{name}={metrics[name]:.4f}" for name in metrics
             )

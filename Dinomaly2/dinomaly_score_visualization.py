@@ -5,7 +5,7 @@ This is a standalone subset of ``dinomaly_roi_pipeline.py``.  It only:
 1. predicts and caches Dinomaly2 score maps;
 2. plots Train/Good, Test/Good, Test/Anomaly and optional GT-region score
    distributions;
-3. selects an automatic score threshold from the distributions; and
+3. selects an image threshold by maximum balanced accuracy; and
 4. optionally saves threshold masks and fused heatmaps.
 
 The score table also contains a ``Test / GT`` row for each annotated anomaly
@@ -23,6 +23,7 @@ import csv
 import json
 import logging
 import os
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
@@ -37,9 +38,26 @@ import torch
 from skimage import measure
 from tqdm import tqdm
 
+ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = ROOT.parent
+SHARED_UTILS = PROJECT_ROOT / "utils"
+if str(SHARED_UTILS) not in sys.path:
+    sys.path.insert(1, str(SHARED_UTILS))
+
+from score_workflow_common import (  # noqa: E402
+    CLASSIFICATION_METRIC_NAMES,
+    classification_metrics,
+    group_score_values,
+    plot_score_distribution as plot_common_score_distribution,
+    save_classification_threshold,
+    select_optimal_threshold,
+    write_score_table,
+)
 from dinomaly_evaluation import (
+    METRIC_NAMES,
     evaluate_stage,
     print_and_save_metrics,
+    training_image_score,
     write_per_image_pixel_metrics,
 )
 from dinomaly_pipeline_common import (
@@ -398,6 +416,38 @@ def save_score_table(samples: Sequence[Dict], output_path: Path) -> None:
                 )
 
 
+def attach_training_image_scores(samples: Sequence[Dict], metric_size: int) -> None:
+    """Set the visualization score to the same top-1% image score as training."""
+
+    for sample in samples:
+        score_map = load_score_map(Path(sample["score_path"]))
+        resized_score = cv2.resize(
+            score_map,
+            (metric_size, metric_size),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        sample["score"] = training_image_score(resized_score)
+
+
+def choose_image_threshold(
+    samples: Sequence[Dict], explicit: Optional[float]
+) -> tuple[float, str, Dict[str, float]]:
+    evaluation_samples = [
+        sample
+        for sample in samples
+        if sample["group_key"] in {"test_good", "test_anomaly"}
+    ]
+    labels = np.asarray(
+        [sample["group_key"] == "test_anomaly" for sample in evaluation_samples],
+        dtype=np.uint8,
+    )
+    scores = np.asarray([sample["score"] for sample in evaluation_samples], dtype=np.float32)
+    if explicit is not None:
+        threshold = float(explicit)
+        return threshold, "manual", classification_metrics(labels, scores, threshold)
+    return select_optimal_threshold(labels, scores)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Dinomaly2 score map, automatic threshold, heatmap and mask pipeline.",
@@ -486,7 +536,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--bins",
         type=int,
         default=30,
-        help="分布图直方图 bin 数以及自动阈值搜索分辨率基数。",
+        help="分布图直方图 bin 数。",
     )
     parser.add_argument(
         "--metric_size",
@@ -498,7 +548,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--score_threshold",
         type=float,
         default=None,
-        help="分数阈值；不指定时根据正常/异常分布自动选择。",
+        help="图像判定阈值；不指定时按最大平衡准确率自动选择。",
     )
     parser.add_argument(
         "--gpu",
@@ -601,11 +651,10 @@ def main(argv=None) -> int:
     if not samples:
         raise RuntimeError("No images were found in the configured groups.")
 
-    score_groups = score_values_by_group(samples)
-    score_threshold, threshold_method = choose_threshold(
-        score_groups,
-        args.score_threshold,
-        args.bins,
+    attach_training_image_scores(samples, args.metric_size)
+    score_groups = group_score_values(samples)
+    score_threshold, threshold_method, threshold_metrics = choose_image_threshold(
+        samples, args.score_threshold
     )
     LOGGER.info(
         "Selected score threshold: %.6f (%s)",
@@ -634,32 +683,27 @@ def main(argv=None) -> int:
         len(gt_score_values),
     )
 
-    plot_score_distribution(
+    plot_common_score_distribution(
         score_groups,
         output_dir / "score_distribution.png",
         score_threshold,
         args.bins,
-        gt_score_values,
+        title="Dinomaly2 score distribution",
+        xlabel="Dinomaly2 image anomaly score",
+        gt_score_values=gt_score_values,
     )
-    save_score_table(samples, output_dir / "score_values.csv")
-    with (output_dir / "score_threshold.json").open(
-        "w",
-        encoding="utf-8",
-    ) as file:
-        json.dump(
-            {
-                "score_threshold": score_threshold,
-                "method": threshold_method,
-                "groups": {
-                    label: len(values)
-                    for label, values in score_groups.items()
-                },
-                "gt_anomaly_region_score_count": len(gt_score_values),
-            },
-            file,
-            ensure_ascii=False,
-            indent=2,
-        )
+    write_score_table(samples, output_dir / "score_values.csv")
+    save_classification_threshold(
+        output_dir / "score_threshold.json",
+        score_threshold,
+        threshold_method,
+        threshold_metrics,
+        extra={
+            "score_threshold": score_threshold,
+            "groups": {label: len(values) for label, values in score_groups.items()},
+            "gt_anomaly_region_score_count": len(gt_score_values),
+        },
+    )
 
     if ground_truth_dir is not None:
         print("Evaluating score maps...", flush=True)
@@ -672,7 +716,6 @@ def main(argv=None) -> int:
             stage_name="score maps",
             per_image_records=pixel_metric_records,
         )
-        print_and_save_metrics({"score_maps": metrics}, output_dir)
         write_per_image_pixel_metrics(
             pixel_metric_records,
             output_dir / "pixel_metrics.csv",
@@ -683,9 +726,14 @@ def main(argv=None) -> int:
             flush=True,
         )
     else:
+        metrics = {name: float("nan") for name in METRIC_NAMES}
         LOGGER.info(
-            "Evaluation metrics skipped; no ground-truth directory found."
+            "No ground-truth directory; pixel-level metrics are unavailable."
         )
+    metrics.update(
+        {name: threshold_metrics[name] for name in CLASSIFICATION_METRIC_NAMES}
+    )
+    print_and_save_metrics({"score_maps": metrics}, output_dir)
 
     if args.save_visualizations:
         print("Saving score heatmaps and masks...", flush=True)

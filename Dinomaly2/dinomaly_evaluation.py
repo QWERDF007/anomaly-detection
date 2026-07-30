@@ -8,8 +8,7 @@ image-level score follows the training evaluator's highest-1% pixel mean.
 
 from __future__ import annotations
 
-import csv
-import json
+import sys
 from pathlib import Path
 from typing import Dict, Mapping, Optional, Sequence
 
@@ -24,6 +23,20 @@ from sklearn.metrics import (
 from skimage import measure
 from tqdm import tqdm
 
+ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = ROOT.parent
+SHARED_UTILS = PROJECT_ROOT / "utils"
+if str(SHARED_UTILS) not in sys.path:
+    sys.path.insert(1, str(SHARED_UTILS))
+
+from score_workflow_common import (  # noqa: E402
+    CLASSIFICATION_METRIC_NAMES,
+    classification_metrics,
+    report_metric_names,
+    select_optimal_threshold,
+    write_metric_report,
+    write_per_image_report,
+)
 from dinomaly_pipeline_common import load_ground_truth, load_score_map
 
 
@@ -43,6 +56,7 @@ PIXEL_METRIC_NAMES = (
     "P-F1",
     "P-AUPRO",
 )
+REPORT_METRIC_NAMES = report_metric_names(METRIC_NAMES)
 
 # This is the same ratio passed to ``evaluation_batch`` by the training
 # entry point (dinomaly_2D.py).  The image-level score is therefore the mean
@@ -380,8 +394,6 @@ def write_per_image_pixel_metrics(
 ) -> None:
     """Write per-image pixel metrics to a CSV file."""
 
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "stage",
         "group",
@@ -390,16 +402,7 @@ def write_per_image_pixel_metrics(
         "gt_positive_pixels",
         *PIXEL_METRIC_NAMES,
     ]
-    with output_path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
-        writer.writeheader()
-        for record in records:
-            writer.writerow(
-                {
-                    field: record.get(field, float("nan"))
-                    for field in fieldnames
-                }
-            )
+    write_per_image_report(records, output_path, fieldnames)
 
 
 def print_metrics(
@@ -407,15 +410,13 @@ def print_metrics(
 ) -> None:
     """Print a metric table without writing any files."""
 
+    # Kept as a compatibility entry point for callers that only print.
+    metric_names = REPORT_METRIC_NAMES
     print("\nEvaluation metrics")
-    print(
-        "stage                         "
-        + "  ".join(f"{name:>10}" for name in METRIC_NAMES)
-    )
+    print("stage                         " + "  ".join(f"{name:>10}" for name in metric_names))
     for stage, metrics in results.items():
         values = "  ".join(
-            f"{metrics.get(name, float('nan')):10.6f}"
-            for name in METRIC_NAMES
+            f"{metrics.get(name, float('nan')):10.6f}" for name in metric_names
         )
         print(f"{stage:<29}{values}")
     print()
@@ -427,39 +428,4 @@ def print_and_save_metrics(
 ) -> None:
     """Save metrics as JSON/CSV and print the shared table format."""
 
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    result = {
-        str(stage): dict(metrics)
-        for stage, metrics in results.items()
-    }
-    with (output_dir / "metrics.json").open("w", encoding="utf-8") as file:
-        json.dump(
-            result,
-            file,
-            ensure_ascii=False,
-            indent=2,
-            allow_nan=True,
-        )
-    with (output_dir / "metrics.csv").open(
-        "w",
-        newline="",
-        encoding="utf-8",
-    ) as file:
-        writer = csv.DictWriter(
-            file,
-            fieldnames=["stage"] + list(METRIC_NAMES),
-        )
-        writer.writeheader()
-        for stage, metrics in result.items():
-            writer.writerow(
-                {
-                    "stage": stage,
-                    **{
-                        name: metrics.get(name, float("nan"))
-                        for name in METRIC_NAMES
-                    },
-                }
-            )
-
-    print_metrics(result)
+    write_metric_report(results, output_dir, METRIC_NAMES, "stage")
