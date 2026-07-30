@@ -3,13 +3,13 @@
 The original project exposes a powerful chained Click command in
 ``bin/run_patchcore.py``.  This script is a smaller, argparse-based entry point
 for the workflow used by Dinomaly2: point it at one dataset directory, build a
-normal-only memory bank, optionally evaluate the test split, and save a model
+normal-only memory bank, evaluate every available test split, and save a model
 that can be consumed by ``predict.py`` or the original PatchCore loader.
 
 Examples::
 
     python train.py --data_path /data/widget --dataset custom \
-        --backbone wideresnet50 --save_dir ./saved_results --save_name widget
+        --backbone wideresnet50 --save_dir ./saved_results
 
     python train.py --data_path /data/mvtec --dataset mvtec \
         --category bottle --category cable --gpu 0
@@ -21,6 +21,7 @@ import argparse
 import csv
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -60,15 +61,15 @@ def setup_seed(seed: int, device: torch.device) -> None:
 
 
 def select_device(gpu: int) -> torch.device:
-    """Return a usable device, falling back to CPU when CUDA is unavailable."""
+    """Return the requested CUDA device required by GPU FAISS."""
 
-    if gpu >= 0 and torch.cuda.is_available():
-        if gpu >= torch.cuda.device_count():
-            raise ValueError(
-                f"GPU {gpu} is not available; {torch.cuda.device_count()} device(s) found."
-            )
-        return torch.device(f"cuda:{gpu}")
-    return torch.device("cpu")
+    if not torch.cuda.is_available():
+        raise RuntimeError("GPU FAISS is required, but CUDA is not available.")
+    if gpu < 0 or gpu >= torch.cuda.device_count():
+        raise ValueError(
+            f"GPU {gpu} is not available; {torch.cuda.device_count()} device(s) found."
+        )
+    return torch.device(f"cuda:{gpu}")
 
 
 def _split_categories(values: Optional[Sequence[str]]) -> List[Optional[str]]:
@@ -154,7 +155,7 @@ def build_patchcore(
         featuresampler=make_sampler(args, device, number_of_features),
         anomaly_score_num_nn=args.anomaly_scorer_num_nn,
         nn_method=patchcore.common.FaissNN(
-            on_gpu=args.faiss_on_gpu and device.type == "cuda",
+            on_gpu=True,
             num_workers=args.faiss_num_workers,
         ),
     )
@@ -197,13 +198,11 @@ def train(args) -> List[Dict[str, object]]:
     setup_seed(args.seed, device)
     LOGGER.info("Using device: %s", device)
 
-    output_root = Path(args.save_dir).expanduser() / args.save_name
+    output_root = Path(args.save_dir).expanduser() / datetime.now().strftime(
+        "%Y%m%d%H%M%S"
+    )
     if output_root.exists() and not output_root.is_dir():
         raise FileExistsError(f"Output path is not a directory: {output_root}")
-    if output_root.exists() and not args.overwrite and any(output_root.iterdir()):
-        raise FileExistsError(
-            f"Output directory is not empty: {output_root}. Use --overwrite or choose another name."
-        )
     output_root.mkdir(parents=True, exist_ok=True)
 
     results: List[Dict[str, object]] = []
@@ -215,13 +214,10 @@ def train(args) -> List[Dict[str, object]]:
             raise RuntimeError(f"No normal training images found for {category_name}.")
 
         test_dataset = None
-        if not args.skip_eval:
-            try:
-                test_dataset = make_dataset(args, category, DatasetSplit.TEST)
-            except (FileNotFoundError, RuntimeError) as exc:
-                if args.require_test:
-                    raise
-                LOGGER.warning("Skipping evaluation for %s: %s", category_name, exc)
+        try:
+            test_dataset = make_dataset(args, category, DatasetSplit.TEST)
+        except (FileNotFoundError, RuntimeError) as exc:
+            LOGGER.warning("Skipping evaluation for %s: %s", category_name, exc)
 
         pin_memory = device.type == "cuda"
         loader_kwargs = {
@@ -252,11 +248,9 @@ def train(args) -> List[Dict[str, object]]:
         model.fit(train_loader)
 
         category_dir = output_root / "models" / category_name
-        if args.save_model or test_loader is not None:
-            category_dir.mkdir(parents=True, exist_ok=True)
-        if args.save_model:
-            model.save_to_path(str(category_dir))
-            LOGGER.info("Saved model to %s", category_dir)
+        category_dir.mkdir(parents=True, exist_ok=True)
+        model.save_to_path(str(category_dir))
+        LOGGER.info("Saved model to %s", category_dir)
 
         metrics: Dict[str, float] = {}
         if test_loader is not None:
@@ -307,10 +301,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Category name; repeat or comma-separate for multiple categories.",
     )
     parser.add_argument("--save_dir", default="./saved_results")
-    parser.add_argument("--save_name", default="patchcore_custom")
-    parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--skip_eval", action="store_true")
-    parser.add_argument("--require_test", action="store_true")
     parser.add_argument("--mask_dir", default=None)
 
     parser.add_argument("--backbone", "-b", default="wideresnet50")
@@ -333,33 +323,17 @@ def build_parser() -> argparse.ArgumentParser:
         default="approx_greedy_coreset",
     )
     parser.add_argument("--sampling_percentage", "-p", type=float, default=0.1)
-    parser.add_argument(
-        "--faiss_on_gpu",
-        dest="faiss_on_gpu",
-        action="store_true",
-        default=True,
-        help="Use GPU FAISS for nearest-neighbour search (enabled by default).",
-    )
-    parser.add_argument(
-        "--no_faiss_on_gpu",
-        "--no-faiss-on-gpu",
-        dest="faiss_on_gpu",
-        action="store_false",
-        help="Disable GPU FAISS and use the CPU index.",
-    )
     parser.add_argument("--faiss_num_workers", type=int, default=4)
 
     parser.add_argument(
-        "--resize",
-        "--image_size",
+        "-imgsz",
         dest="resize",
         type=int,
         default=256,
         help="Initial resize before center cropping.",
     )
     parser.add_argument(
-        "--imagesize",
-        "--crop_size",
+        "-csz",
         dest="imagesize",
         type=int,
         default=224,
@@ -377,14 +351,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="CUDA device index (default: 0).",
     )
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument(
-        "--save_patchcore_model",
-        dest="save_model",
-        action="store_true",
-        default=True,
-        help="Save PatchCore files (enabled by default).",
-    )
-    parser.add_argument("--no-save-model", dest="save_model", action="store_false")
     return parser
 
 
