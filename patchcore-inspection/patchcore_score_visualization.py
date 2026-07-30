@@ -52,6 +52,7 @@ from patchcore_evaluation import (
     compute_evaluation_metrics,
     evaluate_pixel_metrics,
     load_score_map,
+    region_detection_metrics,
     select_optimal_threshold,
     write_metrics,
     write_per_image_pixel_metrics,
@@ -393,7 +394,16 @@ def _evaluate(
                 **{name: pixel_metrics[name] for name in pixel_metrics if name.startswith("P-")},
             }
         )
-    return compute_evaluation_metrics(scores, labels, np.stack(maps), np.stack(masks)), records
+    metrics = compute_evaluation_metrics(scores, labels, np.stack(maps), np.stack(masks))
+    metrics.update(
+        region_detection_metrics(
+            np.stack(masks),
+            np.stack(maps),
+            metrics["P-F1-Threshold"],
+            records,
+        )
+    )
+    return metrics, records
 
 
 def _image_only_metrics(samples: Sequence[Dict[str, object]]) -> Dict[str, float]:

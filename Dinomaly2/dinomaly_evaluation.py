@@ -32,6 +32,8 @@ if str(SHARED_UTILS) not in sys.path:
 from score_workflow_common import (  # noqa: E402
     CLASSIFICATION_METRIC_NAMES,
     classification_metrics,
+    pixel_f1_score_and_threshold,
+    region_detection_metrics,
     report_metric_names,
     select_optimal_threshold,
     write_metric_report,
@@ -325,15 +327,27 @@ def evaluate_stage(
     score_pixels_array = np.stack(score_pixels, axis=0)
     pixel_labels = gt_pixels_array.reshape(-1)
     pixel_scores = score_pixels_array.reshape(-1)
-    return {
+    pixel_f1, pixel_threshold = pixel_f1_score_and_threshold(
+        gt_pixels_array, score_pixels_array
+    )
+    metrics = {
         "I-AUROC": safe_auroc(image_labels_array, image_scores_array),
         "I-AP": safe_ap(image_labels_array, image_scores_array),
         "I-F1": max_f1(image_labels_array, image_scores_array),
         "P-AUROC": safe_auroc(pixel_labels, pixel_scores),
         "P-AP": safe_ap(pixel_labels, pixel_scores),
-        "P-F1": max_f1(pixel_labels, pixel_scores),
+        "P-F1": pixel_f1,
         "P-AUPRO": safe_aupro(gt_pixels_array, score_pixels_array),
     }
+    metrics.update(
+        region_detection_metrics(
+            gt_pixels_array,
+            score_pixels_array,
+            pixel_threshold,
+            per_image_records,
+        )
+    )
+    return metrics
 
 
 def evaluate_pixel_metrics(
@@ -400,7 +414,12 @@ def write_per_image_pixel_metrics(
         "image_path",
         "image_score",
         "gt_positive_pixels",
+        "gt_region_count",
+        "detected_region_count",
+        "missed_region_count",
         *PIXEL_METRIC_NAMES,
+        "R-MissRate",
+        "R-PixelCoverage",
     ]
     write_per_image_report(records, output_path, fieldnames)
 

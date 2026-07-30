@@ -18,6 +18,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from sklearn.metrics import precision_recall_curve
+from skimage import measure
 
 
 STANDARD_GROUPS = (
@@ -37,6 +39,13 @@ IMAGE_EXTENSIONS = {
 MASK_EXTENSIONS = (".png", ".bmp", ".tif", ".tiff", ".jpg", ".jpeg")
 SCORE_EXTENSIONS = (".npy", ".npz")
 CLASSIFICATION_METRIC_NAMES = ("Threshold", "FPR", "TNR", "Accuracy")
+REGION_METRIC_NAMES = (
+    "P-F1-Threshold",
+    "R-MissRate",
+    "R-PixelCoverage",
+    "R-GT-ImageCount",
+    "R-GT-RegionCount",
+)
 
 
 def find_child_directory(root: Path, name: str) -> Optional[Path]:
@@ -265,8 +274,122 @@ def select_optimal_threshold(labels, scores) -> Tuple[float, str, Dict[str, floa
     return float(best[1]["Threshold"]), "max-balanced-accuracy", best[1]
 
 
+def pixel_f1_score_and_threshold(masks, score_maps) -> Tuple[float, float]:
+    """Return the pixel P-F1 and its threshold from one PR-curve sweep.
+
+    The threshold is selected from every evaluated pixel together, which makes
+    all per-image region metrics comparable.  The terminal PR point without a
+    corresponding threshold is intentionally excluded.
+    """
+
+    masks = np.asarray(masks, dtype=np.uint8)
+    score_maps = np.asarray(score_maps, dtype=np.float32)
+    if masks.shape != score_maps.shape or masks.size == 0:
+        return float("nan"), float("nan")
+    labels = (masks > 0).reshape(-1).astype(np.uint8)
+    scores = score_maps.reshape(-1)
+    if len(np.unique(labels)) < 2 or not np.all(np.isfinite(scores)):
+        return float("nan"), float("nan")
+    try:
+        precision, recall, thresholds = precision_recall_curve(labels, scores)
+    except ValueError:
+        return float("nan"), float("nan")
+    if thresholds.size == 0:
+        return float("nan"), float("nan")
+    f1 = 2.0 * precision[:-1] * recall[:-1] / (precision[:-1] + recall[:-1] + 1e-7)
+    if not np.any(np.isfinite(f1)):
+        return float("nan"), float("nan")
+    index = int(np.nanargmax(f1))
+    return float(f1[index]), float(thresholds[index])
+
+
+def optimal_pixel_f1_threshold(masks, score_maps) -> float:
+    """Compatibility helper returning only the threshold from P-F1 evaluation."""
+
+    _f1, threshold = pixel_f1_score_and_threshold(masks, score_maps)
+    return threshold
+
+
+def region_detection_metrics(
+    masks,
+    score_maps,
+    threshold: float,
+    per_image_records: Optional[Sequence[Dict[str, object]]] = None,
+) -> Dict[str, float]:
+    """Measure GT-region misses and pixel coverage at the P-F1 threshold.
+
+    A GT connected component is detected when *any* predicted positive pixel
+    overlaps it.  A component contributes at most one detection even if it is
+    touched by many disconnected predicted regions.  Every GT component also
+    contributes its intersected-pixel ratio; missed components have coverage
+    zero. Images without GT regions are excluded from the image-wise mean.
+    """
+
+    masks = np.asarray(masks, dtype=np.uint8)
+    score_maps = np.asarray(score_maps, dtype=np.float32)
+    if masks.shape != score_maps.shape or masks.ndim != 3:
+        raise ValueError("masks and score_maps must be equally shaped [N,H,W] arrays")
+    if not np.isfinite(threshold):
+        return {name: float("nan") for name in REGION_METRIC_NAMES}
+    if per_image_records is not None and len(per_image_records) != len(masks):
+        raise ValueError("per_image_records must have one item per score map")
+
+    image_miss_rates = []
+    image_pixel_coverages = []
+    total_regions = 0
+    for index, (mask, score_map) in enumerate(zip(masks, score_maps)):
+        gt_labels = measure.label(mask.astype(bool))
+        region_count = int(gt_labels.max())
+        prediction = score_map >= threshold
+        detected = 0
+        region_coverages = []
+        for region_id in range(1, region_count + 1):
+            region_mask = gt_labels == region_id
+            covered_pixels = int(prediction[region_mask].sum())
+            if covered_pixels:
+                detected += 1
+            # ``prediction`` is the union of all thresholded predicted
+            # regions, so disconnected predictions hitting this GT component
+            # are accumulated without double-counting pixels.
+            region_coverages.append(covered_pixels / int(region_mask.sum()))
+        missed = region_count - detected
+        if region_count:
+            miss_rate = missed / region_count
+            image_miss_rates.append(miss_rate)
+            pixel_coverage = float(np.mean(region_coverages))
+            image_pixel_coverages.append(pixel_coverage)
+        else:
+            miss_rate = float("nan")
+            pixel_coverage = float("nan")
+        total_regions += region_count
+        if per_image_records is not None:
+            per_image_records[index].update(
+                {
+                    "gt_region_count": region_count,
+                    "detected_region_count": detected,
+                    "missed_region_count": missed,
+                    "R-MissRate": miss_rate,
+                    "R-PixelCoverage": pixel_coverage,
+                }
+            )
+
+    return {
+        "P-F1-Threshold": float(threshold),
+        "R-MissRate": (
+            float(np.mean(image_miss_rates)) if image_miss_rates else float("nan")
+        ),
+        "R-PixelCoverage": (
+            float(np.mean(image_pixel_coverages))
+            if image_pixel_coverages
+            else float("nan")
+        ),
+        "R-GT-ImageCount": float(len(image_miss_rates)),
+        "R-GT-RegionCount": float(total_regions),
+    }
+
+
 def report_metric_names(base_metric_names: Sequence[str]) -> Tuple[str, ...]:
-    return (*base_metric_names, *CLASSIFICATION_METRIC_NAMES)
+    return (*base_metric_names, *CLASSIFICATION_METRIC_NAMES, *REGION_METRIC_NAMES)
 
 
 def write_metric_report(

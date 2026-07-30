@@ -26,6 +26,8 @@ from score_workflow_common import (  # noqa: E402
     CLASSIFICATION_METRIC_NAMES,
     classification_metrics,
     load_score_map,
+    pixel_f1_score_and_threshold,
+    region_detection_metrics,
     report_metric_names,
     select_optimal_threshold,
     write_metric_report,
@@ -179,10 +181,15 @@ def compute_evaluation_metrics(scores, labels, segmentations, masks) -> Dict[str
         pixel_scores = np.asarray([], dtype=np.float32)
         pixel_labels = np.asarray([], dtype=np.uint8)
         p_aupro = float("nan")
+        pixel_f1 = float("nan")
+        pixel_threshold = float("nan")
     else:
         pixel_scores = anomaly_maps.reshape(-1)
         pixel_labels = gt_masks.reshape(-1)
         p_aupro = compute_pro(gt_masks, anomaly_maps)
+        pixel_f1, pixel_threshold = pixel_f1_score_and_threshold(
+            gt_masks, anomaly_maps
+        )
 
     return {
         "I-AUROC": safe_auroc(image_labels, image_scores),
@@ -190,8 +197,9 @@ def compute_evaluation_metrics(scores, labels, segmentations, masks) -> Dict[str
         "I-F1": safe_f1_max(image_labels, image_scores),
         "P-AUROC": safe_auroc(pixel_labels, pixel_scores),
         "P-AP": safe_average_precision(pixel_labels, pixel_scores),
-        "P-F1": safe_f1_max(pixel_labels, pixel_scores),
+        "P-F1": pixel_f1,
         "P-AUPRO": p_aupro,
+        "P-F1-Threshold": pixel_threshold,
     }
 
 
@@ -234,6 +242,11 @@ def write_per_image_pixel_metrics(
         "image_label",
         "image_score",
         "gt_positive_pixels",
+        "gt_region_count",
+        "detected_region_count",
+        "missed_region_count",
         *PIXEL_METRIC_NAMES,
+        "R-MissRate",
+        "R-PixelCoverage",
     ]
     write_per_image_report(records, output_path, fields)

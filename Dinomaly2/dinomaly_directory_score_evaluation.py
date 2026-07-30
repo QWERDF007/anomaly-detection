@@ -44,6 +44,8 @@ from score_workflow_common import (  # noqa: E402
     iter_data_directories,
     iter_images,
     load_score_map,
+    pixel_f1_score_and_threshold,
+    region_detection_metrics,
     report_metric_names,
     save_classification_threshold,
     select_optimal_threshold,
@@ -263,7 +265,7 @@ def _evaluate_directory(
     masks_dir: Path | None,
     score_index: Mapping[str, Sequence[Tuple[Path, Path]]],
     metric_size: int,
-) -> Tuple[Dict[str, float], List[Dict[str, object]]]:
+) -> Tuple[Dict[str, float], List[Dict[str, object]], np.ndarray, np.ndarray]:
     gt_maps = []
     score_maps = []
     image_labels = []
@@ -348,7 +350,7 @@ def _evaluate_directory(
             show_progress=False,
         ),
     }
-    return metrics, records
+    return metrics, records, gt_array, score_array
 
 
 def _write_results(
@@ -366,10 +368,15 @@ def _write_results(
         "image_label",
         "image_score",
         "gt_positive_pixels",
+        "gt_region_count",
+        "detected_region_count",
+        "missed_region_count",
         "P-AUROC",
         "P-AP",
         "P-F1",
         "P-AUPRO",
+        "R-MissRate",
+        "R-PixelCoverage",
     ]
     write_per_image_report(records, output_dir / "pixel_metrics.csv", pixel_fields)
 
@@ -465,9 +472,10 @@ def main(argv=None) -> int:
     score_index = build_score_index(score_output_dirs)
     results: Dict[str, Dict[str, float]] = {}
     all_records: List[Dict[str, object]] = []
+    region_inputs = {}
 
     for data_directory, images_dir, masks_dir in data_directories:
-        metrics, records = _evaluate_directory(
+        metrics, records, gt_maps, score_maps = _evaluate_directory(
             data_directory,
             images_dir,
             masks_dir,
@@ -477,6 +485,7 @@ def main(argv=None) -> int:
         directory_key = str(data_directory)
         results[directory_key] = metrics
         all_records.extend(records)
+        region_inputs[directory_key] = (gt_maps, score_maps, records)
     labels = np.asarray(
         [record["image_label"] for record in all_records], dtype=np.uint8
     )
@@ -492,6 +501,11 @@ def main(argv=None) -> int:
         threshold_method = "manual"
         global_threshold_metrics = classification_metrics(labels, scores, threshold)
 
+    _global_pixel_f1, global_pixel_threshold = pixel_f1_score_and_threshold(
+        np.concatenate([item[0] for item in region_inputs.values()], axis=0),
+        np.concatenate([item[1] for item in region_inputs.values()], axis=0),
+    )
+
     for directory, metrics in results.items():
         directory_records = [
             record for record in all_records if record["directory"] == directory
@@ -506,6 +520,15 @@ def main(argv=None) -> int:
                 name: directory_threshold_metrics[name]
                 for name in CLASSIFICATION_METRIC_NAMES
             }
+        )
+        gt_maps, score_maps, directory_records = region_inputs[directory]
+        metrics.update(
+            region_detection_metrics(
+                gt_maps,
+                score_maps,
+                global_pixel_threshold,
+                directory_records,
+            )
         )
         print(f"\n===== {directory} =====", flush=True)
         print(
