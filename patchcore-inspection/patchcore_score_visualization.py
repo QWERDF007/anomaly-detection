@@ -155,9 +155,7 @@ def _predict_jobs(models, jobs: Sequence[Tuple[str, Path, Path]], transform):
 
     model_scores = [[] for _ in models]
     model_maps = [[] for _ in models]
-    for _group_key, _image_root, image_path in tqdm(
-        jobs, desc="PatchCore inference", unit="image", dynamic_ncols=True
-    ):
+    for _group_key, _image_root, image_path in jobs:
         image = Image.open(image_path).convert("RGB")
         tensor = transform(image).unsqueeze(0)
         for index, model in enumerate(models):
