@@ -1,27 +1,25 @@
-"""Evaluate score maps for child directories containing ``images``/``masks``.
+"""Evaluate cached anomaly score maps by ``images/`` and optional ``masks/``.
 
-This entry point is independent of model inference.  It scans one data root::
+This is a model-agnostic, no-inference entry point.  It evaluates only cached
+``.npy``/``.npz`` score maps, so it can be used for both Dinomaly2 and
+PatchCore (or any other model producing a two-dimensional anomaly map).
+
+Dataset layout::
 
     data_root/
-    ├── good/
-    │   └── images/
-    └── class_a/
+    ├── normal/images/
+    └── defect/
         ├── images/
         └── masks/
 
-Any child directory may omit ``masks/``; it is treated as normal and assigned
-an all-zero GT.  A child directory that has ``masks/`` uses those masks.
-
-Score maps are searched recursively under one or more ``score_output_dir``
-directories and matched by image stem.  Results are printed separately for
-each child directory and written to ``metrics.csv``, ``metrics.json`` and
-``pixel_metrics.csv`` under ``output_dir``.
+Every direct child must provide ``images/``.  A child without ``masks/`` is a
+normal class.  Score maps are found by filename stem below one or more score
+directories.
 """
 
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 from typing import Dict, List, Mapping, Sequence, Tuple
 
@@ -29,50 +27,38 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
-ROOT = Path(__file__).resolve().parent
-PROJECT_ROOT = ROOT.parent
-SHARED_UTILS = PROJECT_ROOT / "utils"
-if str(SHARED_UTILS) not in sys.path:
-    sys.path.insert(1, str(SHARED_UTILS))
-
-from score_workflow_common import (  # noqa: E402
+from anomaly_evaluation import (
     CLASSIFICATION_METRIC_NAMES,
-    build_score_index,
+    METRIC_NAMES,
+    REPORT_METRIC_NAMES,
     classification_metrics,
+    compute_evaluation_metrics,
+    evaluate_pixel_metrics,
+    pixel_f1_score_and_threshold,
+    region_detection_metrics,
+    select_optimal_threshold,
+    training_image_score,
+    write_per_image_pixel_metrics,
+)
+from score_workflow_common import (
+    build_score_index,
     find_mask,
     find_score,
     iter_data_directories,
     iter_images,
     load_score_map,
-    pixel_f1_score_and_threshold,
-    region_detection_metrics,
-    report_metric_names,
     save_classification_threshold,
-    select_optimal_threshold,
     write_metric_report,
 )
-from dinomaly_evaluation import (
-    METRIC_NAMES,
-    compute_evaluation_metrics,
-    evaluate_pixel_metrics,
-    training_image_score,
-    write_per_image_pixel_metrics,
-)
-
-REPORT_METRIC_NAMES = report_metric_names(METRIC_NAMES)
 
 
 def _load_mask(mask_path: Path, shape: Tuple[int, int]) -> np.ndarray:
     mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
     if mask is None:
-        raise ValueError(f"Cannot read mask: {mask_path}")
+        raise OSError(f"Cannot read mask: {mask_path}")
     if mask.shape != shape:
-        mask = cv2.resize(
-            mask,
-            (shape[1], shape[0]),
-            interpolation=cv2.INTER_NEAREST,
-        )
-    return np.asarray(mask > 0, dtype=np.uint8)
+        mask = cv2.resize(mask, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
+    return (mask > 0).astype(np.uint8)
 
 
 def _evaluate_directory(
@@ -87,19 +73,14 @@ def _evaluate_directory(
     image_labels = []
     image_scores = []
     records: List[Dict[str, object]] = []
-    image_paths = iter_images(images_dir)
 
     for image_path in tqdm(
-        image_paths,
+        iter_images(images_dir),
         desc=f"Evaluate {data_directory.name}",
         unit="image",
         dynamic_ncols=True,
     ):
-        score_path = find_score(
-            image_path,
-            data_directory,
-            score_index,
-        )
+        score_path = find_score(image_path, data_directory, score_index)
         score_map = load_score_map(score_path)
         mask_path = find_mask(image_path, images_dir, masks_dir)
         gt_mask = (
@@ -107,19 +88,21 @@ def _evaluate_directory(
             if mask_path is not None
             else np.zeros(score_map.shape, dtype=np.uint8)
         )
-        resized_gt = cv2.resize(
-            gt_mask,
-            (metric_size, metric_size),
-            interpolation=cv2.INTER_NEAREST,
-        )
         resized_score = cv2.resize(
             score_map,
             (metric_size, metric_size),
             interpolation=cv2.INTER_LINEAR,
         )
-        image_label = bool(resized_gt.any())
+        resized_gt = cv2.resize(
+            gt_mask,
+            (metric_size, metric_size),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        image_label = int(np.any(resized_gt))
         image_score = training_image_score(resized_score)
-        gt_maps.append(resized_gt)
+        pixel_metrics = evaluate_pixel_metrics(resized_gt, resized_score)
+
+        gt_maps.append((resized_gt > 0).astype(np.uint8))
         score_maps.append(resized_score)
         image_labels.append(image_label)
         image_scores.append(image_score)
@@ -129,10 +112,10 @@ def _evaluate_directory(
                 "image_path": str(image_path),
                 "mask_path": str(mask_path) if mask_path is not None else "",
                 "score_path": str(score_path),
-                "image_label": int(image_label),
+                "image_label": image_label,
                 "image_score": image_score,
-                "gt_positive_pixels": int(resized_gt.astype(bool).sum()),
-                **evaluate_pixel_metrics(resized_gt, resized_score),
+                "gt_positive_pixels": int(np.asarray(resized_gt, dtype=bool).sum()),
+                **pixel_metrics,
             }
         )
 
@@ -147,41 +130,16 @@ def _evaluate_directory(
     return metrics, records, gt_array, score_array
 
 
-def _write_results(
-    results: Mapping[str, Mapping[str, float]],
-    records: Sequence[Mapping[str, object]],
-    output_dir: Path,
-) -> None:
-    write_metric_report(results, output_dir, METRIC_NAMES, "directory")
-
-    write_per_image_pixel_metrics(records, output_dir / "pixel_metrics.csv")
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description=(
-            "Evaluate score maps by data_root child directory. Each child "
-            "must contain images/; masks/ is optional and omitted means "
-            "normal. No model inference is run."
-        ),
+        description="Evaluate cached .npy/.npz anomaly maps by data-root child directory; no inference is run.",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
-            "目录示例（good 可省略 masks/）：\n"
-            "  data_root/category_a/images/a.png\n"
-            "  data_root/category_a/masks/a.png\n"
-            "  data_root/category_b/images/b.png\n"
-            "  data_root/category_b/masks/b.png\n\n"
-            "score_output_dir 可重复或空格指定多个目录；脚本递归搜索"
-            ".npy/.npz，并按图像 stem 匹配。"
+            "Each data_root child needs images/ and may omit masks/ (normal class).\n"
+            "score_output_dir accepts one or more directories and recursively matches .npy/.npz by image stem."
         ),
     )
-    parser.add_argument(
-        "-i",
-        "--data_root",
-        required=True,
-        type=Path,
-        help="包含多个 images/ 和 masks/ 子目录的数据根目录。",
-    )
+    parser.add_argument("-i", "--data_root", required=True, type=Path)
     parser.add_argument(
         "-s",
         "--score_output_dir",
@@ -190,52 +148,54 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         action="append",
         type=Path,
-        help="一个或多个 score map 搜索目录；可空格分隔或重复指定。",
+        help="One or more score-map roots; repeat the option or separate paths with spaces.",
     )
     parser.add_argument(
         "-o",
         "--output_dir",
         type=Path,
         default=None,
-        help="评估结果目录；默认写入 data_root/evaluation_metrics。",
+        help="Report directory (default: data_root/evaluation_metrics).",
     )
     parser.add_argument(
         "-msz",
         "--metric_size",
         type=int,
         default=256,
-        help="计算指标前统一缩放到的正方形边长（默认：256）。",
+        help="Square metric resolution (default: 256).",
     )
     parser.add_argument(
         "--score_threshold",
         type=float,
         default=None,
-        help="图像判定阈值；不指定时在全部子目录上按最大平衡准确率自动选择。",
+        help="Manual image/pixel threshold; default chooses the image threshold by max balanced accuracy.",
     )
     return parser
 
 
-def main(argv=None) -> int:
+def _score_directories(values: Sequence[Sequence[Path]]) -> List[Path]:
+    directories = []
+    seen = set()
+    for group in values:
+        for directory in group:
+            directory = directory.expanduser().resolve()
+            if not directory.is_dir():
+                raise FileNotFoundError(f"Score output directory does not exist: {directory}")
+            if directory not in seen:
+                directories.append(directory)
+                seen.add(directory)
+    return directories
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.metric_size < 1:
+        raise ValueError("metric_size must be positive")
     data_root = args.data_root.expanduser().resolve()
     if not data_root.is_dir():
         raise FileNotFoundError(f"Data root does not exist: {data_root}")
-    if args.metric_size < 1:
-        raise ValueError("metric_size must be positive")
 
-    score_output_dirs = []
-    seen_score_dirs = set()
-    for directory_group in args.score_output_dir:
-        for directory in directory_group:
-            directory = directory.expanduser().resolve()
-            if not directory.is_dir():
-                raise FileNotFoundError(
-                    f"Score output directory does not exist: {directory}"
-                )
-            if directory not in seen_score_dirs:
-                score_output_dirs.append(directory)
-                seen_score_dirs.add(directory)
-
+    score_directories = _score_directories(args.score_output_dir)
     output_dir = (
         args.output_dir.expanduser().resolve()
         if args.output_dir is not None
@@ -243,13 +203,13 @@ def main(argv=None) -> int:
     )
     data_directories = iter_data_directories(
         data_root,
-        excluded_directories=[output_dir, *score_output_dirs],
+        excluded_directories=[output_dir, *score_directories],
     )
-    score_index = build_score_index(score_output_dirs)
+    score_index = build_score_index(score_directories)
+
     results: Dict[str, Dict[str, float]] = {}
     all_records: List[Dict[str, object]] = []
     region_inputs = {}
-
     for data_directory, images_dir, masks_dir in data_directories:
         metrics, records, gt_maps, score_maps = _evaluate_directory(
             data_directory,
@@ -258,16 +218,13 @@ def main(argv=None) -> int:
             score_index,
             args.metric_size,
         )
-        directory_key = str(data_directory)
-        results[directory_key] = metrics
+        key = str(data_directory)
+        results[key] = metrics
         all_records.extend(records)
-        region_inputs[directory_key] = (gt_maps, score_maps, records)
-    labels = np.asarray(
-        [record["image_label"] for record in all_records], dtype=np.uint8
-    )
-    scores = np.asarray(
-        [record["image_score"] for record in all_records], dtype=np.float32
-    )
+        region_inputs[key] = (gt_maps, score_maps, records)
+
+    labels = np.asarray([record["image_label"] for record in all_records], dtype=np.uint8)
+    scores = np.asarray([record["image_score"] for record in all_records], dtype=np.float32)
     if args.score_threshold is None:
         threshold, threshold_method, global_threshold_metrics = select_optimal_threshold(
             labels, scores
@@ -277,52 +234,44 @@ def main(argv=None) -> int:
         threshold_method = "manual"
         global_threshold_metrics = classification_metrics(labels, scores, threshold)
 
-    _global_pixel_f1, global_pixel_threshold = pixel_f1_score_and_threshold(
+    _global_pixel_f1, pixel_f1_threshold = pixel_f1_score_and_threshold(
         np.concatenate([item[0] for item in region_inputs.values()], axis=0),
         np.concatenate([item[1] for item in region_inputs.values()], axis=0),
     )
     effective_pixel_threshold = (
         float(args.score_threshold)
         if args.score_threshold is not None
-        else global_pixel_threshold
+        else pixel_f1_threshold
     )
-
     for directory, metrics in results.items():
-        directory_records = [
-            record for record in all_records if record["directory"] == directory
-        ]
-        directory_threshold_metrics = classification_metrics(
+        directory_records = [record for record in all_records if record["directory"] == directory]
+        threshold_metrics = classification_metrics(
             [record["image_label"] for record in directory_records],
             [record["image_score"] for record in directory_records],
             threshold,
         )
-        metrics.update(
-            {
-                name: directory_threshold_metrics[name]
-                for name in CLASSIFICATION_METRIC_NAMES
-            }
-        )
-        gt_maps, score_maps, directory_records = region_inputs[directory]
+        metrics.update({name: threshold_metrics[name] for name in CLASSIFICATION_METRIC_NAMES})
+        gt_maps, score_maps, records = region_inputs[directory]
         metrics.update(
             region_detection_metrics(
                 gt_maps,
                 score_maps,
                 effective_pixel_threshold,
-                directory_records,
-                p_f1_threshold=global_pixel_threshold,
+                records,
+                p_f1_threshold=pixel_f1_threshold,
             )
         )
         print(f"\n===== {directory} =====", flush=True)
         print(
-            "  "
-            + "  ".join(
+            "  ".join(
                 f"{name}={metrics.get(name, float('nan')):.6f}"
                 for name in REPORT_METRIC_NAMES
             ),
             flush=True,
         )
 
-    _write_results(results, all_records, output_dir)
+    write_metric_report(results, output_dir, METRIC_NAMES, "directory")
+    write_per_image_pixel_metrics(all_records, output_dir / "pixel_metrics.csv")
     save_classification_threshold(
         output_dir / "classification_threshold.json",
         threshold,
