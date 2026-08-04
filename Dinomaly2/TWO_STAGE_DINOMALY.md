@@ -137,7 +137,34 @@ details/<image>.json        # 每个 ROI 的两个距离、匹配行号和偏移
 
 `stage1_label` 是原始分数判定，`final_label` 是二阶段修正后的最终判定；`stage2_applied` 只有在第一阶段为异常且至少找到一个有效候选 ROI 时才为真。
 
-## 4. 反查特征库中的原始图像和 ROI
+## 4. 双阈值特征库预测
+
+如果希望把分数划分为 good、区间候选和 anomaly 三段，可以使用
+`dinomaly_two_threshold_predict.py`：
+
+```powershell
+python .\dinomaly_two_threshold_predict.py `
+  --model D:\model\model.pth `
+  --input D:\query\images `
+  --good_library D:\libraries\good `
+  --anomaly_library D:\libraries\anomaly `
+  --good_threshold 0.20 `
+  --anomaly_threshold 0.45 `
+  --output_dir D:\dual_threshold_result `
+  --gpu 0
+```
+
+判定规则：
+
+1. 原始分数 `< good_threshold`，直接判为 good；
+2. 原始分数 `> anomaly_threshold`，直接判为 anomaly；
+3. 两个阈值之间（包括等于阈值）使用 `good_threshold` 提取候选异常区域，分别搜索 good 和 anomaly 特征库；
+4. 如果 `good_distance < anomaly_distance`，说明最近的是 good 库，使用负偏移值（减去偏移）；如果 `anomaly_distance < good_distance`，使用正偏移值（加上偏移）；
+5. 偏移后越过阈值时按修正分数判定；仍处于中间区间时按最近特征库判定，距离相同或无有效 ROI 时使用两个阈值的中点作为兜底。
+
+输出包括 `results.csv`、`roi_results.csv`、`run.json`、每张图的 score map、候选区域和明细 JSON。
+
+## 5. 反查特征库中的原始图像和 ROI
 
 如果已经有一张输入图像和异常区域 Mask，可以使用新增的
 `query_feature_library.py`：
@@ -174,7 +201,7 @@ python query_feature_library.py \
 
 结果写入 `lookup_results.csv` 和 `lookup_results.json`，包含查询 ROI、库类型、距离、`vector_id`、`image_id`、`roi_id`、原始图像路径、Mask 路径和库中 ROI 坐标。
 
-## 5. PySide6 图形界面反查
+## 6. PySide6 图形界面反查
 
 安装依赖后可以启动 GUI。左侧打开输入图像并选择矩形或多边形，在图像上绘制异常区域；多边形左键依次点击顶点后，点击右键即可完成多边形（也可以双击或点击“完成多边形”按钮）。点击“查询特征库”后，右侧显示匹配的原始图像和对应 ROI。下方结果表只显示原始图像路径和距离，选中不同结果即可切换右侧图像。
 

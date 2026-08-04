@@ -34,7 +34,8 @@ and run `dinomaly_two_stage.py`. The same document also describes
 `query_feature_library.py`, which reverse-maps a query ROI to its source image
 and ROI in the feature library. A PySide6 GUI is available as
 `query_feature_library_gui.py` for drawing rectangle/polygon query regions and
-viewing matched source images and ROIs.
+viewing matched source images and ROIs. For separate good/anomaly thresholds
+with feature-library correction, use `dinomaly_two_threshold_predict.py`.
 
 Our experiments are conducted on NVIDIA GeForce RTX 3090/4090/5090. 
 

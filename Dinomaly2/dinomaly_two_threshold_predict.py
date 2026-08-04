@@ -1,0 +1,513 @@
+"""Dinomaly2 prediction with good/anomaly score thresholds.
+
+Images are classified in three initial bands:
+
+* ``raw_score < good_threshold``: good, without feature-library search;
+* ``raw_score > anomaly_threshold``: anomaly, without feature-library search;
+* otherwise: extract regions using the good threshold, search both ROI
+  libraries, apply the distance-based offset, and make a final binary
+  good/anomaly decision.
+
+If the adjusted score remains between the two thresholds, the nearest feature
+library decides the final label.  If there is no valid ROI match, the midpoint
+of the two thresholds is used as the deterministic fallback.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import logging
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Sequence
+
+import cv2
+import numpy as np
+from tqdm import tqdm
+
+from dinomaly_two_stage import (
+    _json_safe,
+    _model_feature_mask,
+    _output_relative_path,
+    add_model_arguments,
+    build_transform,
+    calculate_distance_offset,
+    connected_components,
+    dilate_mask,
+    infer_image,
+    iter_image_paths,
+    l2_normalize,
+    load_dinomaly_model,
+    load_feature_library,
+    mask_bbox,
+    record_for_vector_id,
+    roi_align_masked,
+    search_library,
+    select_device,
+    select_strongest_region,
+    validate_args,
+    validate_library_compatibility,
+)
+from utils import get_gaussian_kernel
+
+
+LOGGER = logging.getLogger("dinomaly_two_threshold_predict")
+
+
+def initial_score_label(
+    score: float,
+    good_threshold: float,
+    anomaly_threshold: float,
+) -> str:
+    """Return the initial good/anomaly/middle band label."""
+
+    if float(score) < float(good_threshold):
+        return "good"
+    if float(score) > float(anomaly_threshold):
+        return "anomaly"
+    return "middle"
+
+
+def final_score_label(
+    adjusted_score: float,
+    good_threshold: float,
+    anomaly_threshold: float,
+    similar_library: str = "",
+) -> tuple[str, str]:
+    """Make a binary final decision and return ``(label, reason)``."""
+
+    if float(adjusted_score) < float(good_threshold):
+        return "good", "adjusted_below_good_threshold"
+    if float(adjusted_score) > float(anomaly_threshold):
+        return "anomaly", "adjusted_above_anomaly_threshold"
+    if similar_library in {"good", "anomaly"}:
+        return similar_library, f"feature_library_{similar_library}"
+    midpoint = (float(good_threshold) + float(anomaly_threshold)) / 2.0
+    return (
+        ("good" if float(adjusted_score) < midpoint else "anomaly"),
+        "threshold_midpoint_fallback",
+    )
+
+
+def _match_metadata(
+    library,
+    vector_id: int,
+    prefix: str,
+) -> Dict[str, Any]:
+    """Flatten one FAISS neighbour's reverse mapping into a result row."""
+
+    fields: Dict[str, Any] = {f"{prefix}_vector_id": int(vector_id)}
+    try:
+        record = record_for_vector_id(library.metadata, int(vector_id))
+    except (KeyError, TypeError, ValueError):
+        return fields
+    for key in (
+        "image_id",
+        "roi_id",
+        "image_name",
+        "image_path",
+        "mask_path",
+        "bbox_original",
+    ):
+        value = record.get(key, "")
+        fields[f"{prefix}_{key}"] = value
+    return fields
+
+
+def _build_region_result(
+    component: Mapping[str, Any],
+    score_map: np.ndarray,
+    feature: np.ndarray,
+    good_library,
+    anomaly_library,
+    args,
+    device,
+) -> Optional[Dict[str, Any]]:
+    """Search both libraries for one score-map connected component."""
+
+    query_mask = dilate_mask(component["mask"], args.roi_dilation)
+    mask_feature = _model_feature_mask(query_mask, feature.shape[-2:], args)
+    bbox_feature = mask_bbox(mask_feature)
+    if bbox_feature is None:
+        return None
+
+    vector = roi_align_masked(
+        feature,
+        mask_feature,
+        args.roi_size,
+        device,
+    )
+    if bool(good_library.metadata.get("normalize", True)):
+        vector = l2_normalize(vector)
+    good_distance, good_neighbour = search_library(good_library, vector)
+    anomaly_distance, anomaly_neighbour = search_library(anomaly_library, vector)
+    decision = calculate_distance_offset(
+        good_distance,
+        anomaly_distance,
+        args.offset_scale,
+        args.max_offset,
+        args.offset_eps,
+    )
+    region = {
+        "region_id": int(component["component_id"]),
+        "region_score": float(score_map[component["mask"]].max()),
+        "area": int(component["area"]),
+        "bbox_original": [float(value) for value in component["bbox"]],
+        "bbox_feature": [float(value) for value in bbox_feature],
+        "good_distance": float(good_distance),
+        "anomaly_distance": float(anomaly_distance),
+        **decision,
+        **_match_metadata(good_library, good_neighbour, "good"),
+        **_match_metadata(anomaly_library, anomaly_neighbour, "anomaly"),
+    }
+    # Keep the integer neighbour fields alongside the reverse mapping fields.
+    region["good_neighbour"] = int(good_neighbour)
+    region["anomaly_neighbour"] = int(anomaly_neighbour)
+    return region
+
+
+def predict_images(args) -> int:
+    input_path = Path(args.input).expanduser()
+    image_paths = iter_image_paths(input_path)
+    if not image_paths:
+        raise RuntimeError(f"No images found under {input_path}")
+
+    device = select_device(args.gpu)
+    good_library = load_feature_library(
+        Path(args.good_library).expanduser(),
+        device,
+        args.faiss_on_gpu,
+    )
+    anomaly_library = load_feature_library(
+        Path(args.anomaly_library).expanduser(),
+        device,
+        args.faiss_on_gpu,
+    )
+    validate_library_compatibility(good_library, anomaly_library, args)
+    model = load_dinomaly_model(args, device)
+    transform = build_transform(args)
+    gaussian_filter = get_gaussian_kernel(5, 4).to(device)
+    output_dir = Path(args.output_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    input_root = input_path if input_path.is_dir() else input_path.parent
+
+    rows: List[Dict[str, Any]] = []
+    details: List[Dict[str, Any]] = []
+    roi_rows: List[Dict[str, Any]] = []
+    for image_path in tqdm(
+        image_paths,
+        desc="Dinomaly2 dual-threshold prediction",
+        unit="image",
+        dynamic_ncols=True,
+    ):
+        score_map, feature = infer_image(
+            model,
+            image_path,
+            transform,
+            device,
+            args.feature_merge,
+            gaussian_filter,
+        )
+        raw_score = float(np.max(score_map)) if score_map.size else 0.0
+        initial_label = initial_score_label(
+            raw_score,
+            args.good_threshold,
+            args.anomaly_threshold,
+        )
+        regions: List[Dict[str, Any]] = []
+        candidate_mask = np.zeros(score_map.shape, dtype=np.uint8)
+
+        if initial_label == "middle":
+            # Equality belongs to the middle band because the direct rules
+            # intentionally use strict < and > comparisons.
+            components = connected_components(
+                score_map >= float(args.good_threshold),
+                min_area=args.min_area,
+                max_regions=args.max_regions,
+            )
+            for component in components:
+                candidate_mask[component["mask"]] = 1
+                try:
+                    region = _build_region_result(
+                        component,
+                        score_map,
+                        feature,
+                        good_library,
+                        anomaly_library,
+                        args,
+                        device,
+                    )
+                except (RuntimeError, TypeError, ValueError) as error:
+                    LOGGER.warning(
+                        "Skipping ROI %s in %s: %s",
+                        component["component_id"],
+                        image_path,
+                        error,
+                    )
+                    continue
+                if region is not None:
+                    regions.append(region)
+
+        selected = select_strongest_region(regions)
+        signed_offset = float(selected["signed_offset"]) if selected else 0.0
+        adjusted_score = float(raw_score + signed_offset)
+        final_label, decision_reason = final_score_label(
+            adjusted_score,
+            args.good_threshold,
+            args.anomaly_threshold,
+            str(selected.get("similar_library", "")) if selected else "",
+        )
+        relative = input_path.name if input_path.is_file() else image_path.relative_to(input_root)
+        relative_text = Path(relative).as_posix()
+        for region in regions:
+            roi_rows.append(
+                {
+                    "image_path": str(image_path),
+                    "image_relative": relative_text,
+                    "raw_score": raw_score,
+                    "good_threshold": float(args.good_threshold),
+                    "anomaly_threshold": float(args.anomaly_threshold),
+                    **region,
+                }
+            )
+
+        score_path = _output_relative_path(
+            image_path,
+            input_root,
+            output_dir / "score_maps",
+            ".npy",
+        )
+        region_path = _output_relative_path(
+            image_path,
+            input_root,
+            output_dir / "candidate_regions",
+            ".png",
+        )
+        detail_path = _output_relative_path(
+            image_path,
+            input_root,
+            output_dir / "details",
+            ".json",
+        )
+        np.save(score_path, score_map)
+        if not cv2.imwrite(str(region_path), candidate_mask * 255):
+            raise OSError(f"Cannot write candidate region mask: {region_path}")
+
+        row = {
+            "image_path": str(image_path),
+            "image_relative": relative_text,
+            "raw_score": raw_score,
+            "good_threshold": float(args.good_threshold),
+            "anomaly_threshold": float(args.anomaly_threshold),
+            "initial_label": initial_label,
+            "adjusted_score": adjusted_score,
+            "final_label": final_label,
+            "decision_reason": decision_reason,
+            "stage2_applied": bool(initial_label == "middle" and regions),
+            "region_count": len(regions),
+            "selected_region_id": selected.get("region_id", "") if selected else "",
+            "good_distance": selected.get("good_distance", "") if selected else "",
+            "anomaly_distance": selected.get("anomaly_distance", "") if selected else "",
+            "similar_library": selected.get("similar_library", "") if selected else "",
+            "confidence": selected.get("confidence", 0.0) if selected else 0.0,
+            "offset": selected.get("offset", 0.0) if selected else 0.0,
+            "signed_offset": signed_offset,
+        }
+        detail = {
+            **row,
+            "score_map_path": str(score_path),
+            "candidate_region_path": str(region_path),
+            "regions": regions,
+        }
+        with detail_path.open("w", encoding="utf-8") as file:
+            json.dump(_json_safe(detail), file, ensure_ascii=False, indent=2)
+        rows.append(row)
+        details.append(detail)
+        LOGGER.info(
+            "%s raw=%.6f (%s) adjusted=%.6f (%s) regions=%d library=%s offset=%+.6f",
+            image_path,
+            raw_score,
+            initial_label,
+            adjusted_score,
+            final_label,
+            len(regions),
+            selected.get("similar_library", "none") if selected else "none",
+            signed_offset,
+        )
+
+    csv_path = output_dir / "results.csv"
+    fieldnames = [
+        "image_path",
+        "image_relative",
+        "raw_score",
+        "good_threshold",
+        "anomaly_threshold",
+        "initial_label",
+        "adjusted_score",
+        "final_label",
+        "decision_reason",
+        "stage2_applied",
+        "region_count",
+        "selected_region_id",
+        "good_distance",
+        "anomaly_distance",
+        "similar_library",
+        "confidence",
+        "offset",
+        "signed_offset",
+    ]
+    with csv_path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    roi_csv_path = output_dir / "roi_results.csv"
+    roi_fieldnames = [
+        "image_path",
+        "image_relative",
+        "raw_score",
+        "good_threshold",
+        "anomaly_threshold",
+        "region_id",
+        "region_score",
+        "area",
+        "bbox_original",
+        "bbox_feature",
+        "good_distance",
+        "good_neighbour",
+        "good_vector_id",
+        "good_image_id",
+        "good_roi_id",
+        "good_image_name",
+        "good_image_path",
+        "good_mask_path",
+        "good_bbox_original",
+        "anomaly_distance",
+        "anomaly_neighbour",
+        "anomaly_vector_id",
+        "anomaly_image_id",
+        "anomaly_roi_id",
+        "anomaly_image_name",
+        "anomaly_image_path",
+        "anomaly_mask_path",
+        "anomaly_bbox_original",
+        "similar_library",
+        "confidence",
+        "offset",
+        "signed_offset",
+    ]
+    with roi_csv_path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=roi_fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for roi_row in roi_rows:
+            row_for_csv = dict(roi_row)
+            row_for_csv["bbox_original"] = json.dumps(
+                row_for_csv["bbox_original"],
+                ensure_ascii=False,
+            )
+            row_for_csv["bbox_feature"] = json.dumps(
+                row_for_csv["bbox_feature"],
+                ensure_ascii=False,
+            )
+            for key in (
+                "good_bbox_original",
+                "anomaly_bbox_original",
+            ):
+                if key in row_for_csv:
+                    row_for_csv[key] = json.dumps(row_for_csv[key], ensure_ascii=False)
+            writer.writerow(row_for_csv)
+
+    with (output_dir / "run.json").open("w", encoding="utf-8") as file:
+        json.dump(
+            _json_safe(
+                {
+                    "good_threshold": args.good_threshold,
+                    "anomaly_threshold": args.anomaly_threshold,
+                    "offset_scale": args.offset_scale,
+                    "max_offset": args.max_offset,
+                    "offset_eps": args.offset_eps,
+                    "roi_dilation": args.roi_dilation,
+                    "min_area": args.min_area,
+                    "max_regions": args.max_regions,
+                    "feature_merge": args.feature_merge,
+                    "roi_size": args.roi_size,
+                    "results": details,
+                }
+            ),
+            file,
+            ensure_ascii=False,
+            indent=2,
+        )
+    print(
+        f"Wrote dual-threshold results to {csv_path} and {roi_csv_path}",
+        flush=True,
+    )
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Dinomaly2 prediction with good/anomaly score thresholds"
+    )
+    add_model_arguments(parser)
+    parser.add_argument("--input", required=True, help="One image or a recursive image directory")
+    parser.add_argument("--good_library", required=True)
+    parser.add_argument("--anomaly_library", required=True)
+    parser.add_argument(
+        "--good_threshold",
+        "--good-threshold",
+        dest="good_threshold",
+        type=float,
+        required=True,
+        help="Scores strictly below this value are directly classified as good",
+    )
+    parser.add_argument(
+        "--anomaly_threshold",
+        "--anomaly-threshold",
+        dest="anomaly_threshold",
+        type=float,
+        required=True,
+        help="Scores strictly above this value are directly classified as anomaly",
+    )
+    parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--min_area", type=int, default=1)
+    parser.add_argument("--max_regions", type=int, default=0)
+    parser.add_argument(
+        "--roi_dilation",
+        type=int,
+        default=0,
+        help="Dilate each middle-band score-map component before ROIAlign",
+    )
+    parser.add_argument(
+        "--offset_scale",
+        type=float,
+        default=1.0,
+        help="Maximum score correction generated by the normalized distance margin",
+    )
+    parser.add_argument("--max_offset", type=float, default=None)
+    parser.add_argument("--offset_eps", type=float, default=1e-8)
+    parser.add_argument(
+        "--faiss_on_gpu",
+        action="store_true",
+        help="Move both FAISS indexes to the selected CUDA device",
+    )
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    validate_args(args)
+    if not np.isfinite(args.good_threshold) or not np.isfinite(args.anomaly_threshold):
+        raise ValueError("good_threshold and anomaly_threshold must be finite")
+    if args.good_threshold >= args.anomaly_threshold:
+        raise ValueError("good_threshold must be smaller than anomaly_threshold")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
+    return predict_images(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
