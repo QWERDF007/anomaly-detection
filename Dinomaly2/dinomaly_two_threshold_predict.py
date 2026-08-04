@@ -371,38 +371,33 @@ def predict_images(args) -> int:
     csv_path = output_dir / "results.csv"
     fieldnames = [
         "image_path",
-        "image_relative",
         "dataset_label",
         "raw_score",
-        "good_threshold",
-        "anomaly_threshold",
         "initial_label",
         "adjusted_score",
         "final_label",
-        "decision_reason",
         "stage2_applied",
         "region_count",
         "selected_region_id",
         "good_distance",
         "anomaly_distance",
-        "similar_library",
         "confidence",
-        "offset",
         "signed_offset",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer = csv.DictWriter(
+            file,
+            fieldnames=fieldnames,
+            extrasaction="ignore",
+        )
         writer.writeheader()
         writer.writerows(rows)
 
     roi_csv_path = output_dir / "roi_results.csv"
     roi_fieldnames = [
         "image_path",
-        "image_relative",
         "dataset_label",
         "raw_score",
-        "good_threshold",
-        "anomaly_threshold",
         "region_id",
         "region_score",
         "area",
@@ -426,9 +421,7 @@ def predict_images(args) -> int:
         "anomaly_image_path",
         "anomaly_mask_path",
         "anomaly_bbox_original",
-        "similar_library",
         "confidence",
-        "offset",
         "signed_offset",
     ]
     with roi_csv_path.open("w", newline="", encoding="utf-8") as file:
