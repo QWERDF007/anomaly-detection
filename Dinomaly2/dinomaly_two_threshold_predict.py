@@ -102,11 +102,11 @@ def output_artifact_path(
 def write_score_density_plot(
     rows: Sequence[Mapping[str, Any]],
     output_path: Path,
-    bins: int,
+    density_points: int,
     good_threshold: float,
     anomaly_threshold: float,
 ) -> None:
-    """Write vertically stacked raw/adjusted score density histograms."""
+    """Write vertically stacked raw/adjusted continuous KDE curves."""
 
     try:
         import matplotlib
@@ -145,11 +145,39 @@ def write_score_density_plot(
 
     minimum = min(all_values)
     maximum = max(all_values)
-    if np.isclose(minimum, maximum):
-        padding = max(abs(minimum) * 0.05, 0.5)
-        minimum -= padding
-        maximum += padding
-    edges = np.linspace(minimum, maximum, max(int(bins), 2) + 1)
+    score_range = maximum - minimum
+    padding = max(score_range * 0.08, abs(minimum) * 0.02, 0.01)
+    if np.isclose(score_range, 0.0):
+        padding = max(abs(minimum) * 0.05, 0.05)
+    grid = np.linspace(
+        minimum - padding,
+        maximum + padding,
+        max(int(density_points), 100),
+    )
+
+    def density_curve(values: Sequence[float]) -> np.ndarray:
+        """Estimate a continuous density, including for tiny samples."""
+
+        array = np.asarray(values, dtype=np.float64)
+        if array.size >= 2 and np.ptp(array) > 1e-12:
+            try:
+                from scipy.stats import gaussian_kde
+
+                return np.asarray(gaussian_kde(array)(grid), dtype=np.float64)
+            except (ImportError, np.linalg.LinAlgError, ValueError):
+                pass
+
+        # A Gaussian mixture keeps the curve continuous when KDE is singular
+        # for one sample or for identical scores.
+        bandwidth = 1.06 * float(np.std(array)) * max(array.size, 1) ** (-0.2)
+        grid_step = float(grid[1] - grid[0]) if len(grid) > 1 else 1e-3
+        bandwidth = max(bandwidth, grid_step * 1.5, 1e-6)
+        normalized = (grid[:, None] - array[None, :]) / bandwidth
+        return np.mean(
+            np.exp(-0.5 * normalized * normalized)
+            / (np.sqrt(2.0 * np.pi) * bandwidth),
+            axis=1,
+        )
 
     colors = {"good": "#2ca02c", "anomaly": "#d62728"}
     labels = {"good": "good", "anomaly": "anomaly"}
@@ -162,14 +190,19 @@ def write_score_density_plot(
             values = grouped[group][score_key]
             if not values:
                 continue
-            axis.hist(
-                values,
-                bins=edges,
-                density=True,
-                alpha=0.45,
+            density = density_curve(values)
+            axis.plot(
+                grid,
+                density,
                 color=colors[group],
-                edgecolor=colors[group],
+                linewidth=2.0,
                 label=f"{labels[group]} (n={len(values)})",
+            )
+            axis.fill_between(
+                grid,
+                density,
+                color=colors[group],
+                alpha=0.12,
             )
         axis.axvline(
             float(good_threshold),
@@ -497,7 +530,7 @@ def predict_images(args) -> int:
     write_score_density_plot(
         rows,
         density_path,
-        args.density_bins,
+        args.density_points,
         args.good_threshold,
         args.anomaly_threshold,
     )
@@ -566,7 +599,7 @@ def predict_images(args) -> int:
                     "roi_dilation": args.roi_dilation,
                     "min_area": args.min_area,
                     "max_regions": args.max_regions,
-                    "density_bins": args.density_bins,
+                    "density_points": args.density_points,
                     "feature_merge": args.feature_merge,
                     "roi_size": args.roi_size,
                     "score_density_plot": str(density_path),
@@ -614,10 +647,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min_area", type=int, default=1)
     parser.add_argument("--max_regions", type=int, default=0)
     parser.add_argument(
-        "--density_bins",
+        "--density_points",
         type=int,
-        default=30,
-        help="Number of bins in score_density.png",
+        default=400,
+        help="Number of points used to draw continuous density curves",
     )
     parser.add_argument(
         "--roi_dilation",
@@ -648,8 +681,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise ValueError("good_threshold and anomaly_threshold must be finite")
     if args.good_threshold >= args.anomaly_threshold:
         raise ValueError("good_threshold must be smaller than anomaly_threshold")
-    if args.density_bins < 2:
-        raise ValueError("density_bins must be at least 2")
+    if args.density_points < 100:
+        raise ValueError("density_points must be at least 100")
     return predict_images(args)
 
 
