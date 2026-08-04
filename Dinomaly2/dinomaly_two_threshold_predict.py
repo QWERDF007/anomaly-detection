@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
+from tqdm import tqdm
 
 from dinomaly_two_stage import (
     _json_safe,
@@ -237,7 +238,12 @@ def predict_images(args) -> int:
     rows: List[Dict[str, Any]] = []
     details: List[Dict[str, Any]] = []
     roi_rows: List[Dict[str, Any]] = []
-    for image_path, image_relative, dataset_label in image_entries:
+    for image_path, image_relative, dataset_label in tqdm(
+        image_entries,
+        desc="Dinomaly2 dual-threshold prediction",
+        unit="image",
+        dynamic_ncols=True,
+    ):
         score_map, feature = infer_image(
             model,
             image_path,
