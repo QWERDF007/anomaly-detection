@@ -173,7 +173,7 @@ D:\query\data_root\crack\*.jpg     # dataset_label=anomaly
 4. 如果 `good_distance < anomaly_distance`，说明最近的是 good 库，使用负偏移值（减去偏移）；如果 `anomaly_distance < good_distance`，使用正偏移值（加上偏移）；
 5. 偏移后越过阈值时按修正分数判定；仍处于中间区间时按最近特征库判定，距离相同或无有效 ROI 时使用两个阈值的中点作为兜底。
 
-输出包括 `results.csv`、`roi_results.csv`、`run.json`、每张图的 score map、候选区域和明细 JSON。
+输出包括 `results.csv`、`roi_results.csv`、`run.json`、`score_density.png`、每张图的 score map、候选区域和明细 JSON。`score_density.png` 上图为偏移前 raw score，下图为偏移后 adjusted score；good 使用绿色，anomaly 使用红色。
 
 ## 5. 反查特征库中的原始图像和 ROI
 

@@ -99,6 +99,105 @@ def output_artifact_path(
     return result
 
 
+def write_score_density_plot(
+    rows: Sequence[Mapping[str, Any]],
+    output_path: Path,
+    bins: int,
+    good_threshold: float,
+    anomaly_threshold: float,
+) -> None:
+    """Write vertically stacked raw/adjusted score density histograms."""
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError as error:
+        raise RuntimeError(
+            "matplotlib is required to write score_density.png"
+        ) from error
+
+    grouped: Dict[str, Dict[str, List[float]]] = {
+        "good": {"raw": [], "adjusted": []},
+        "anomaly": {"raw": [], "adjusted": []},
+    }
+    for row in rows:
+        group = str(row.get("dataset_label", "anomaly"))
+        if group not in grouped:
+            group = "anomaly"
+        for score_key, output_key in (
+            ("raw_score", "raw"),
+            ("adjusted_score", "adjusted"),
+        ):
+            value = float(row.get(score_key, np.nan))
+            if np.isfinite(value):
+                grouped[group][output_key].append(value)
+
+    all_values = [
+        value
+        for group_values in grouped.values()
+        for score_values in group_values.values()
+        for value in score_values
+    ]
+    if not all_values:
+        return
+
+    minimum = min(all_values)
+    maximum = max(all_values)
+    if np.isclose(minimum, maximum):
+        padding = max(abs(minimum) * 0.05, 0.5)
+        minimum -= padding
+        maximum += padding
+    edges = np.linspace(minimum, maximum, max(int(bins), 2) + 1)
+
+    colors = {"good": "#2ca02c", "anomaly": "#d62728"}
+    labels = {"good": "good", "anomaly": "anomaly"}
+    figure, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    for axis, score_key, title in (
+        (axes[0], "raw", "Before correction: raw score density"),
+        (axes[1], "adjusted", "After correction: adjusted score density"),
+    ):
+        for group in ("good", "anomaly"):
+            values = grouped[group][score_key]
+            if not values:
+                continue
+            axis.hist(
+                values,
+                bins=edges,
+                density=True,
+                alpha=0.45,
+                color=colors[group],
+                edgecolor=colors[group],
+                label=f"{labels[group]} (n={len(values)})",
+            )
+        axis.axvline(
+            float(good_threshold),
+            color="#555555",
+            linestyle="--",
+            linewidth=1,
+            label="good threshold",
+        )
+        axis.axvline(
+            float(anomaly_threshold),
+            color="#111111",
+            linestyle=":",
+            linewidth=1,
+            label="anomaly threshold",
+        )
+        axis.set_title(title)
+        axis.set_ylabel("Density")
+        axis.grid(True, alpha=0.25)
+        axis.legend()
+    axes[-1].set_xlabel("Score")
+    figure.suptitle("Dinomaly2 score density before and after correction")
+    figure.tight_layout(rect=(0, 0, 1, 0.96))
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output_path, dpi=160)
+    plt.close(figure)
+
+
 def initial_score_label(
     score: float,
     good_threshold: float,
@@ -368,6 +467,7 @@ def predict_images(args) -> int:
             json.dump(_json_safe(detail), file, ensure_ascii=False, indent=2)
         rows.append(row)
         details.append(detail)
+
     csv_path = output_dir / "results.csv"
     fieldnames = [
         "image_path",
@@ -392,6 +492,15 @@ def predict_images(args) -> int:
         )
         writer.writeheader()
         writer.writerows(rows)
+
+    density_path = output_dir / "score_density.png"
+    write_score_density_plot(
+        rows,
+        density_path,
+        args.density_bins,
+        args.good_threshold,
+        args.anomaly_threshold,
+    )
 
     roi_csv_path = output_dir / "roi_results.csv"
     roi_fieldnames = [
@@ -457,8 +566,10 @@ def predict_images(args) -> int:
                     "roi_dilation": args.roi_dilation,
                     "min_area": args.min_area,
                     "max_regions": args.max_regions,
+                    "density_bins": args.density_bins,
                     "feature_merge": args.feature_merge,
                     "roi_size": args.roi_size,
+                    "score_density_plot": str(density_path),
                     "results": details,
                 }
             ),
@@ -503,6 +614,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min_area", type=int, default=1)
     parser.add_argument("--max_regions", type=int, default=0)
     parser.add_argument(
+        "--density_bins",
+        type=int,
+        default=30,
+        help="Number of bins in score_density.png",
+    )
+    parser.add_argument(
         "--roi_dilation",
         type=int,
         default=0,
@@ -531,6 +648,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise ValueError("good_threshold and anomaly_threshold must be finite")
     if args.good_threshold >= args.anomaly_threshold:
         raise ValueError("good_threshold must be smaller than anomaly_threshold")
+    if args.density_bins < 2:
+        raise ValueError("density_bins must be at least 2")
     return predict_images(args)
 
 
