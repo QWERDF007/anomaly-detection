@@ -63,6 +63,32 @@ python dinomaly_two_stage.py build-library \
   --gpu 0
 ```
 
+如果 good 和 anomaly 区域位于同一批 Labelme JSON 中，可以让脚本按
+`shape["label"]` 自动分库：
+
+```bash
+python dinomaly_two_stage.py build-libraries \
+  --model /path/to/model.pth \
+  --images /path/to/library_images \
+  --masks /path/to/labelme_annotations \
+  --output_dir /path/to/libraries \
+  --good_labels good normal OK \
+  --ignore_labels ignore \
+  --backbone dinov2reg_vit_small_14 \
+  --image_size 672 \
+  --crop_size 672 \
+  --feature_merge mean \
+  --roi_size 7 \
+  --gpu 0
+```
+
+规则为：Labelme 的 `label` 会去除首尾空格并忽略大小写；匹配
+`--good_labels` 的 shape 写入 `libraries/good`，匹配 `--ignore_labels` 的
+shape 跳过，其他 label（例如 `scratch`、`crack`、`anomaly`）写入
+`libraries/anomaly`。同一个 JSON 可以同时包含 good 和 anomaly shape。
+没有有效标注区域的图像会被跳过；因此要建立 good 库，至少需要一个
+`good`（或通过 `--good_labels` 指定的正常标签）区域。
+
 每个库目录包含：
 
 ```text

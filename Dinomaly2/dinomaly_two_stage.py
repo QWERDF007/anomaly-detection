@@ -11,10 +11,12 @@ score is strictly greater than ``--score_threshold`` enter the second stage:
 * a good match subtracts the offset while an anomaly match adds it.
 
 The ``build-library`` subcommand creates either library from images and a
-binary mask (PNG/TIFF/NPY) or a Labelme JSON mask.  Both library types use
-the encoder features returned by ``Dinomaly.forward`` rather than the decoder
-or a second feature extractor, so the library and query representations stay
-in the same feature space.
+binary mask (PNG/TIFF/NPY) or a Labelme JSON mask.  The ``build-libraries``
+subcommand can additionally split Labelme shapes into the good and anomaly
+libraries according to their ``label`` values.  Both library types use the
+encoder features returned by ``Dinomaly.forward`` rather than the decoder or
+a second feature extractor, so the library and query representations stay in
+the same feature space.
 """
 
 from __future__ import annotations
@@ -342,33 +344,83 @@ def resolve_mask_path(
     return matches[0] if matches else None
 
 
-def _labelme_mask(annotation: Mapping[str, Any]) -> np.ndarray:
+def _draw_labelme_shape(mask: np.ndarray, shape: Mapping[str, Any]) -> bool:
+    """Rasterize one Labelme shape and report whether it was supported."""
+
+    points = np.asarray(shape.get("points", []), dtype=np.float32)
+    if points.ndim != 2 or points.shape[0] < 1 or points.shape[1] != 2:
+        return False
+    points = np.round(points).astype(np.int32)
+    shape_type = str(shape.get("shape_type", "polygon")).lower()
+    if shape_type == "rectangle" and points.shape[0] >= 2:
+        x1, y1 = points[0]
+        x2, y2 = points[1]
+        cv2.rectangle(mask, (int(x1), int(y1)), (int(x2), int(y2)), 1, -1)
+        return True
+    if shape_type == "circle" and points.shape[0] >= 2:
+        center = tuple(int(value) for value in points[0])
+        radius = int(np.linalg.norm(points[1] - points[0]))
+        cv2.circle(mask, center, max(radius, 1), 1, -1)
+        return True
+    if shape_type in {"line", "linestrip"}:
+        cv2.polylines(mask, [points], False, 1, thickness=1)
+        return True
+    if points.shape[0] >= 3:
+        cv2.fillPoly(mask, [points], 1)
+        return True
+    return False
+
+
+def _normalized_labels(labels: Sequence[str]) -> set[str]:
+    """Normalize Labelme labels for case-insensitive matching."""
+
+    return {
+        str(label).strip().casefold()
+        for label in labels
+        if str(label).strip()
+    }
+
+
+def _labelme_library_masks(
+    annotation: Mapping[str, Any],
+    good_labels: Sequence[str],
+    ignore_labels: Sequence[str],
+) -> Dict[str, np.ndarray]:
+    """Return separate good/anomaly masks from one Labelme annotation.
+
+    A shape whose normalized label is in ``good_labels`` is assigned to the
+    good mask.  A shape in ``ignore_labels`` is skipped.  Every other shape
+    is assigned to the anomaly mask, matching ``convert_labelme_to_mask.py``.
+    """
+
     width = int(annotation.get("imageWidth", 0))
     height = int(annotation.get("imageHeight", 0))
     if width < 1 or height < 1:
         raise ValueError("Labelme JSON must contain positive imageWidth/imageHeight")
-    mask = np.zeros((height, width), dtype=np.uint8)
+
+    good_mask = np.zeros((height, width), dtype=np.uint8)
+    anomaly_mask = np.zeros((height, width), dtype=np.uint8)
+    good_label_set = _normalized_labels(good_labels)
+    ignore_label_set = _normalized_labels(ignore_labels)
     for shape in annotation.get("shapes", []):
         if not isinstance(shape, Mapping):
             continue
-        points = np.asarray(shape.get("points", []), dtype=np.float32)
-        if points.ndim != 2 or points.shape[0] < 1 or points.shape[1] != 2:
+        label = str(shape.get("label", "")).strip().casefold()
+        if label in ignore_label_set:
             continue
-        points = np.round(points).astype(np.int32)
-        shape_type = str(shape.get("shape_type", "polygon")).lower()
-        if shape_type == "rectangle" and points.shape[0] >= 2:
-            x1, y1 = points[0]
-            x2, y2 = points[1]
-            cv2.rectangle(mask, (int(x1), int(y1)), (int(x2), int(y2)), 1, -1)
-        elif shape_type == "circle" and points.shape[0] >= 2:
-            center = tuple(int(value) for value in points[0])
-            radius = int(np.linalg.norm(points[1] - points[0]))
-            cv2.circle(mask, center, max(radius, 1), 1, -1)
-        elif shape_type in {"line", "linestrip"}:
-            cv2.polylines(mask, [points], False, 1, thickness=1)
-        elif points.shape[0] >= 3:
-            cv2.fillPoly(mask, [points], 1)
-    return mask.astype(bool, copy=False)
+        target = good_mask if label in good_label_set else anomaly_mask
+        _draw_labelme_shape(target, shape)
+    return {
+        "good": good_mask.astype(bool, copy=False),
+        "anomaly": anomaly_mask.astype(bool, copy=False),
+    }
+
+
+def _labelme_mask(annotation: Mapping[str, Any]) -> np.ndarray:
+    """Rasterize all Labelme shapes into one mask for legacy mask loading."""
+
+    masks = _labelme_library_masks(annotation, good_labels=(), ignore_labels=())
+    return np.logical_or(masks["good"], masks["anomaly"])
 
 
 def load_mask(mask_path: Path, image_shape: Tuple[int, int], threshold: float = 0.0) -> np.ndarray:
@@ -402,6 +454,43 @@ def load_mask(mask_path: Path, image_shape: Tuple[int, int], threshold: float = 
             interpolation=cv2.INTER_NEAREST,
         )
     return np.asarray(mask > threshold, dtype=bool)
+
+
+def load_labelme_library_mask(
+    mask_path: Path,
+    image_shape: Tuple[int, int],
+    library_type: str,
+    good_labels: Sequence[str],
+    ignore_labels: Sequence[str],
+) -> np.ndarray:
+    """Load only the Labelme shapes assigned to one library.
+
+    This is intentionally separate from :func:`load_mask`: the regular mask
+    loader keeps its historical behavior and treats every shape as one ROI,
+    while automatic label-based library construction needs two masks from the
+    same JSON document.
+    """
+
+    mask_path = Path(mask_path)
+    if mask_path.suffix.lower() != ".json":
+        raise ValueError(
+            "Label-based library construction requires Labelme JSON masks; "
+            f"got {mask_path}"
+        )
+    if library_type not in {"good", "anomaly"}:
+        raise ValueError(f"Unsupported library type: {library_type}")
+    with mask_path.open("r", encoding="utf-8") as file:
+        annotation = json.load(file)
+    masks = _labelme_library_masks(annotation, good_labels, ignore_labels)
+    mask = masks[library_type]
+    height, width = image_shape
+    if mask.shape != (height, width):
+        mask = cv2.resize(
+            np.asarray(mask, dtype=np.uint8),
+            (width, height),
+            interpolation=cv2.INTER_NEAREST,
+        )
+    return np.asarray(mask != 0, dtype=bool)
 
 
 def preprocess_mask(mask: np.ndarray, image_size: int, crop_size: int) -> np.ndarray:
@@ -920,22 +1009,33 @@ def _model_feature_mask(
     return resize_mask_to_feature(model_mask, feature_shape)
 
 
-def build_library(args) -> int:
-    images_root = Path(args.images).expanduser()
-    mask_root = Path(args.masks).expanduser()
-    image_paths = iter_image_paths(images_root)
-    if not image_paths:
-        raise RuntimeError(f"No images found under {images_root}")
+def _build_feature_library(
+    args,
+    images_root: Path,
+    mask_root: Path,
+    image_paths: Sequence[Path],
+    library_type: str,
+    output_dir: Path,
+    mask_loader=None,
+    model=None,
+    transform=None,
+    device: Optional[torch.device] = None,
+    label_routing: Optional[Mapping[str, Any]] = None,
+) -> int:
+    """Extract and write one library, optionally using a custom mask loader."""
 
-    device = select_device(args.gpu)
-    transform = build_transform(args)
-    model = load_dinomaly_model(args, device)
+    if device is None:
+        device = select_device(args.gpu)
+    if transform is None:
+        transform = build_transform(args)
+    if model is None:
+        model = load_dinomaly_model(args, device)
     vectors: List[np.ndarray] = []
     records: List[Dict[str, Any]] = []
 
     for image_path in tqdm(
         image_paths,
-        desc=f"Build {args.library} feature library",
+        desc=f"Build {library_type} feature library",
         unit="image",
         dynamic_ncols=True,
     ):
@@ -946,7 +1046,10 @@ def build_library(args) -> int:
         try:
             with Image.open(image_path) as image:
                 image_shape = (image.height, image.width)
-            mask = load_mask(mask_path, image_shape, args.mask_threshold)
+            if mask_loader is None:
+                mask = load_mask(mask_path, image_shape, args.mask_threshold)
+            else:
+                mask = mask_loader(mask_path, image_shape)
             components = connected_components(
                 mask,
                 min_area=args.min_area,
@@ -1011,13 +1114,13 @@ def build_library(args) -> int:
 
     if not vectors:
         raise RuntimeError(
-            f"No valid ROI features were collected for the {args.library} library. "
+            f"No valid ROI features were collected for the {library_type} library. "
             "Check --masks, mask geometry, and --min_area."
         )
 
     vectors_array = np.stack(vectors).astype(np.float32, copy=False)
     metadata = {
-        "library_type": args.library,
+        "library_type": library_type,
         "feature_source": "dinomaly_encoder_output",
         "feature_layout": "CHW before ROIAlign",
         "feature_merge": args.feature_merge,
@@ -1029,16 +1132,92 @@ def build_library(args) -> int:
         "model": str(Path(args.model).expanduser()),
         "records": records,
     }
+    if label_routing is not None:
+        metadata["label_routing"] = dict(label_routing)
     index_path, metadata_path = write_feature_library(
-        Path(args.output_dir).expanduser(),
+        Path(output_dir).expanduser(),
         vectors_array,
         metadata,
     )
     print(
-        f"Built {args.library} library: {len(records)} ROI vectors -> "
+        f"Built {library_type} library: {len(records)} ROI vectors -> "
         f"{index_path}",
         flush=True,
     )
+    return 0
+
+
+def build_library(args) -> int:
+    """Build one library from a binary mask or an unfiltered Labelme mask."""
+
+    images_root = Path(args.images).expanduser()
+    mask_root = Path(args.masks).expanduser()
+    image_paths = iter_image_paths(images_root)
+    if not image_paths:
+        raise RuntimeError(f"No images found under {images_root}")
+    return _build_feature_library(
+        args,
+        images_root,
+        mask_root,
+        image_paths,
+        args.library,
+        Path(args.output_dir).expanduser(),
+    )
+
+
+def build_libraries_by_label(args) -> int:
+    """Build good/anomaly libraries by routing Labelme shapes by ``label``."""
+
+    images_root = Path(args.images).expanduser()
+    mask_root = Path(args.masks).expanduser()
+    image_paths = iter_image_paths(images_root)
+    if not image_paths:
+        raise RuntimeError(f"No images found under {images_root}")
+
+    good_labels = _normalized_labels(args.good_labels)
+    ignore_labels = _normalized_labels(args.ignore_labels)
+    overlap = sorted(good_labels & ignore_labels)
+    if overlap:
+        raise ValueError(
+            "A label cannot be both good and ignore: "
+            + ", ".join(overlap)
+        )
+    if not good_labels:
+        raise ValueError("--good_labels must contain at least one non-empty label")
+
+    device = select_device(args.gpu)
+    transform = build_transform(args)
+    model = load_dinomaly_model(args, device)
+    output_root = Path(args.output_dir).expanduser()
+    label_routing = {
+        "good_labels": sorted(good_labels),
+        "ignore_labels": sorted(ignore_labels),
+        "other_labels": "anomaly",
+    }
+
+    for library_type in ("good", "anomaly"):
+        def mask_loader(mask_path, image_shape, target=library_type):
+            return load_labelme_library_mask(
+                mask_path,
+                image_shape,
+                target,
+                good_labels,
+                ignore_labels,
+            )
+
+        _build_feature_library(
+            args,
+            images_root,
+            mask_root,
+            image_paths,
+            library_type,
+            output_root / library_type,
+            mask_loader=mask_loader,
+            model=model,
+            transform=transform,
+            device=device,
+            label_routing=label_routing,
+        )
     return 0
 
 
@@ -1369,6 +1548,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build.set_defaults(normalize=True)
 
+    build_by_label = subparsers.add_parser(
+        "build-libraries",
+        help="Build good/anomaly FAISS libraries by routing Labelme labels",
+    )
+    add_model_arguments(build_by_label)
+    build_by_label.add_argument("--images", "--input", dest="images", required=True)
+    build_by_label.add_argument(
+        "--masks",
+        required=True,
+        help="Directory containing Labelme JSON files matched to the images",
+    )
+    build_by_label.add_argument(
+        "--output_dir",
+        required=True,
+        help="Root directory; good/ and anomaly/ libraries are created below it",
+    )
+    build_by_label.add_argument(
+        "--good_labels",
+        nargs="+",
+        default=["good"],
+        help="Labels routed to the good library (default: good)",
+    )
+    build_by_label.add_argument(
+        "--ignore_labels",
+        nargs="+",
+        default=["ignore"],
+        help="Labels skipped during routing (default: ignore)",
+    )
+    build_by_label.add_argument("--min_area", type=int, default=1)
+    build_by_label.add_argument("--max_regions", type=int, default=0)
+    build_by_label.add_argument("--mask_threshold", type=float, default=0.0)
+    build_by_label.add_argument(
+        "--no-normalize",
+        dest="normalize",
+        action="store_false",
+        help="Do not L2-normalize vectors before adding them to FAISS",
+    )
+    build_by_label.set_defaults(normalize=True)
+
     predict = subparsers.add_parser(
         "predict",
         help="Run Dinomaly2 stage 1 and good/anomaly-library stage 2",
@@ -1447,6 +1665,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     if args.command == "build-library":
         return build_library(args)
+    if args.command == "build-libraries":
+        return build_libraries_by_label(args)
     if args.command == "predict":
         return predict_images(args)
     raise ValueError(f"Unsupported command: {args.command}")
