@@ -28,6 +28,14 @@ pip install -r requirements.txt
 ```
 You can also try `requirements2.txt` which is simpler.
 
+For two-stage inference that compares score-map ROIs with separate good and
+anomaly feature libraries, see [`TWO_STAGE_DINOMALY.md`](TWO_STAGE_DINOMALY.md)
+and run `dinomaly_two_stage.py`. The same document also describes
+`query_feature_library.py`, which reverse-maps a query ROI to its source image
+and ROI in the feature library. A PySide6 GUI is available as
+`query_feature_library_gui.py` for drawing rectangle/polygon query regions and
+viewing matched source images and ROIs.
+
 Our experiments are conducted on NVIDIA GeForce RTX 3090/4090/5090. 
 
 ## 2. Prepare Datasets

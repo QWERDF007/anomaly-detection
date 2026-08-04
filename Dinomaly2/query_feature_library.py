@@ -1,0 +1,359 @@
+"""Reverse-lookup Dinomaly2 ROI features in one or more feature libraries.
+
+Given one image and an anomaly-region mask (or a saved Dinomaly2 score map),
+this script extracts the Dinomaly2 encoder feature, applies the same masked
+ROIAlign operation used while building the libraries, and reports the nearest
+library vectors.  Every result is resolved through ``vector_id`` to the
+stored ``image_id``/``roi_id`` and the original image/ROI mapping.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import logging
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import cv2
+import numpy as np
+from PIL import Image
+
+from dinomaly_two_stage import (
+    add_model_arguments,
+    build_transform,
+    connected_components,
+    extract_encoder_feature,
+    l2_normalize,
+    load_dinomaly_model,
+    load_feature_library,
+    load_mask,
+    make_image_id,
+    mask_bbox,
+    preprocess_mask,
+    record_for_vector_id,
+    resize_mask_to_feature,
+    roi_align_masked,
+    search_library_topk,
+    select_device,
+)
+
+
+LOGGER = logging.getLogger("query_feature_library")
+
+
+def load_score_region_mask(
+    score_path: Path,
+    image_shape: Tuple[int, int],
+    threshold: float,
+) -> np.ndarray:
+    """Load a score map, resize it to the image, and threshold it strictly."""
+
+    score_map = np.asarray(np.load(score_path), dtype=np.float32)
+    score_map = np.squeeze(score_map)
+    if score_map.ndim != 2:
+        raise ValueError(
+            f"Score map must be 2D: {score_path}; got {score_map.shape}"
+        )
+    height, width = image_shape
+    if score_map.shape != (height, width):
+        score_map = cv2.resize(
+            score_map,
+            (width, height),
+            interpolation=cv2.INTER_LINEAR,
+        )
+    score_map = np.nan_to_num(score_map, nan=0.0, posinf=np.finfo(np.float32).max)
+    return np.asarray(score_map > float(threshold), dtype=bool)
+
+
+def resolve_library_paths(args) -> List[Path]:
+    paths = [Path(path).expanduser() for path in args.library]
+    paths.extend(
+        Path(path).expanduser()
+        for path in (args.good_library, args.anomaly_library)
+        if path
+    )
+    unique: List[Path] = []
+    seen = set()
+    for path in paths:
+        key = str(path.resolve())
+        if key not in seen:
+            unique.append(path)
+            seen.add(key)
+    if not unique:
+        raise ValueError(
+            "At least one feature library is required via --library, "
+            "--good_library, or --anomaly_library."
+        )
+    return unique
+
+
+def validate_query_libraries(libraries, args) -> None:
+    expected = {
+        "backbone": args.backbone,
+        "feature_merge": args.feature_merge,
+        "roi_size": int(args.roi_size),
+        "image_size": int(args.image_size),
+        "crop_size": int(args.crop_size),
+    }
+    for library in libraries:
+        for key, value in expected.items():
+            stored = library.metadata.get(key)
+            if stored is not None and stored != value:
+                raise ValueError(
+                    f"Query {key}={value!r} does not match "
+                    f"{library.index_path} metadata {stored!r}."
+                )
+
+
+def query_feature_library(args) -> int:
+    input_path = Path(args.input).expanduser()
+    if not input_path.is_file():
+        raise FileNotFoundError(f"Input image does not exist: {input_path}")
+
+    with Image.open(input_path) as image:
+        image_shape = (image.height, image.width)
+
+    if args.region_mask:
+        region_mask = load_mask(
+            Path(args.region_mask).expanduser(),
+            image_shape,
+            args.mask_threshold,
+        )
+        region_source = str(Path(args.region_mask).expanduser())
+    else:
+        if args.score_threshold is None:
+            raise ValueError("--score_threshold is required with --score_map")
+        region_mask = load_score_region_mask(
+            Path(args.score_map).expanduser(),
+            image_shape,
+            args.score_threshold,
+        )
+        region_source = str(Path(args.score_map).expanduser())
+
+    components = connected_components(
+        region_mask,
+        min_area=args.min_area,
+        max_regions=args.max_regions,
+    )
+    if not components:
+        raise RuntimeError(
+            "No anomaly ROI was found. Check the input mask/score threshold."
+        )
+
+    library_paths = resolve_library_paths(args)
+    device = select_device(args.gpu)
+    libraries = [
+        load_feature_library(path, device, args.faiss_on_gpu)
+        for path in library_paths
+    ]
+    validate_query_libraries(libraries, args)
+    model = load_dinomaly_model(args, device)
+    transform = build_transform(args)
+    feature = extract_encoder_feature(
+        model,
+        input_path,
+        transform,
+        device,
+        args.feature_merge,
+    )
+    feature_shape = feature.shape[-2:]
+    query_image_relative = input_path.name
+    query_image_id = make_image_id(query_image_relative)
+    results: List[Dict[str, Any]] = []
+
+    for component in components:
+        mask_feature = resize_mask_to_feature(
+            preprocess_mask(
+                component["mask"],
+                args.image_size,
+                args.crop_size,
+            ),
+            feature_shape,
+        )
+        if mask_bbox(mask_feature) is None:
+            LOGGER.warning(
+                "Query ROI %s vanished after preprocessing; skipping",
+                component["component_id"],
+            )
+            continue
+        vector = roi_align_masked(
+            feature,
+            mask_feature,
+            args.roi_size,
+            device,
+        )
+        for library in libraries:
+            if bool(library.metadata.get("normalize", True)):
+                query_vector = l2_normalize(vector)
+            else:
+                query_vector = vector
+            neighbours = search_library_topk(
+                library,
+                query_vector,
+                args.top_k,
+            )
+            library_type = str(
+                library.metadata.get("library_type", library.index_path.parent.name)
+            )
+            for rank, (distance, vector_id) in enumerate(neighbours, start=1):
+                record = record_for_vector_id(library.metadata, vector_id)
+                if not record.get("image_id") or not record.get("roi_id"):
+                    raise RuntimeError(
+                        f"{library.index_path} does not contain image_id/roi_id mapping. "
+                        "Rebuild it with the current dinomaly_two_stage.py."
+                    )
+                results.append(
+                    {
+                        "query_image_id": query_image_id,
+                        "query_image_name": input_path.name,
+                        "query_image_path": str(input_path.resolve()),
+                        "query_region_id": int(component["component_id"]),
+                        "query_region_area": int(component["area"]),
+                        "query_region_bbox": [
+                            float(value) for value in component["bbox"]
+                        ],
+                        "region_source": region_source,
+                        "library_type": library_type,
+                        "library_path": str(library.index_path.parent),
+                        "rank": int(rank),
+                        "distance": float(distance),
+                        "vector_id": int(vector_id),
+                        "image_id": str(record["image_id"]),
+                        "roi_id": str(record["roi_id"]),
+                        "image_name": str(record.get("image_name", "")),
+                        "image_path": str(record.get("image_path", "")),
+                        "image_relative": str(record.get("image_relative", "")),
+                        "mask_path": str(record.get("mask_path", "")),
+                        "component_id": int(record.get("component_id", -1)),
+                        "area": int(record.get("area", 0)),
+                        "bbox_original": [
+                            float(value) for value in record.get("bbox_original", [])
+                        ],
+                        "bbox_feature": [
+                            float(value) for value in record.get("bbox_feature", [])
+                        ],
+                    }
+                )
+
+    if not results:
+        raise RuntimeError("No valid feature-library match was produced.")
+
+    output_dir = Path(args.output_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = output_dir / "lookup_results.json"
+    with json_path.open("w", encoding="utf-8") as file:
+        json.dump(
+            {
+                "query_image": str(input_path.resolve()),
+                "region_source": region_source,
+                "top_k": int(args.top_k),
+                "results": results,
+            },
+            file,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    csv_path = output_dir / "lookup_results.csv"
+    fieldnames = [
+        "query_image_id",
+        "query_image_name",
+        "query_image_path",
+        "query_region_id",
+        "query_region_area",
+        "query_region_bbox",
+        "region_source",
+        "library_type",
+        "library_path",
+        "rank",
+        "distance",
+        "vector_id",
+        "image_id",
+        "roi_id",
+        "image_name",
+        "image_path",
+        "image_relative",
+        "mask_path",
+        "component_id",
+        "area",
+        "bbox_original",
+        "bbox_feature",
+    ]
+    with csv_path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        for result in results:
+            row = dict(result)
+            for key in ("query_region_bbox", "bbox_original", "bbox_feature"):
+                row[key] = json.dumps(row[key], ensure_ascii=False)
+            writer.writerow(row)
+
+    for result in results:
+        print(
+            f"query_roi={result['query_region_id']} "
+            f"library={result['library_type']} rank={result['rank']} "
+            f"distance={result['distance']:.6f} "
+            f"vector_id={result['vector_id']} "
+            f"image_id={result['image_id']} roi_id={result['roi_id']} "
+            f"image={result['image_path']} "
+            f"roi_bbox={result['bbox_original']}",
+            flush=True,
+        )
+    print(f"Wrote lookup results to {csv_path} and {json_path}", flush=True)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Find source images and ROIs for an input Dinomaly2 anomaly region"
+    )
+    add_model_arguments(parser)
+    parser.add_argument("--input", required=True, help="One query image")
+    region = parser.add_mutually_exclusive_group(required=True)
+    region.add_argument("--region_mask", "--anomaly_mask", dest="region_mask")
+    region.add_argument("--score_map", help="Saved Dinomaly2 score-map .npy")
+    parser.add_argument(
+        "--score_threshold",
+        type=float,
+        default=None,
+        help="Strict threshold used with --score_map",
+    )
+    parser.add_argument("--mask_threshold", type=float, default=0.0)
+    parser.add_argument("--min_area", type=int, default=1)
+    parser.add_argument("--max_regions", type=int, default=0)
+    parser.add_argument("--top_k", type=int, default=1)
+    parser.add_argument("--library", nargs="+", default=[])
+    parser.add_argument("--good_library", default=None)
+    parser.add_argument("--anomaly_library", default=None)
+    parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--faiss_on_gpu", action="store_true")
+    return parser
+
+
+def validate_args(args) -> None:
+    if args.roi_size < 1:
+        raise ValueError("roi_size must be positive")
+    if args.min_area < 1:
+        raise ValueError("min_area must be at least 1")
+    if args.max_regions < 0:
+        raise ValueError("max_regions cannot be negative")
+    if args.top_k < 1:
+        raise ValueError("top_k must be at least 1")
+    if args.score_map and args.score_threshold is None:
+        raise ValueError("--score_threshold is required with --score_map")
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    validate_args(args)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
+    return query_feature_library(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

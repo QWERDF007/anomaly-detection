@@ -5,6 +5,10 @@
 GT 读取和热力融合逻辑。ROI 入口将以下步骤
 合并为一次运行：
 
+如果需要“第一阶段分数判定 + 良品库/异常库双检索 + 偏移后重新判定”的流程，
+请使用新增的 [`dinomaly_two_stage.py`](TWO_STAGE_DINOMALY.md)。本文下面的
+`dinomaly_roi_pipeline.py` 仍保留原有的单一 ROI 索引和距离过滤评估流程。
+
 1. 使用 Dinomaly2 对 Train/good、Test/good、Test/anomaly 推理并生成 score map；
 2. 从 Dinomaly2 的 DINO encoder 提取 patch token 特征，保存为 NCHW 格式的 `.npy`；
 3. 读取 Train/good 的 Labelme polygon，映射到特征图后进行 ROIAlign，建立 FAISS 索引；
