@@ -20,16 +20,14 @@ import csv
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
-from tqdm import tqdm
 
 from dinomaly_two_stage import (
     _json_safe,
     _model_feature_mask,
-    _output_relative_path,
     add_model_arguments,
     build_transform,
     calculate_distance_offset,
@@ -53,6 +51,51 @@ from utils import get_gaussian_kernel
 
 
 LOGGER = logging.getLogger("dinomaly_two_threshold_predict")
+
+
+def collect_data_root_images(
+    data_root: Path,
+) -> List[Tuple[Path, Path, str]]:
+    """Collect images grouped by the first-level directory under ``data_root``."""
+
+    data_root = Path(data_root).expanduser()
+    if not data_root.is_dir():
+        raise FileNotFoundError(f"Data root does not exist: {data_root}")
+
+    group_dirs = sorted(
+        [child for child in data_root.iterdir() if child.is_dir()],
+        key=lambda path: str(path).lower(),
+    )
+    if not group_dirs:
+        raise RuntimeError(
+            f"No subdirectories found under {data_root}; expected good/ and anomaly directories"
+        )
+
+    entries: List[Tuple[Path, Path, str]] = []
+    for group_dir in group_dirs:
+        dataset_label = "good" if group_dir.name.casefold() == "good" else "anomaly"
+        for image_path in iter_image_paths(group_dir):
+            entries.append(
+                (
+                    image_path,
+                    image_path.relative_to(data_root),
+                    dataset_label,
+                )
+            )
+    return entries
+
+
+def output_artifact_path(
+    output_dir: Path,
+    artifact_name: str,
+    image_relative: Path,
+    suffix: str,
+) -> Path:
+    """Build an output path while preserving each input's relative layout."""
+
+    result = Path(output_dir) / artifact_name / image_relative.with_suffix(suffix)
+    result.parent.mkdir(parents=True, exist_ok=True)
+    return result
 
 
 def initial_score_label(
@@ -168,10 +211,10 @@ def _build_region_result(
 
 
 def predict_images(args) -> int:
-    input_path = Path(args.input).expanduser()
-    image_paths = iter_image_paths(input_path)
-    if not image_paths:
-        raise RuntimeError(f"No images found under {input_path}")
+    data_root = Path(args.data_root).expanduser()
+    image_entries = collect_data_root_images(data_root)
+    if not image_entries:
+        raise RuntimeError(f"No images found under {data_root}")
 
     device = select_device(args.gpu)
     good_library = load_feature_library(
@@ -190,17 +233,11 @@ def predict_images(args) -> int:
     gaussian_filter = get_gaussian_kernel(5, 4).to(device)
     output_dir = Path(args.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
-    input_root = input_path if input_path.is_dir() else input_path.parent
 
     rows: List[Dict[str, Any]] = []
     details: List[Dict[str, Any]] = []
     roi_rows: List[Dict[str, Any]] = []
-    for image_path in tqdm(
-        image_paths,
-        desc="Dinomaly2 dual-threshold prediction",
-        unit="image",
-        dynamic_ncols=True,
-    ):
+    for image_path, image_relative, dataset_label in image_entries:
         score_map, feature = infer_image(
             model,
             image_path,
@@ -258,13 +295,13 @@ def predict_images(args) -> int:
             args.anomaly_threshold,
             str(selected.get("similar_library", "")) if selected else "",
         )
-        relative = input_path.name if input_path.is_file() else image_path.relative_to(input_root)
-        relative_text = Path(relative).as_posix()
+        relative_text = image_relative.as_posix()
         for region in regions:
             roi_rows.append(
                 {
                     "image_path": str(image_path),
                     "image_relative": relative_text,
+                    "dataset_label": dataset_label,
                     "raw_score": raw_score,
                     "good_threshold": float(args.good_threshold),
                     "anomaly_threshold": float(args.anomaly_threshold),
@@ -272,22 +309,22 @@ def predict_images(args) -> int:
                 }
             )
 
-        score_path = _output_relative_path(
-            image_path,
-            input_root,
-            output_dir / "score_maps",
+        score_path = output_artifact_path(
+            output_dir,
+            "score_maps",
+            image_relative,
             ".npy",
         )
-        region_path = _output_relative_path(
-            image_path,
-            input_root,
-            output_dir / "candidate_regions",
+        region_path = output_artifact_path(
+            output_dir,
+            "candidate_regions",
+            image_relative,
             ".png",
         )
-        detail_path = _output_relative_path(
-            image_path,
-            input_root,
-            output_dir / "details",
+        detail_path = output_artifact_path(
+            output_dir,
+            "details",
+            image_relative,
             ".json",
         )
         np.save(score_path, score_map)
@@ -297,6 +334,7 @@ def predict_images(args) -> int:
         row = {
             "image_path": str(image_path),
             "image_relative": relative_text,
+            "dataset_label": dataset_label,
             "raw_score": raw_score,
             "good_threshold": float(args.good_threshold),
             "anomaly_threshold": float(args.anomaly_threshold),
@@ -324,22 +362,11 @@ def predict_images(args) -> int:
             json.dump(_json_safe(detail), file, ensure_ascii=False, indent=2)
         rows.append(row)
         details.append(detail)
-        LOGGER.info(
-            "%s raw=%.6f (%s) adjusted=%.6f (%s) regions=%d library=%s offset=%+.6f",
-            image_path,
-            raw_score,
-            initial_label,
-            adjusted_score,
-            final_label,
-            len(regions),
-            selected.get("similar_library", "none") if selected else "none",
-            signed_offset,
-        )
-
     csv_path = output_dir / "results.csv"
     fieldnames = [
         "image_path",
         "image_relative",
+        "dataset_label",
         "raw_score",
         "good_threshold",
         "anomaly_threshold",
@@ -366,6 +393,7 @@ def predict_images(args) -> int:
     roi_fieldnames = [
         "image_path",
         "image_relative",
+        "dataset_label",
         "raw_score",
         "good_threshold",
         "anomaly_threshold",
@@ -439,10 +467,6 @@ def predict_images(args) -> int:
             ensure_ascii=False,
             indent=2,
         )
-    print(
-        f"Wrote dual-threshold results to {csv_path} and {roi_csv_path}",
-        flush=True,
-    )
     return 0
 
 
@@ -451,7 +475,13 @@ def build_parser() -> argparse.ArgumentParser:
         description="Dinomaly2 prediction with good/anomaly score thresholds"
     )
     add_model_arguments(parser)
-    parser.add_argument("--input", required=True, help="One image or a recursive image directory")
+    parser.add_argument(
+        "--data_root",
+        "--input",
+        dest="data_root",
+        required=True,
+        help="Root containing first-level good/other anomaly directories",
+    )
     parser.add_argument("--good_library", required=True)
     parser.add_argument("--anomaly_library", required=True)
     parser.add_argument(
@@ -502,10 +532,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise ValueError("good_threshold and anomaly_threshold must be finite")
     if args.good_threshold >= args.anomaly_threshold:
         raise ValueError("good_threshold must be smaller than anomaly_threshold")
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-    )
     return predict_images(args)
 
 

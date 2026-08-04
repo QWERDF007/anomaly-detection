@@ -145,7 +145,7 @@ details/<image>.json        # 每个 ROI 的两个距离、匹配行号和偏移
 ```powershell
 python .\dinomaly_two_threshold_predict.py `
   --model D:\model\model.pth `
-  --input D:\query\images `
+  --data_root D:\query\data_root `
   --good_library D:\libraries\good `
   --anomaly_library D:\libraries\anomaly `
   --good_threshold 0.20 `
@@ -153,6 +153,17 @@ python .\dinomaly_two_threshold_predict.py `
   --output_dir D:\dual_threshold_result `
   --gpu 0
 ```
+
+`data_root` 的一级子目录用于记录数据标签，例如：
+
+```text
+D:\query\data_root\good\*.jpg       # dataset_label=good
+D:\query\data_root\scratch\*.jpg   # dataset_label=anomaly
+D:\query\data_root\crack\*.jpg     # dataset_label=anomaly
+```
+
+脚本会递归搜索这些子目录；结果 CSV 中的 `dataset_label` 是目录标签，
+`final_label` 是模型和特征库的预测结果。
 
 判定规则：
 
