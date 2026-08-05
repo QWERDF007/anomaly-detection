@@ -598,7 +598,9 @@ class MainWindow(QMainWindow):
         self.results: List[Dict[str, Any]] = []
         self.score_map: Optional[np.ndarray] = None
         self.query_result_image: Optional[Path] = None
-        self.setWindowTitle("Dinomaly2 ROI 特征库反查")
+        self.setWindowTitle(
+            f"Dinomaly2 ROI 特征库反查 — root: {Path(self.args.root).expanduser()}"
+        )
         self.resize(2100, 950)
 
         self.input_path_edit = QLineEdit()
