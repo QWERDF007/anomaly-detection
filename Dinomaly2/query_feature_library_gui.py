@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -58,6 +59,7 @@ class ImageCanvas(QWidget):
         self.drag_end: Optional[QPointF] = None
         self.overlay_bbox: Optional[Tuple[float, float, float, float]] = None
         self.overlay_text = ""
+        self.overlay_color = QColor("#ff1744")
         self.setMinimumSize(420, 360)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -116,15 +118,24 @@ class ImageCanvas(QWidget):
                 ]
             else:
                 points = []
-            self.candidate_regions.append(
-                {
-                    "region_id": int(region.get("region_id", len(self.candidate_regions) + 1)),
-                    "mask": mask,
-                    "bbox": tuple(float(value) for value in bbox),
-                    "area": int(region.get("area", int(mask.sum()))),
-                    "points": points,
-                }
-            )
+            stored_region = {
+                "region_id": int(
+                    region.get("region_id", len(self.candidate_regions) + 1)
+                ),
+                "mask": mask,
+                "bbox": tuple(float(value) for value in bbox),
+                "area": int(region.get("area", int(mask.sum()))),
+                "points": points,
+            }
+            score = region.get("score", region.get("region_score"))
+            if score is not None:
+                try:
+                    score = float(score)
+                except (TypeError, ValueError):
+                    score = None
+                if score is not None and np.isfinite(score):
+                    stored_region["score"] = score
+            self.candidate_regions.append(stored_region)
         self.selected_candidate_index = None
         if emit:
             self.candidate_changed.emit()
@@ -209,6 +220,7 @@ class ImageCanvas(QWidget):
         self,
         bbox: Optional[Sequence[float]],
         text: str = "",
+        color: Optional[QColor] = None,
     ) -> None:
         self.overlay_bbox = (
             tuple(float(value) for value in bbox)
@@ -216,6 +228,8 @@ class ImageCanvas(QWidget):
             else None
         )
         self.overlay_text = text
+        if color is not None:
+            self.overlay_color = QColor(color)
         self.update()
 
     def clear_overlay(self) -> None:
@@ -317,11 +331,16 @@ class ImageCanvas(QWidget):
                 candidate_rect = QRectF(top_left, bottom_right).normalized()
                 painter.drawRect(candidate_rect)
                 label_point = candidate_rect.topLeft()
-            label = f"R{index + 1}"
+            score = candidate.get("score")
+            label = (
+                f"R{index + 1}: {float(score):.4f}"
+                if score is not None
+                else f"R{index + 1}"
+            )
             text_rect = QRectF(
                 label_point.x(),
                 max(0.0, label_point.y() - 22.0),
-                70.0,
+                150.0 if score is not None else 70.0,
                 20.0,
             )
             painter.fillRect(text_rect, QColor(0, 0, 0, 180))
@@ -349,7 +368,7 @@ class ImageCanvas(QWidget):
             x1, y1, x2, y2 = self.overlay_bbox
             top_left = self.image_to_widget(QPointF(x1, y1))
             bottom_right = self.image_to_widget(QPointF(x2, y2))
-            painter.setPen(QPen(QColor("#ff1744"), 3.0))
+            painter.setPen(QPen(self.overlay_color, 3.0))
             painter.drawRect(QRectF(top_left, bottom_right).normalized())
             if self.overlay_text:
                 painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
@@ -471,7 +490,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Dinomaly2 ROI 特征库反查")
         self.resize(1800, 900)
 
-        self.open_button = QPushButton("打开输入图像")
+        self.input_path_edit = QLineEdit()
+        self.input_path_edit.setPlaceholderText("输入图像路径，可直接粘贴后加载")
+        self.load_input_button = QPushButton("加载")
+        self.open_button = QPushButton("选择文件")
         self.mode_combo = QComboBox()
         if self._artifact_root("candidate_regions") is not None:
             self.mode_combo.addItem("候选区域", "candidate")
@@ -481,13 +503,13 @@ class MainWindow(QMainWindow):
         self.undo_button = QPushButton("撤销")
         self.clear_button = QPushButton("清空区域")
         self.query_button = QPushButton("查询特征库")
-        self.status_label = QLabel("请打开图像，然后在左侧绘制异常区域")
+        self.status_label = QLabel("请打开图像，然后在中间选择或绘制查询区域")
         self.status_label.setWordWrap(True)
 
         self.left_canvas = ImageCanvas(editable=True)
         self.right_canvas = ImageCanvas(editable=False)
-        self.result_table = QTableWidget(0, 2)
-        self.result_table.setHorizontalHeaderLabels(["图像路径", "距离"])
+        self.result_table = QTableWidget(0, 3)
+        self.result_table.setHorizontalHeaderLabels(["图像路径", "距离", "库类型"])
         self.result_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
         )
@@ -503,9 +525,15 @@ class MainWindow(QMainWindow):
         self.result_table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.ResizeToContents
         )
+        self.result_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.ResizeToContents
+        )
         self.result_table.setMinimumHeight(150)
 
         controls = QHBoxLayout()
+        controls.addWidget(QLabel("输入图像："))
+        controls.addWidget(self.input_path_edit, 2)
+        controls.addWidget(self.load_input_button)
         controls.addWidget(self.open_button)
         controls.addWidget(QLabel("中间区域："))
         controls.addWidget(self.mode_combo)
@@ -528,7 +556,7 @@ class MainWindow(QMainWindow):
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
-        right_layout.addWidget(QLabel("最近邻原图 / 对应 ROI"))
+        right_layout.addWidget(QLabel("最近邻原图 / 对应 ROI（良品库绿色，异常库红色）"))
         right_layout.addWidget(self.right_canvas, 1)
         right_layout.addWidget(self.result_table)
 
@@ -548,6 +576,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self.open_button.clicked.connect(self.open_image)
+        self.load_input_button.clicked.connect(self.load_input_from_text)
+        self.input_path_edit.returnPressed.connect(self.load_input_from_text)
         self.mode_combo.currentIndexChanged.connect(self.change_mode)
         self.finish_button.clicked.connect(self.left_canvas.finish_polygon)
         self.undo_button.clicked.connect(self.left_canvas.undo)
@@ -577,8 +607,10 @@ class MainWindow(QMainWindow):
         try:
             self.left_canvas.set_image(image_path)
             self.raw_canvas.set_image(image_path)
-            self.load_raw_regions(image_path)
-            candidate_path = self.load_candidate_regions(image_path)
+            self.input_path_edit.setText(str(image_path))
+            score_map = self.load_score_map(image_path)
+            self.load_raw_regions(image_path, score_map)
+            candidate_path = self.load_candidate_regions(image_path, score_map)
             self.current_run_dir = None
             self.right_canvas.clear_image()
             self.result_table.setRowCount(0)
@@ -621,8 +653,13 @@ class MainWindow(QMainWindow):
             return Path(prediction_dir).expanduser() / artifact_name
         return None
 
-    def _mask_path(self, root: Path, image_path: Path) -> Optional[Path]:
-        """Resolve one predictor Mask using the input's relative path."""
+    def _artifact_path(
+        self,
+        root: Path,
+        image_path: Path,
+        suffix: str,
+    ) -> Optional[Path]:
+        """Resolve one predictor artifact using the input's relative path."""
 
         if root.is_file():
             return root
@@ -642,7 +679,7 @@ class MainWindow(QMainWindow):
             if relative is not None:
                 candidates.extend(
                     [
-                        root / relative.with_suffix(".png"),
+                        root / relative.with_suffix(suffix),
                         root / relative,
                     ]
                 )
@@ -650,8 +687,8 @@ class MainWindow(QMainWindow):
         candidates.extend(
             [
                 root / image_path.name,
-                root / image_path.with_suffix(".png").name,
-                root / f"{image_path.stem}.png",
+                root / image_path.with_suffix(suffix).name,
+                root / f"{image_path.stem}{suffix}",
             ]
         )
         seen = set()
@@ -667,14 +704,18 @@ class MainWindow(QMainWindow):
         # directory contains a single matching relative image name.
         matches = [
             path
-            for path in root.rglob(f"{image_path.stem}.png")
+            for path in root.rglob(f"{image_path.stem}{suffix}")
             if path.is_file()
         ]
         if len(matches) == 1:
             return matches[0]
         return None
 
-    def _mask_components(self, mask_path: Path) -> List[Dict[str, Any]]:
+    def _mask_components(
+        self,
+        mask_path: Path,
+        score_map: Optional[np.ndarray] = None,
+    ) -> List[Dict[str, Any]]:
         """Read a predictor Mask and return its connected components."""
 
         raw_mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
@@ -701,52 +742,94 @@ class MainWindow(QMainWindow):
             ys, xs = np.where(component_mask)
             if not len(xs):
                 continue
-            regions.append(
-                {
-                    "region_id": len(regions) + 1,
-                    "mask": component_mask,
-                    "area": area,
-                    "bbox": (
-                        float(xs.min()),
-                        float(ys.min()),
-                        float(xs.max() + 1),
-                        float(ys.max() + 1),
-                    ),
-                }
-            )
+            region = {
+                "region_id": len(regions) + 1,
+                "mask": component_mask,
+                "area": area,
+                "bbox": (
+                    float(xs.min()),
+                    float(ys.min()),
+                    float(xs.max() + 1),
+                    float(ys.max() + 1),
+                ),
+            }
+            if score_map is not None:
+                region_score = np.asarray(score_map)[component_mask]
+                if region_score.size:
+                    score = float(np.nanmax(region_score))
+                    if np.isfinite(score):
+                        region["score"] = score
+            regions.append(region)
         regions.sort(key=lambda region: (-region["area"], region["region_id"]))
         for index, region in enumerate(regions, start=1):
             region["region_id"] = index
         return regions
 
-    def load_raw_regions(self, image_path: Path) -> Optional[Path]:
+    def load_score_map(self, image_path: Path) -> Optional[np.ndarray]:
+        """Load and resize the predictor score map to the input image."""
+
+        root = self._artifact_root("score_maps")
+        if root is None:
+            return None
+        score_path = self._artifact_path(root, image_path, ".npy")
+        if score_path is None:
+            return None
+        score_map = np.asarray(np.load(score_path), dtype=np.float32)
+        score_map = np.squeeze(score_map)
+        if score_map.ndim != 2:
+            raise ValueError(
+                f"Score map must be 2D: {score_path}; got {score_map.shape}"
+            )
+        if self.left_canvas.image is None:
+            raise RuntimeError("尚未打开输入图像")
+        expected_shape = (
+            self.left_canvas.image.height(),
+            self.left_canvas.image.width(),
+        )
+        if score_map.shape != expected_shape:
+            score_map = cv2.resize(
+                score_map,
+                (expected_shape[1], expected_shape[0]),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        return np.nan_to_num(score_map, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def load_raw_regions(
+        self,
+        image_path: Path,
+        score_map: Optional[np.ndarray] = None,
+    ) -> Optional[Path]:
         """Load the direct good-threshold Mask into the left canvas."""
 
         self.raw_canvas.clear_candidate_regions(emit=False)
         root = self._artifact_root("raw_regions")
         if root is None:
             return None
-        mask_path = self._mask_path(root, image_path)
+        mask_path = self._artifact_path(root, image_path, ".png")
         if mask_path is None:
             return None
         self.raw_canvas.set_candidate_regions(
-            self._mask_components(mask_path),
+            self._mask_components(mask_path, score_map),
             emit=False,
         )
         return mask_path
 
-    def load_candidate_regions(self, image_path: Path) -> Optional[Path]:
+    def load_candidate_regions(
+        self,
+        image_path: Path,
+        score_map: Optional[np.ndarray] = None,
+    ) -> Optional[Path]:
         """Load one mask and split it into selectable connected components."""
 
         self.left_canvas.clear_candidate_regions(emit=False)
         root = self._artifact_root("candidate_regions")
         if root is None:
             return None
-        mask_path = self._mask_path(root, image_path)
+        mask_path = self._artifact_path(root, image_path, ".png")
         if mask_path is None:
             return None
         self.left_canvas.set_candidate_regions(
-            self._mask_components(mask_path),
+            self._mask_components(mask_path, score_map),
             emit=False,
         )
         return mask_path
@@ -782,6 +865,15 @@ class MainWindow(QMainWindow):
         )
         if image_path:
             self.load_input_image(Path(image_path))
+
+    def load_input_from_text(self) -> None:
+        """Load the image path entered in the input field."""
+
+        image_text = self.input_path_edit.text().strip().strip('"')
+        if not image_text:
+            QMessageBox.warning(self, "打开失败", "请输入输入图像路径。")
+            return
+        self.load_input_image(Path(image_text).expanduser())
 
     def update_controls(self) -> None:
         has_image = self.left_canvas.image is not None
@@ -932,13 +1024,30 @@ class MainWindow(QMainWindow):
             distance_item = QTableWidgetItem(
                 f"{float(result.get('distance', 0.0)):.6f}"
             )
+            library_name = self._library_display_name(result)
+            library_item = QTableWidgetItem(library_name)
+            library_item.setForeground(
+                QColor("#00a844")
+                if library_name == "良品库"
+                else QColor("#d50000")
+            )
             self.result_table.setItem(row, 0, path_item)
             self.result_table.setItem(row, 1, distance_item)
+            self.result_table.setItem(row, 2, library_item)
         if self.results:
             self.result_table.selectRow(0)
             self.status_label.setText(f"查询完成：{len(self.results)} 个匹配结果")
         else:
             self.status_label.setText("查询完成，但没有匹配结果")
+
+    @staticmethod
+    def _library_display_name(result: Mapping[str, Any]) -> str:
+        library_type = str(result.get("library_type", "")).strip().casefold()
+        if library_type in {"good", "good_library", "良品", "良品库"}:
+            return "良品库"
+        if library_type in {"anomaly", "anomaly_library", "异常", "异常库"}:
+            return "异常库"
+        return str(result.get("library_type", "未知库")) or "未知库"
 
     def _print_lookup_results(self) -> None:
         """Print IDs and ROI details to the terminal that launched the GUI."""
@@ -970,16 +1079,29 @@ class MainWindow(QMainWindow):
         source_path = Path(result.get("image_path", ""))
         try:
             if source_path.is_file():
+                library_name = self._library_display_name(result)
+                is_good_library = library_name == "良品库"
+                overlay_color = (
+                    QColor("#00c853")
+                    if is_good_library
+                    else QColor("#ff1744")
+                )
                 self.right_canvas.set_image(source_path)
-                self.right_canvas.set_overlay_bbox(result.get("bbox_original"))
+                self.right_canvas.set_overlay_bbox(
+                    result.get("bbox_original"),
+                    text=f"{library_name} ROI",
+                    color=overlay_color,
+                )
                 self.status_label.setText(
                     f"匹配：{source_path}，"
-                    f"distance={float(result.get('distance', 0.0)):.6f}"
+                    f"distance={float(result.get('distance', 0.0)):.6f}，"
+                    f"库类型={library_name}"
                 )
             else:
                 self.right_canvas.clear_image()
                 self.status_label.setText(
                     f"匹配成功，但原图不存在：{source_path}；"
+                    f"库类型={self._library_display_name(result)}；"
                     "路径已显示在结果表中。"
                 )
         except (OSError, ValueError) as error:
@@ -1020,8 +1142,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Output directory of dinomaly_two_threshold_predict.py; reads "
-            "raw_regions/ and candidate_regions/ from it."
+            "score_maps/, raw_regions/ and candidate_regions/ from it."
         ),
+    )
+    parser.add_argument(
+        "--score_maps",
+        default=None,
+        help="Optional score-map .npy file or directory used for region scores",
     )
     parser.add_argument(
         "--raw_regions",
