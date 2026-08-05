@@ -151,11 +151,12 @@ def calculate_distance_offset(
 
 
 def select_strongest_region(regions: Sequence[Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
-    """Select the region with the strongest distance evidence.
+    """Select the region with the strongest adjusted score.
 
     A single image may contain multiple score-map components.  The largest
-    confidence is used for the image-level correction; the ROI details for all
-    components are still written to the result JSON.
+    adjusted score (``region_score + signed_offset``, with ``region_score``
+    as the tiebreak) is used for the image-level correction; the ROI details
+    for all components are still written to the result JSON.
     """
 
     if not regions:
@@ -163,7 +164,8 @@ def select_strongest_region(regions: Sequence[Mapping[str, Any]]) -> Optional[Ma
     return max(
         regions,
         key=lambda region: (
-            float(region.get("confidence", 0.0)),
+            float(region.get("region_score", 0.0))
+            + float(region.get("signed_offset", 0.0)),
             float(region.get("region_score", 0.0)),
         ),
     )
