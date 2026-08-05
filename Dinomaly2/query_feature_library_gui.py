@@ -606,6 +606,7 @@ class MainWindow(QMainWindow):
         self.results: List[Dict[str, Any]] = []
         self.score_map: Optional[np.ndarray] = None
         self.query_result_image: Optional[Path] = None
+        self.unmatched_region_count = 0
         self.setWindowTitle(
             f"Dinomaly2 ROI 特征库反查 — root: {Path(self.args.root).expanduser()}"
         )
@@ -966,6 +967,7 @@ class MainWindow(QMainWindow):
         self.adjust_canvas.set_image(image_path)
         regions = detail.get("regions", [])
         judged = []
+        unmatched_count = 0
         for region_data in self.left_canvas.candidate_regions:
             candidate = dict(region_data)
             candidate["color"] = "#00bcd4"
@@ -989,17 +991,25 @@ class MainWindow(QMainWindow):
                     "#00c853" if label == "good" else "#ff1744"
                 )
                 candidate["score"] = adjusted
+            else:
+                unmatched_count += 1
             judged.append(candidate)
+        self.unmatched_region_count = unmatched_count
         self.adjust_canvas.set_candidate_regions(judged, emit=False)
-        if regions:
+        judged_with_score = [
+            candidate
+            for candidate in judged
+            if candidate.get("score") is not None
+        ]
+        if judged_with_score:
             strongest = max(
-                regions,
-                key=lambda region: (
-                    float(region.get("region_score", 0.0))
-                    + float(region.get("signed_offset", 0.0))
+                judged_with_score,
+                key=lambda candidate: (
+                    float(candidate.get("score", 0.0)),
+                    float(candidate.get("area", 0)),
                 ),
             )
-            strongest_bbox = strongest.get("bbox_original")
+            strongest_bbox = strongest.get("bbox")
             if isinstance(strongest_bbox, (list, tuple)) and len(strongest_bbox) == 4:
                 self.adjust_canvas.set_overlay_bbox(
                     strongest_bbox,
@@ -1033,27 +1043,51 @@ class MainWindow(QMainWindow):
                 detail = None
         if detail:
             raw_score = float(detail.get("raw_score", 0.0))
-            signed_offset = float(detail.get("signed_offset", 0.0))
-            adjusted_score = float(
-                detail.get("adjusted_score", raw_score + signed_offset)
-            )
-            final_label = str(detail.get("final_label", ""))
-            final_cn = "正常" if final_label == "good" else "异常"
-            lines.append(
-                f"整图最终调整（results.csv 一致）：adjusted_score = "
-                f"{raw_score:.4f} + ({signed_offset:+.4f}) = "
-                f"<b>{adjusted_score:.4f}</b>（{final_cn}）"
-            )
             good_threshold = float(
                 detail.get("good_threshold", float(self.args.good_threshold))
             )
             anomaly_threshold = float(
                 detail.get("anomaly_threshold", float(self.args.anomaly_threshold))
             )
+            regions = detail.get("regions", [])
+            if regions:
+                strongest = max(
+                    regions,
+                    key=lambda region: (
+                        float(region.get("region_score", 0.0))
+                        + float(region.get("signed_offset", 0.0)),
+                        float(region.get("region_score", 0.0)),
+                    ),
+                )
+                signed_offset = float(strongest.get("signed_offset", 0.0))
+                similar_library = str(strongest.get("similar_library", ""))
+            else:
+                signed_offset = 0.0
+                similar_library = ""
+            adjusted_score = raw_score + signed_offset
+            label, _reason = final_score_label(
+                adjusted_score,
+                good_threshold,
+                anomaly_threshold,
+                similar_library,
+            )
+            final_cn = "正常" if label == "good" else "异常"
+            lines.append(
+                f"整图最终调整（按调整后分数最大区域）：adjusted_score = "
+                f"{raw_score:.4f} + ({signed_offset:+.4f}) = "
+                f"<b>{adjusted_score:.4f}</b>（{final_cn}）"
+            )
         else:
             lines.append("整图最终调整：未找到预测详情（--root/preds/details/）。")
             good_threshold = float(self.args.good_threshold)
             anomaly_threshold = float(self.args.anomaly_threshold)
+        if self.unmatched_region_count > 0:
+            lines.append(
+                f"<span style=\"color:#ff9800;\">提示："
+                f"{self.unmatched_region_count} 个候选区域未匹配到预测详情"
+                f"（details 与候选掩码可能不是同一次预测/同一阈值生成的），"
+                f"这些区域以青色显示原始分数、未参与两阶段调整。</span>"
+            )
         lines.append("<hr>")
 
         if self.left_canvas.mode == "candidate":
