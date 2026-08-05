@@ -1,9 +1,9 @@
 """PySide6 GUI for querying Dinomaly2 ROI feature libraries.
 
-The left canvas displays the query image and lets the user draw rectangle or
-polygon anomaly regions.  A query runs in a separate Python process so the UI
-stays responsive while Dinomaly2 and FAISS are loading/searching.  The right
-canvas displays the matched source image with the stored ROI bounding box.
+The three canvases display the direct good-threshold Mask, selectable
+candidate/manual query ROIs, and the matched source image with its stored ROI.
+A query runs in a separate Python process so the UI stays responsive while
+Dinomaly2 and FAISS are loading/searching.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -42,6 +42,7 @@ class ImageCanvas(QWidget):
     """Image canvas with image-coordinate drawing and optional ROI overlay."""
 
     shapes_changed = Signal()
+    candidate_changed = Signal()
 
     def __init__(self, editable: bool, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -49,6 +50,8 @@ class ImageCanvas(QWidget):
         self.mode = "rectangle"
         self.image: Optional[QImage] = None
         self.image_path: Optional[Path] = None
+        self.candidate_regions: List[Dict[str, Any]] = []
+        self.selected_candidate_index: Optional[int] = None
         self.shapes: List[Dict[str, Any]] = []
         self.current_points: List[QPointF] = []
         self.drag_start: Optional[QPointF] = None
@@ -68,6 +71,7 @@ class ImageCanvas(QWidget):
         self.image = image.convertToFormat(QImage.Format.Format_RGB32)
         self.image_path = Path(image_path)
         self.clear_shapes(emit=False)
+        self.clear_candidate_regions(emit=False)
         self.clear_overlay()
         self.update()
 
@@ -75,17 +79,102 @@ class ImageCanvas(QWidget):
         self.image = None
         self.image_path = None
         self.clear_shapes(emit=False)
+        self.clear_candidate_regions(emit=False)
         self.clear_overlay()
         self.update()
 
     def set_mode(self, mode: str) -> None:
-        if mode not in {"rectangle", "polygon"}:
+        if mode not in {"candidate", "rectangle", "polygon"}:
             raise ValueError(f"不支持的绘制类型：{mode}")
         self.mode = mode
         self.current_points.clear()
         self.drag_start = None
         self.drag_end = None
         self.update()
+
+    def set_candidate_regions(
+        self,
+        regions: Sequence[Mapping[str, Any]],
+        emit: bool = True,
+    ) -> None:
+        self.candidate_regions = []
+        for region in regions:
+            mask = np.asarray(region.get("mask"), dtype=bool)
+            bbox = region.get("bbox", ())
+            if mask.ndim != 2 or len(bbox) != 4:
+                continue
+            contours, _ = cv2.findContours(
+                mask.astype(np.uint8),
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE,
+            )
+            if contours:
+                contour = max(contours, key=cv2.contourArea)
+                points = [
+                    QPointF(float(point[0][0]), float(point[0][1]))
+                    for point in contour
+                ]
+            else:
+                points = []
+            self.candidate_regions.append(
+                {
+                    "region_id": int(region.get("region_id", len(self.candidate_regions) + 1)),
+                    "mask": mask,
+                    "bbox": tuple(float(value) for value in bbox),
+                    "area": int(region.get("area", int(mask.sum()))),
+                    "points": points,
+                }
+            )
+        self.selected_candidate_index = None
+        if emit:
+            self.candidate_changed.emit()
+        self.update()
+
+    def clear_candidate_regions(self, emit: bool = True) -> None:
+        self.candidate_regions.clear()
+        self.selected_candidate_index = None
+        if emit:
+            self.candidate_changed.emit()
+        self.update()
+
+    def select_candidate(self, index: int) -> None:
+        if 0 <= int(index) < len(self.candidate_regions):
+            self.selected_candidate_index = int(index)
+        else:
+            self.selected_candidate_index = None
+        self.candidate_changed.emit()
+        self.update()
+
+    def selected_candidate_mask(self) -> Optional[np.ndarray]:
+        if self.selected_candidate_index is None:
+            return None
+        if not 0 <= self.selected_candidate_index < len(self.candidate_regions):
+            return None
+        return np.asarray(
+            self.candidate_regions[self.selected_candidate_index]["mask"],
+            dtype=np.uint8,
+        )
+
+    def candidate_at(self, point: QPointF) -> Optional[int]:
+        """Return the smallest candidate containing an image-coordinate point."""
+
+        if self.image is None:
+            return None
+        x = int(round(point.x()))
+        y = int(round(point.y()))
+        hits = []
+        for index, region in enumerate(self.candidate_regions):
+            mask = region["mask"]
+            contains_mask = (
+                0 <= y < mask.shape[0]
+                and 0 <= x < mask.shape[1]
+                and bool(mask[y, x])
+            )
+            if contains_mask:
+                hits.append((int(region.get("area", 0)), index))
+        if not hits:
+            return None
+        return min(hits)[1]
 
     def clear_shapes(self, emit: bool = True) -> None:
         self.shapes.clear()
@@ -205,6 +294,39 @@ class ImageCanvas(QWidget):
 
         image_rect = self.image_rect()
         painter.drawImage(image_rect, self.image)
+        for index, candidate in enumerate(self.candidate_regions):
+            selected = index == self.selected_candidate_index
+            color = QColor("#ffeb3b") if selected else QColor("#00bcd4")
+            painter.setPen(QPen(color, 3.0 if selected else 2.0))
+            points = candidate.get("points", [])
+            polygon = QPolygonF(
+                [self.image_to_widget(point) for point in points]
+            )
+            if len(points) >= 3:
+                if selected:
+                    painter.setBrush(QColor(255, 235, 59, 55))
+                else:
+                    painter.setBrush(QColor(0, 188, 212, 30))
+                painter.drawPolygon(polygon)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                label_point = polygon.boundingRect().topLeft()
+            else:
+                x1, y1, x2, y2 = candidate["bbox"]
+                top_left = self.image_to_widget(QPointF(x1, y1))
+                bottom_right = self.image_to_widget(QPointF(x2, y2))
+                candidate_rect = QRectF(top_left, bottom_right).normalized()
+                painter.drawRect(candidate_rect)
+                label_point = candidate_rect.topLeft()
+            label = f"R{index + 1}"
+            text_rect = QRectF(
+                label_point.x(),
+                max(0.0, label_point.y() - 22.0),
+                70.0,
+                20.0,
+            )
+            painter.fillRect(text_rect, QColor(0, 0, 0, 180))
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft, label)
         for shape in self.shapes:
             self._draw_shape(painter, shape, QColor("#00e676"))
 
@@ -239,6 +361,16 @@ class ImageCanvas(QWidget):
 
     def mousePressEvent(self, event) -> None:
         if not self.editable:
+            return
+        if self.mode == "candidate":
+            if event.button() == Qt.MouseButton.LeftButton:
+                point = self.widget_to_image(event.position())
+                if point is not None:
+                    candidate_index = self.candidate_at(point)
+                    if candidate_index is not None:
+                        self.select_candidate(candidate_index)
+                    else:
+                        self.select_candidate(-1)
             return
         if (
             self.mode == "polygon"
@@ -337,10 +469,12 @@ class MainWindow(QMainWindow):
         self.current_run_dir: Optional[Path] = None
         self.results: List[Dict[str, Any]] = []
         self.setWindowTitle("Dinomaly2 ROI 特征库反查")
-        self.resize(1480, 900)
+        self.resize(1800, 900)
 
         self.open_button = QPushButton("打开输入图像")
         self.mode_combo = QComboBox()
+        if self._artifact_root("candidate_regions") is not None:
+            self.mode_combo.addItem("候选区域", "candidate")
         self.mode_combo.addItem("矩形", "rectangle")
         self.mode_combo.addItem("多边形", "polygon")
         self.finish_button = QPushButton("完成多边形")
@@ -373,7 +507,7 @@ class MainWindow(QMainWindow):
 
         controls = QHBoxLayout()
         controls.addWidget(self.open_button)
-        controls.addWidget(QLabel("绘制："))
+        controls.addWidget(QLabel("中间区域："))
         controls.addWidget(self.mode_combo)
         controls.addWidget(self.finish_button)
         controls.addWidget(self.undo_button)
@@ -381,10 +515,16 @@ class MainWindow(QMainWindow):
         controls.addStretch(1)
         controls.addWidget(self.query_button)
 
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.addWidget(QLabel("输入图像 / 绘制查询 ROI"))
-        left_layout.addWidget(self.left_canvas, 1)
+        raw_panel = QWidget()
+        raw_layout = QVBoxLayout(raw_panel)
+        raw_layout.addWidget(QLabel("原始 Dinomaly2 区域（score ≥ good_threshold）"))
+        self.raw_canvas = ImageCanvas(editable=False)
+        raw_layout.addWidget(self.raw_canvas, 1)
+
+        candidate_panel = QWidget()
+        candidate_layout = QVBoxLayout(candidate_panel)
+        candidate_layout.addWidget(QLabel("候选区域 / 手动画 ROI（单选后查询）"))
+        candidate_layout.addWidget(self.left_canvas, 1)
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
@@ -393,10 +533,12 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.result_table)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(left_panel)
+        splitter.addWidget(raw_panel)
+        splitter.addWidget(candidate_panel)
         splitter.addWidget(right_panel)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 1)
 
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -409,9 +551,10 @@ class MainWindow(QMainWindow):
         self.mode_combo.currentIndexChanged.connect(self.change_mode)
         self.finish_button.clicked.connect(self.left_canvas.finish_polygon)
         self.undo_button.clicked.connect(self.left_canvas.undo)
-        self.clear_button.clicked.connect(self.left_canvas.clear_shapes)
+        self.clear_button.clicked.connect(self.clear_query_selection)
         self.query_button.clicked.connect(self.start_query)
         self.left_canvas.shapes_changed.connect(self.update_controls)
+        self.left_canvas.candidate_changed.connect(self.candidate_selection_changed)
         self.result_table.currentCellChanged.connect(self._result_row_changed)
         self.query_button.setEnabled(False)
 
@@ -420,21 +563,215 @@ class MainWindow(QMainWindow):
 
     def change_mode(self, _index: int) -> None:
         self.left_canvas.set_mode(self.mode_combo.currentData())
-        self.status_label.setText(
-            "矩形：按住左键拖拽；多边形：左键依次点击顶点，右键、双击或点击‘完成多边形’结束。"
-        )
+        if self.left_canvas.mode == "candidate":
+            self.status_label.setText(
+                "候选区域：左键单击一个候选多边形进行选择，然后点击‘查询特征库’。"
+            )
+        else:
+            self.status_label.setText(
+                "矩形：按住左键拖拽；多边形：左键依次点击顶点，右键、双击或点击‘完成多边形’结束。"
+            )
+        self.update_controls()
 
     def load_input_image(self, image_path: Path) -> None:
         try:
             self.left_canvas.set_image(image_path)
+            self.raw_canvas.set_image(image_path)
+            self.load_raw_regions(image_path)
+            candidate_path = self.load_candidate_regions(image_path)
             self.current_run_dir = None
             self.right_canvas.clear_image()
             self.result_table.setRowCount(0)
             self.results.clear()
-            self.status_label.setText(f"已打开：{image_path}")
+            if candidate_path is not None:
+                candidate_index = self.mode_combo.findData("candidate")
+                if candidate_index >= 0:
+                    self.mode_combo.setCurrentIndex(candidate_index)
+                self.status_label.setText(
+                    f"已打开：{image_path}；原始区域 {len(self.raw_canvas.candidate_regions)} 个，"
+                    f"候选区域 {len(self.left_canvas.candidate_regions)} 个；"
+                    "请单击一个多边形后查询。"
+                )
+            else:
+                rectangle_index = self.mode_combo.findData("rectangle")
+                if rectangle_index >= 0:
+                    self.mode_combo.setCurrentIndex(rectangle_index)
+                if self._artifact_root("candidate_regions") is not None:
+                    self.status_label.setText(
+                        f"已打开：{image_path}；原始区域 {len(self.raw_canvas.candidate_regions)} 个，"
+                        "未找到对应候选 Mask，可切换为矩形或多边形手动画 ROI。"
+                    )
+                else:
+                    self.status_label.setText(
+                        f"已打开：{image_path}；原始区域 "
+                        f"{len(self.raw_canvas.candidate_regions)} 个。"
+                    )
             self.update_controls()
         except (OSError, ValueError) as error:
             QMessageBox.critical(self, "打开失败", str(error))
+
+    def _artifact_root(self, artifact_name: str) -> Optional[Path]:
+        """Return an explicit artifact root or one under --prediction_dir."""
+
+        configured = getattr(self.args, artifact_name, None)
+        if configured:
+            return Path(configured).expanduser()
+        prediction_dir = getattr(self.args, "prediction_dir", None)
+        if prediction_dir:
+            return Path(prediction_dir).expanduser() / artifact_name
+        return None
+
+    def _mask_path(self, root: Path, image_path: Path) -> Optional[Path]:
+        """Resolve one predictor Mask using the input's relative path."""
+
+        if root.is_file():
+            return root
+        if not root.is_dir():
+            raise FileNotFoundError(
+                f"Mask 目录不存在或不是文件：{root}"
+            )
+
+        candidates: List[Path] = []
+        data_root_text = self.args.data_root
+        if data_root_text:
+            data_root = Path(data_root_text).expanduser().resolve()
+            try:
+                relative = image_path.resolve().relative_to(data_root)
+            except ValueError:
+                relative = None
+            if relative is not None:
+                candidates.extend(
+                    [
+                        root / relative.with_suffix(".png"),
+                        root / relative,
+                    ]
+                )
+
+        candidates.extend(
+            [
+                root / image_path.name,
+                root / image_path.with_suffix(".png").name,
+                root / f"{image_path.stem}.png",
+            ]
+        )
+        seen = set()
+        for candidate in candidates:
+            candidate = candidate.resolve()
+            if str(candidate).casefold() in seen:
+                continue
+            seen.add(str(candidate).casefold())
+            if candidate.is_file():
+                return candidate
+
+        # This fallback is useful when data_root was omitted and the output
+        # directory contains a single matching relative image name.
+        matches = [
+            path
+            for path in root.rglob(f"{image_path.stem}.png")
+            if path.is_file()
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def _mask_components(self, mask_path: Path) -> List[Dict[str, Any]]:
+        """Read a predictor Mask and return its connected components."""
+
+        raw_mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        if raw_mask is None:
+            raise OSError(f"无法读取 Mask：{mask_path}")
+        if self.left_canvas.image is None:
+            raise RuntimeError("尚未打开输入图像")
+        expected_shape = (
+            self.left_canvas.image.height(),
+            self.left_canvas.image.width(),
+        )
+        if raw_mask.shape != expected_shape:
+            raw_mask = cv2.resize(
+                raw_mask,
+                (expected_shape[1], expected_shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
+        binary_mask = (raw_mask > 0).astype(np.uint8)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(binary_mask, 8)
+        regions: List[Dict[str, Any]] = []
+        for component_id in range(1, count):
+            component_mask = labels == component_id
+            area = int(stats[component_id, cv2.CC_STAT_AREA])
+            ys, xs = np.where(component_mask)
+            if not len(xs):
+                continue
+            regions.append(
+                {
+                    "region_id": len(regions) + 1,
+                    "mask": component_mask,
+                    "area": area,
+                    "bbox": (
+                        float(xs.min()),
+                        float(ys.min()),
+                        float(xs.max() + 1),
+                        float(ys.max() + 1),
+                    ),
+                }
+            )
+        regions.sort(key=lambda region: (-region["area"], region["region_id"]))
+        for index, region in enumerate(regions, start=1):
+            region["region_id"] = index
+        return regions
+
+    def load_raw_regions(self, image_path: Path) -> Optional[Path]:
+        """Load the direct good-threshold Mask into the left canvas."""
+
+        self.raw_canvas.clear_candidate_regions(emit=False)
+        root = self._artifact_root("raw_regions")
+        if root is None:
+            return None
+        mask_path = self._mask_path(root, image_path)
+        if mask_path is None:
+            return None
+        self.raw_canvas.set_candidate_regions(
+            self._mask_components(mask_path),
+            emit=False,
+        )
+        return mask_path
+
+    def load_candidate_regions(self, image_path: Path) -> Optional[Path]:
+        """Load one mask and split it into selectable connected components."""
+
+        self.left_canvas.clear_candidate_regions(emit=False)
+        root = self._artifact_root("candidate_regions")
+        if root is None:
+            return None
+        mask_path = self._mask_path(root, image_path)
+        if mask_path is None:
+            return None
+        self.left_canvas.set_candidate_regions(
+            self._mask_components(mask_path),
+            emit=False,
+        )
+        return mask_path
+
+    def candidate_selection_changed(self) -> None:
+        self.update_controls()
+        index = self.left_canvas.selected_candidate_index
+        if index is None or index >= len(self.left_canvas.candidate_regions):
+            if self.left_canvas.mode == "candidate":
+                self.status_label.setText("当前未选择候选区域，请单击一个候选多边形。")
+            return
+        region = self.left_canvas.candidate_regions[index]
+        self.status_label.setText(
+            f"已选择候选区域 R{index + 1}（面积 {region['area']}），请点击‘查询特征库’。"
+        )
+
+    def clear_query_selection(self) -> None:
+        """Clear the active manual ROI or the single candidate selection."""
+
+        self.left_canvas.clear_shapes(emit=False)
+        if self.left_canvas.mode == "candidate":
+            self.left_canvas.select_candidate(-1)
+        else:
+            self.left_canvas.shapes_changed.emit()
+        self.status_label.setText("已清空当前查询区域，请重新选择或绘制 ROI。")
 
     def open_image(self) -> None:
         image_path, _ = QFileDialog.getOpenFileName(
@@ -448,8 +785,13 @@ class MainWindow(QMainWindow):
 
     def update_controls(self) -> None:
         has_image = self.left_canvas.image is not None
-        has_shapes = bool(self.left_canvas.shapes or self.left_canvas.current_points)
-        self.query_button.setEnabled(has_image and has_shapes and self.process is None)
+        if self.left_canvas.mode == "candidate":
+            selected_mask = self.left_canvas.selected_candidate_mask()
+            has_roi = selected_mask is not None and bool(np.any(selected_mask))
+        else:
+            # An unfinished polygon is not a query ROI until it is completed.
+            has_roi = bool(self.left_canvas.shapes)
+        self.query_button.setEnabled(has_image and has_roi and self.process is None)
 
     def _query_arguments(self, mask_path: Path, run_dir: Path) -> List[str]:
         query_script = Path(__file__).with_name("query_feature_library.py")
@@ -500,13 +842,24 @@ class MainWindow(QMainWindow):
             return
         if self.left_canvas.image_path is None:
             return
-        try:
-            mask = self.left_canvas.mask_array()
-        except (RuntimeError, ValueError) as error:
-            QMessageBox.warning(self, "查询失败", str(error))
-            return
+        if self.left_canvas.mode == "candidate":
+            selected_mask = self.left_canvas.selected_candidate_mask()
+            if selected_mask is None or not np.any(selected_mask):
+                QMessageBox.warning(
+                    self,
+                    "查询失败",
+                    "请先在左侧单击选择一个候选多边形。当前仅支持单选。",
+                )
+                return
+            mask = np.asarray(selected_mask, dtype=np.uint8)
+        else:
+            try:
+                mask = self.left_canvas.mask_array()
+            except (RuntimeError, ValueError) as error:
+                QMessageBox.warning(self, "查询失败", str(error))
+                return
         if not np.any(mask):
-            QMessageBox.warning(self, "查询失败", "请先绘制至少一个矩形或多边形 ROI。")
+            QMessageBox.warning(self, "查询失败", "请先选择或绘制一个有效 ROI。")
             return
 
         output_root = Path(self.args.output_dir).expanduser()
@@ -641,7 +994,10 @@ class MainWindow(QMainWindow):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="PySide6 GUI for drawing anomaly ROIs and reverse-looking them up"
+        description=(
+            "PySide6 GUI for viewing Dinomaly2 threshold/candidate regions and "
+            "querying ROI feature libraries"
+        )
     )
     parser.add_argument("--model", required=True)
     parser.add_argument("--good_library", required=True)
@@ -659,6 +1015,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gpu", "--cuda", dest="gpu", type=int, default=0)
     parser.add_argument("--faiss_on_gpu", action="store_true")
     parser.add_argument("--input", default=None, help="Optional initial input image")
+    parser.add_argument(
+        "--prediction_dir",
+        default=None,
+        help=(
+            "Output directory of dinomaly_two_threshold_predict.py; reads "
+            "raw_regions/ and candidate_regions/ from it."
+        ),
+    )
+    parser.add_argument(
+        "--raw_regions",
+        default=None,
+        help="Optional raw good-threshold Mask file or directory",
+    )
+    parser.add_argument(
+        "--candidate_regions",
+        default=None,
+        help=(
+            "Optional candidate-region mask file or directory. A directory is "
+            "matched by input's data_root-relative path and .png suffix."
+        ),
+    )
+    parser.add_argument(
+        "--data_root",
+        default=None,
+        help="Optional input root used to map input images to candidate_regions/<relative>.png",
+    )
     parser.add_argument("--output_dir", default="./gui_lookup_results")
     return parser
 

@@ -131,6 +131,7 @@ results.csv                 # 每张图的 raw/adjusted 分数、两次判定、
 roi_results.csv             # 每个候选 ROI 的良品/异常距离和偏移方向
 run.json                    # 全部运行参数和每个 ROI 的明细
 score_maps/<image>.npy      # Dinomaly2 原始 score map
+raw_regions/<image>.png     # 未经两阶段处理，直接按 good_threshold 得到的 Mask
 candidate_regions/<image>.png
 details/<image>.json        # 每个 ROI 的两个距离、匹配行号和偏移方向
 ```
@@ -214,7 +215,12 @@ python query_feature_library.py \
 
 ## 6. PySide6 图形界面反查
 
-安装依赖后可以启动 GUI。左侧打开输入图像并选择矩形或多边形，在图像上绘制异常区域；多边形左键依次点击顶点后，点击右键即可完成多边形（也可以双击或点击“完成多边形”按钮）。点击“查询特征库”后，右侧显示匹配的原始图像和对应 ROI。下方结果表只显示原始图像路径和距离，选中不同结果即可切换右侧图像。
+安装依赖后可以启动 GUI。界面从左到右显示：原始 Dinomaly2 按
+`good_threshold` 判定的区域、中间的 `candidate_regions` 或手动画 ROI、以及
+检索得到的原始图像和对应 ROI。中间候选区域只支持单选；选中后点击“查询特征库”。
+没有候选区域时，可选择矩形或多边形手动画 ROI；多边形左键依次点击顶点后，点击右键即可
+完成多边形（也可以双击或点击“完成多边形”按钮）。下方结果表只显示原始图像路径和距离，
+选中不同结果即可切换右侧图像。
 
 ```powershell
 python .\query_feature_library_gui.py `
@@ -228,3 +234,19 @@ python .\query_feature_library_gui.py `
 也可以用 `--input D:\query\image.jpg` 预先打开输入图像。GUI 会在后台调用
 `query_feature_library.py`，查询完成后会把 `image_id`、`roi_id`、距离、图像路径和
 ROI bbox 打印到启动 GUI 的命令行窗口；完整 CSV/JSON 结果保存在每次查询的输出子目录中。
+
+如果使用双阈值预测生成的候选区域 Mask，可以按输入图像在 `data_root` 下的相对路径
+自动加载对应的 `raw_regions/<relative>.png` 和 `candidate_regions/<relative>.png`。左侧显示
+原始阈值区域，中间会把候选 Mask 的每个连通域绘制为多边形，单击一个候选多边形后再点击
+查询；候选区域模式仍可切换回矩形或多边形手动画 ROI。
+
+```powershell
+python .\query_feature_library_gui.py `
+  --model D:\model\model.pth `
+  --input D:\data\good\image.jpg `
+  --data_root D:\data `
+  --prediction_dir D:\two_stage_result `
+  --good_library D:\libraries\good `
+  --anomaly_library D:\libraries\anomaly `
+  --gpu 0
+```

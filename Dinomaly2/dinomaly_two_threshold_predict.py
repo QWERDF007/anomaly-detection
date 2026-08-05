@@ -391,6 +391,12 @@ def predict_images(args) -> int:
             args.anomaly_threshold,
         )
         regions: List[Dict[str, Any]] = []
+        # Always save the direct Dinomaly2 threshold result.  This is kept
+        # separate from candidate_regions, which contains only the regions
+        # used by the second-stage feature-library search.
+        raw_region_mask = (
+            np.asarray(score_map >= float(args.good_threshold), dtype=np.uint8)
+        )
         candidate_mask = np.zeros(score_map.shape, dtype=np.uint8)
 
         if initial_label == "middle":
@@ -453,6 +459,12 @@ def predict_images(args) -> int:
             image_relative,
             ".npy",
         )
+        raw_region_path = output_artifact_path(
+            output_dir,
+            "raw_regions",
+            image_relative,
+            ".png",
+        )
         region_path = output_artifact_path(
             output_dir,
             "candidate_regions",
@@ -466,6 +478,8 @@ def predict_images(args) -> int:
             ".json",
         )
         np.save(score_path, score_map)
+        if not cv2.imwrite(str(raw_region_path), raw_region_mask * 255):
+            raise OSError(f"Cannot write raw threshold region mask: {raw_region_path}")
         if not cv2.imwrite(str(region_path), candidate_mask * 255):
             raise OSError(f"Cannot write candidate region mask: {region_path}")
 
@@ -493,6 +507,7 @@ def predict_images(args) -> int:
         detail = {
             **row,
             "score_map_path": str(score_path),
+            "raw_region_path": str(raw_region_path),
             "candidate_region_path": str(region_path),
             "regions": regions,
         }
