@@ -18,7 +18,12 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 from PySide6.QtCore import QPointF, QProcess, QRectF, Qt, Signal
-from dinomaly_two_stage import calculate_distance_offset, mask_bbox
+from dinomaly_two_stage import (
+    calculate_distance_offset,
+    load_labelme_library_mask,
+    load_mask,
+    mask_bbox,
+)
 from dinomaly_two_threshold_predict import final_score_label
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
@@ -674,7 +679,7 @@ class MainWindow(QMainWindow):
 
         raw_panel = QWidget()
         raw_layout = QVBoxLayout(raw_panel)
-        raw_layout.addWidget(QLabel("原始 Dinomaly2 区域（score ≥ good_threshold）"))
+        raw_layout.addWidget(QLabel("原始 Dinomaly2 区域（青色）/ 标注异常区域（红色）"))
         self.raw_canvas = ImageCanvas(editable=False)
         raw_layout.addWidget(self.raw_canvas, 1)
 
@@ -775,6 +780,7 @@ class MainWindow(QMainWindow):
             self.score_map = score_map
             self.query_result_image = None
             self.load_raw_regions(image_path, score_map)
+            self.load_annotation_regions(image_path)
             candidate_path = self.load_candidate_regions(image_path, score_map)
             self.current_run_dir = None
             self.right_canvas.clear_image()
@@ -1275,6 +1281,87 @@ class MainWindow(QMainWindow):
             region["region_id"] = index
         return regions
 
+    def load_annotation_regions(self, image_path: Path) -> None:
+        """Overlay annotation-mask anomaly regions on the raw-region canvas.
+
+        ``--mask_dir`` mirrors the ``--data_root`` layout, so an image maps to
+        ``mask_dir/<relative>.json`` (LabelMe, label 'good'/'ignore' are
+        skipped) or to a binary mask with another extension.  Anomaly regions
+        are drawn as red polygons on the first canvas.
+        """
+
+        mask_dir = getattr(self.args, "mask_dir", None)
+        if not mask_dir:
+            return
+        mask_root = Path(mask_dir).expanduser()
+        if not mask_root.is_dir():
+            return
+        if self.left_canvas.image is None:
+            return
+        image_shape = (
+            self.left_canvas.image.height(),
+            self.left_canvas.image.width(),
+        )
+        mask_path = None
+        for suffix in (".json", ".png", ".npy", ".tif", ".tiff", ".bmp"):
+            mask_path = self._artifact_path(mask_root, image_path, suffix)
+            if mask_path is not None:
+                break
+        if mask_path is None:
+            return
+        try:
+            if mask_path.suffix.lower() == ".json":
+                mask = load_labelme_library_mask(
+                    mask_path,
+                    image_shape,
+                    "anomaly",
+                    good_labels=("good",),
+                    ignore_labels=("ignore",),
+                )
+            else:
+                mask = load_mask(mask_path, image_shape)
+            mask_regions = self._mask_components_from_mask(mask)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            QMessageBox.warning(self, "读取标注 Mask 失败", str(error))
+            return
+        for region in mask_regions:
+            region["color"] = "#ff1744"
+        combined = list(self.raw_canvas.candidate_regions) + mask_regions
+        self.raw_canvas.set_candidate_regions(combined, emit=False)
+
+    def _mask_components_from_mask(
+        self,
+        mask: np.ndarray,
+    ) -> List[Dict[str, Any]]:
+        """Split a binary mask into connected components for display."""
+
+        binary = (np.asarray(mask) > 0).astype(np.uint8)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+        regions: List[Dict[str, Any]] = []
+        for component_id in range(1, count):
+            component_mask = labels == component_id
+            area = int(stats[component_id, cv2.CC_STAT_AREA])
+            ys, xs = np.where(component_mask)
+            if not len(xs):
+                continue
+            regions.append(
+                {
+                    "region_id": len(regions) + 1,
+                    "mask": component_mask,
+                    "area": area,
+                    "bbox": (
+                        float(xs.min()),
+                        float(ys.min()),
+                        float(xs.max() + 1),
+                        float(ys.max() + 1),
+                    ),
+                }
+            )
+        regions.sort(key=lambda region: (-region["area"], region["region_id"]))
+        for index, region in enumerate(regions, start=1):
+            region["region_id"] = index
+        return regions
+
     def load_score_map(self, image_path: Path) -> Optional[np.ndarray]:
         """Load and resize the predictor score map to the input image."""
 
@@ -1693,6 +1780,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--data_root",
         default=None,
         help="Optional input root used to map input images to candidate_regions/<relative>.png",
+    )
+    parser.add_argument(
+        "--mask_dir",
+        default=None,
+        help=(
+            "Optional annotation-mask directory mirroring --data_root's "
+            "layout; LabelMe JSON (label 'good'/'ignore' skipped) or binary "
+            "masks. Anomaly regions are drawn as red polygons on the first "
+            "canvas."
+        ),
     )
     parser.add_argument("--output_dir", default="./gui_lookup_results")
     return parser
