@@ -521,11 +521,32 @@ def preprocess_mask(mask: np.ndarray, image_size: int, crop_size: int) -> np.nda
 
 def resize_mask_to_feature(mask: np.ndarray, feature_shape: Tuple[int, int]) -> np.ndarray:
     height, width = [int(value) for value in feature_shape]
-    return cv2.resize(
-        np.asarray(mask, dtype=np.uint8),
+    mask = np.asarray(mask, dtype=np.uint8)
+    resized = cv2.resize(
+        mask,
         (width, height),
         interpolation=cv2.INTER_NEAREST,
     ).astype(bool, copy=False)
+    if resized.any() or not np.any(mask):
+        return resized
+    # A tiny non-empty ROI can disappear under nearest-neighbour
+    # downsampling; fall back to projecting its bounding box so it covers
+    # at least one feature cell.
+    src_height, src_width = mask.shape[:2]
+    bbox = mask_bbox(mask)
+    if bbox is None:
+        return resized
+    x1, y1, x2, y2 = bbox
+    fx1 = int(np.floor(x1 * width / src_width))
+    fx2 = int(np.ceil(x2 * width / src_width))
+    fy1 = int(np.floor(y1 * height / src_height))
+    fy2 = int(np.ceil(y2 * height / src_height))
+    fx1 = max(0, min(fx1, width - 1))
+    fx2 = max(fx1 + 1, min(fx2, width))
+    fy1 = max(0, min(fy1, height - 1))
+    fy2 = max(fy1 + 1, min(fy2, height))
+    resized[fy1:fy2, fx1:fx2] = True
+    return resized
 
 
 def mask_bbox(mask: np.ndarray) -> Optional[Tuple[float, float, float, float]]:
@@ -1456,16 +1477,39 @@ def predict_images(args) -> int:
         unit="image",
         dynamic_ncols=True,
     ):
-        score_map, feature = infer_image(
-            model,
+        score_path = _output_relative_path(
             image_path,
-            transform,
-            device,
-            args.feature_merge,
-            gaussian_filter,
-            patch_backbone=patch_backbone,
-            feature_source=args.feature_source,
+            input_root,
+            output_dir / "score_maps",
+            ".npy",
         )
+        feature_path = _output_relative_path(
+            image_path,
+            input_root,
+            output_dir / ("features_raw_patch" if args.feature_source == "raw_patch" else "features"),
+            ".npy",
+        )
+        cached = (
+            not args.recompute_features
+            and score_path.is_file()
+            and feature_path.is_file()
+        )
+        if cached:
+            score_map = np.load(score_path)
+            feature = np.load(feature_path)
+        else:
+            score_map, feature = infer_image(
+                model,
+                image_path,
+                transform,
+                device,
+                args.feature_merge,
+                gaussian_filter,
+                patch_backbone=patch_backbone,
+                feature_source=args.feature_source,
+            )
+            np.save(score_path, score_map)
+            np.save(feature_path, feature)
         raw_score = float(np.max(score_map)) if score_map.size else 0.0
         stage1_label = classify_score(raw_score, args.score_threshold)
         regions: List[Dict[str, Any]] = []
@@ -1537,12 +1581,6 @@ def predict_images(args) -> int:
                     **region,
                 }
             )
-        score_path = _output_relative_path(
-            image_path,
-            input_root,
-            output_dir / "score_maps",
-            ".npy",
-        )
         region_path = _output_relative_path(
             image_path,
             input_root,
@@ -1555,7 +1593,6 @@ def predict_images(args) -> int:
             output_dir / "details",
             ".json",
         )
-        np.save(score_path, score_map)
         if not cv2.imwrite(str(region_path), candidate_mask * 255):
             raise OSError(f"Cannot write candidate region mask: {region_path}")
         row = {
@@ -1836,6 +1873,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional hard cap on the score correction",
     )
     predict.add_argument("--offset_eps", type=float, default=1e-8)
+    predict.add_argument(
+        "--recompute_features",
+        action="store_true",
+        help=(
+            "Recompute and overwrite the cached score maps / second-stage "
+            "features instead of reusing output_dir/score_maps and "
+            "output_dir/features (or features_raw_patch)"
+        ),
+    )
     predict.add_argument(
         "--faiss_on_gpu",
         action="store_true",
