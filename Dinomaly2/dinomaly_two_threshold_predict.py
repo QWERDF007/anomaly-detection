@@ -307,6 +307,9 @@ def _build_region_result(
     mask_feature = _model_feature_mask(query_mask, feature.shape[-2:], args)
     bbox_feature = mask_bbox(mask_feature)
     if bbox_feature is None:
+        mask_feature = dilate_mask(mask_feature, 1)
+        bbox_feature = mask_bbox(mask_feature)
+    if bbox_feature is None:
         return None
 
     vector = roi_align_masked(

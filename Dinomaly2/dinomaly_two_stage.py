@@ -1483,6 +1483,9 @@ def predict_images(args) -> int:
                 mask_feature = _model_feature_mask(query_mask, feature_shape, args)
                 bbox_feature = mask_bbox(mask_feature)
                 if bbox_feature is None:
+                    mask_feature = dilate_mask(mask_feature, 1)
+                    bbox_feature = mask_bbox(mask_feature)
+                if bbox_feature is None:
                     continue
                 vector = roi_align_masked(
                     feature,
