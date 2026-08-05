@@ -349,14 +349,17 @@ def predict_images(args) -> int:
     if not image_entries:
         raise RuntimeError(f"No images found under {data_root}")
 
+    root = Path(args.root).expanduser()
+    output_dir = root / "preds"
+    output_dir.mkdir(parents=True, exist_ok=True)
     device = select_device(args.gpu)
     good_library = load_feature_library(
-        Path(args.good_library).expanduser(),
+        root / "good",
         device,
         args.faiss_on_gpu,
     )
     anomaly_library = load_feature_library(
-        Path(args.anomaly_library).expanduser(),
+        root / "anomaly",
         device,
         args.faiss_on_gpu,
     )
@@ -364,8 +367,6 @@ def predict_images(args) -> int:
     model = load_dinomaly_model(args, device)
     transform = build_transform(args)
     gaussian_filter = get_gaussian_kernel(5, 4).to(device)
-    output_dir = Path(args.output_dir).expanduser()
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     rows: List[Dict[str, Any]] = []
     details: List[Dict[str, Any]] = []
@@ -640,25 +641,27 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Root containing first-level good/other anomaly directories",
     )
-    parser.add_argument("--good_library", required=True)
-    parser.add_argument("--anomaly_library", required=True)
     parser.add_argument(
-        "--good_threshold",
-        "--good-threshold",
-        dest="good_threshold",
-        type=float,
+        "--root",
         required=True,
-        help="Scores strictly below this value are directly classified as good",
+        help=(
+            "Root directory containing good/ and anomaly/ feature libraries; "
+            "all prediction output is written under --root/preds/ "
+            "(score_maps/, raw_regions/, candidate_regions/, details/, "
+            "results.csv, roi_results.csv, score_density.png, run.json)"
+        ),
     )
     parser.add_argument(
-        "--anomaly_threshold",
-        "--anomaly-threshold",
-        dest="anomaly_threshold",
+        "--thresholds",
+        nargs="+",
         type=float,
         required=True,
-        help="Scores strictly above this value are directly classified as anomaly",
+        help=(
+            "Two score thresholds in order: good_threshold anomaly_threshold "
+            "(e.g. '--thresholds 0.02 0.06'). Scores strictly below the "
+            "first are good, strictly above the second are anomaly."
+        ),
     )
-    parser.add_argument("--output_dir", required=True)
     parser.add_argument("--min_area", type=int, default=1)
     parser.add_argument("--max_regions", type=int, default=0)
     parser.add_argument(
@@ -692,6 +695,20 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     validate_args(args)
+    if len(args.thresholds) != 2:
+        raise ValueError(
+            "--thresholds requires exactly two values: "
+            "good_threshold anomaly_threshold"
+        )
+    args.good_threshold, args.anomaly_threshold = [
+        float(value) for value in args.thresholds
+    ]
+    root = Path(args.root).expanduser()
+    if not root.is_dir():
+        raise ValueError(f"--root does not exist: {root}")
+    for subdir in ("good", "anomaly"):
+        if not (root / subdir).is_dir():
+            raise ValueError(f"--root must contain a {subdir}/ directory: {root}")
     if not np.isfinite(args.good_threshold) or not np.isfinite(args.anomaly_threshold):
         raise ValueError("good_threshold and anomaly_threshold must be finite")
     if args.good_threshold >= args.anomaly_threshold:
