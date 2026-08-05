@@ -20,10 +20,11 @@ representations stay in the same feature space.
 
 With ``--feature_source raw_patch``, the second stage instead uses the final
 patch-token output (``x_norm_patchtokens``) of the same ``--backbone``
-loaded standalone through torch.hub.  The Dinomaly2 model still produces the
-stage-1 anomaly map; only the library/query representation switches to the
-raw patch tokens, reshaped to an NCHW feature map and processed by the same
-ROI mapping and masked ROIAlign.
+loaded standalone from the project's local ``dinov2.hub.backbones`` (or the
+``vit_encoder`` for DINOv3).  The Dinomaly2 model still produces the stage-1
+anomaly map; only the library/query representation switches to the raw patch
+tokens, reshaped to an NCHW feature map and processed by the same ROI
+mapping and masked ROIAlign.
 """
 
 from __future__ import annotations
@@ -692,29 +693,39 @@ def extract_raw_patch_feature(
 ) -> np.ndarray:
     """Extract the raw DINOv2/DINOv3 final patch-token map as CHW.
 
-    ``backbone`` is a standalone pretrained DINOv2/DINOv3 model loaded via
-    torch.hub.  ``forward_features`` returns the final normed patch tokens
-    (``x_norm_patchtokens``), which are reshaped into an NCHW feature map;
-    the ROI mapping and masked ROIAlign afterwards are identical to the
+    ``backbone`` is a standalone pretrained DINOv2/DINOv3 model.  The final
+    normed patch tokens are taken (``x_norm_patchtokens`` from
+    ``forward_features``, or the last output of ``get_intermediate_layers``
+    for the project's local dinov2 package) and reshaped into an NCHW feature
+    map; the ROI mapping and masked ROIAlign afterwards are identical to the
     regular Dinomaly2 feature path.
     """
 
     _original, image_tensor = _load_image_tensor(image_path, transform, device)
+    num_extra = int(
+        getattr(backbone, "num_register_tokens", 0)
+        or getattr(backbone, "n_storage_tokens", 0)
+        or 0
+    )
     with torch.no_grad():
-        output = backbone.forward_features(image_tensor)
-        if isinstance(output, Mapping) and "x_norm_patchtokens" in output:
-            patch = output["x_norm_patchtokens"]
-        elif isinstance(output, Mapping) and "x_prenorm" in output:
-            num_extra = int(
-                getattr(backbone, "num_register_tokens", 0)
-                or getattr(backbone, "n_storage_tokens", 0)
-                or 0
-            )
-            patch = output["x_prenorm"][:, num_extra + 1:, :]
+        if callable(getattr(backbone, "forward_features", None)):
+            output = backbone.forward_features(image_tensor)
+            if isinstance(output, Mapping) and "x_norm_patchtokens" in output:
+                patch = output["x_norm_patchtokens"]
+            elif isinstance(output, Mapping) and "x_prenorm" in output:
+                patch = output["x_prenorm"][:, num_extra + 1:, :]
+            else:
+                raise RuntimeError(
+                    f"Backbone forward_features returned unsupported output: "
+                    f"{type(output).__name__}"
+                )
+        elif callable(getattr(backbone, "get_intermediate_layers", None)):
+            outputs = backbone.get_intermediate_layers(image_tensor, n=1)
+            patch = outputs[-1][:, num_extra + 1:, :]
         else:
             raise RuntimeError(
-                f"Backbone forward_features returned unsupported output: "
-                f"{type(output).__name__}"
+                "Backbone exposes neither forward_features nor "
+                "get_intermediate_layers"
             )
         side = int(round(float(patch.shape[1]) ** 0.5))
         if side * side != int(patch.shape[1]):
@@ -728,7 +739,7 @@ def extract_raw_patch_feature(
 
 
 def hub_backbone_name(backbone_name: str) -> str:
-    """Map a Dinomaly2 backbone name to the torch.hub DINOv2 model name.
+    """Map a Dinomaly2 backbone name to the local dinov2.hub.backbones entry.
 
     ``dinov2reg_vit_small_14`` -> ``dinov2_vits14_reg``,
     ``dinov2_vit_base_14`` -> ``dinov2_vitb14``.
@@ -756,7 +767,14 @@ def hub_backbone_name(backbone_name: str) -> str:
 
 
 def load_patch_backbone(args, device: torch.device):
-    """Load the raw patch-token backbone, reusing ``--backbone``."""
+    """Load the raw patch-token backbone, reusing ``--backbone``.
+
+    torch.hub is deliberately avoided: the project ships its own ``dinov2``
+    package that shadows the hub checkout (whose hubconf.py imports a
+    ``cell_dino`` module missing from the cache).  DINOv2/DINOv2reg backbones
+    are therefore loaded from the local ``dinov2.hub.backbones`` entries,
+    and DINOv3 from the project's ``vit_encoder``.
+    """
 
     name = args.backbone
     if name.startswith("dinov3"):
@@ -764,7 +782,31 @@ def load_patch_backbone(args, device: torch.device):
 
         backbone = vit_encoder.load(name)
     else:
-        backbone = torch.hub.load("facebookresearch/dinov2", hub_backbone_name(name))
+        from dinov2.hub.backbones import (
+            dinov2_vitb14,
+            dinov2_vitb14_reg,
+            dinov2_vitg14,
+            dinov2_vitg14_reg,
+            dinov2_vitl14,
+            dinov2_vitl14_reg,
+            dinov2_vits14,
+            dinov2_vits14_reg,
+        )
+
+        entry_points = {
+            "dinov2_vits14": dinov2_vits14,
+            "dinov2_vitb14": dinov2_vitb14,
+            "dinov2_vitl14": dinov2_vitl14,
+            "dinov2_vitg14": dinov2_vitg14,
+            "dinov2_vits14_reg": dinov2_vits14_reg,
+            "dinov2_vitb14_reg": dinov2_vitb14_reg,
+            "dinov2_vitl14_reg": dinov2_vitl14_reg,
+            "dinov2_vitg14_reg": dinov2_vitg14_reg,
+        }
+        entry = entry_points.get(hub_backbone_name(name))
+        if entry is None:
+            raise ValueError(f"Unsupported raw_patch backbone: {name!r}")
+        backbone = entry(pretrained=True)
     backbone.to(device).eval()
     LOGGER.info("Loaded raw patch backbone: %s", name)
     return backbone
@@ -1650,10 +1692,11 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
             "dinov2reg_vit_base_14, dinov2reg_vit_large_14 (4 register "
             "tokens); dinov3_vit_small_16, dinov3_vit_base_16, "
             "dinov3_vit_large_16 (raw_patch loads dinov3 through the local "
-            "vit_encoder, others via torch.hub); also dinov1 "
-            "(dino_vit_small_8/16, dino_vit_base_8/16), tips_vit_small_14/"
-            "base_14/large_14, beit_vit_base_16, deit_vit_small_16/base_16 "
-            "(these are NOT usable with --feature_source raw_patch)"
+            "vit_encoder, dinov2/dinov2reg through dinov2.hub.backbones); "
+            "also dinov1 (dino_vit_small_8/16, dino_vit_base_8/16), "
+            "tips_vit_small_14/base_14/large_14, beit_vit_base_16, "
+            "deit_vit_small_16/base_16 (these are NOT usable with "
+            "--feature_source raw_patch)"
         ),
     )
     parser.add_argument("--image_size", type=int, default=672)
@@ -1678,7 +1721,7 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
             "Second-stage feature representation: 'dinomaly' uses the "
             "Dinomaly2 encoder output; 'raw_patch' uses the final "
             "patch-token output (x_norm_patchtokens) of the same --backbone "
-            "loaded standalone via torch.hub"
+            "loaded standalone from the local dinov2/dinov3 packages"
         ),
     )
 
