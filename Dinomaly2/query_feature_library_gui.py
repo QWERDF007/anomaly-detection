@@ -994,7 +994,10 @@ class MainWindow(QMainWindow):
         if regions:
             strongest = max(
                 regions,
-                key=lambda region: float(region.get("region_score", 0.0)),
+                key=lambda region: (
+                    float(region.get("region_score", 0.0))
+                    + float(region.get("signed_offset", 0.0))
+                ),
             )
             strongest_bbox = strongest.get("bbox_original")
             if isinstance(strongest_bbox, (list, tuple)) and len(strongest_bbox) == 4:
