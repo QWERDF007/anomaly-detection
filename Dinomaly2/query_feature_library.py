@@ -24,6 +24,7 @@ from dinomaly_two_stage import (
     add_model_arguments,
     build_transform,
     connected_components,
+    dilate_mask,
     extract_encoder_feature,
     l2_normalize,
     load_dinomaly_model,
@@ -162,6 +163,7 @@ def query_feature_library(args) -> int:
     query_image_relative = input_path.name
     query_image_id = make_image_id(query_image_relative)
     results: List[Dict[str, Any]] = []
+    vanished_count = 0
 
     for component in components:
         mask_feature = resize_mask_to_feature(
@@ -173,6 +175,9 @@ def query_feature_library(args) -> int:
             feature_shape,
         )
         if mask_bbox(mask_feature) is None:
+            mask_feature = dilate_mask(mask_feature, 1)
+        if mask_bbox(mask_feature) is None:
+            vanished_count += 1
             LOGGER.warning(
                 "Query ROI %s vanished after preprocessing; skipping",
                 component["component_id"],
@@ -238,6 +243,13 @@ def query_feature_library(args) -> int:
                 )
 
     if not results:
+        if vanished_count:
+            raise RuntimeError(
+                f"No valid feature-library match was produced: {vanished_count} "
+                "query region(s) vanished after preprocessing. The ROI is too "
+                "small (below one feature-map pixel) or lies outside the "
+                "CenterCrop area; enlarge it or redraw it."
+            )
         raise RuntimeError("No valid feature-library match was produced.")
 
     output_dir = Path(args.output_dir).expanduser()
