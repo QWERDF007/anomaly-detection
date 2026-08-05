@@ -937,7 +937,6 @@ class MainWindow(QMainWindow):
             return
 
         raw_score = float(detail.get("raw_score", 0.0))
-        adjusted_score = float(detail.get("adjusted_score", raw_score))
         final_label = str(detail.get("final_label", ""))
         final_cn = "正常" if final_label == "good" else "异常"
         good_threshold = float(
@@ -969,24 +968,12 @@ class MainWindow(QMainWindow):
                     anomaly_threshold,
                     str(match.get("similar_library", "")),
                 )
-                label_cn = "正常" if label == "good" else "异常"
-                candidate["color"] = "#00c853" if label == "good" else "#ff1744"
-                candidate["score"] = region_score
-                candidate["label"] = f"{adjusted:.4f}（{label_cn}）"
+                candidate["color"] = (
+                    "#00c853" if label == "good" else "#ff1744"
+                )
+                candidate["score"] = adjusted
             judged.append(candidate)
         self.adjust_canvas.set_candidate_regions(judged, emit=False)
-        if regions:
-            strongest = max(
-                regions,
-                key=lambda region: float(region.get("region_score", 0.0)),
-            )
-            strongest_bbox = strongest.get("bbox_original")
-            if isinstance(strongest_bbox, (list, tuple)) and len(strongest_bbox) == 4:
-                self.adjust_canvas.set_overlay_bbox(
-                    strongest_bbox,
-                    text=f"raw={raw_score:.4f} → adjusted={adjusted_score:.4f}（{final_cn}）",
-                    color=QColor("#ff1744"),
-                )
 
     def _update_selected_region_calculation(self) -> None:
         """Show the two-stage calculation of the currently selected ROI.
