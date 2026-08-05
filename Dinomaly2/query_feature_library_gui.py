@@ -18,6 +18,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 from PySide6.QtCore import QPointF, QProcess, QRectF, Qt, Signal
+from dinomaly_two_stage import calculate_distance_offset, mask_bbox
+from dinomaly_two_threshold_predict import final_score_label
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -166,6 +168,12 @@ class ImageCanvas(QWidget):
                     score = None
                 if score is not None and np.isfinite(score):
                     stored_region["score"] = score
+            color = region.get("color")
+            if color is not None:
+                stored_region["color"] = str(color)
+            label = region.get("label")
+            if label is not None:
+                stored_region["label"] = str(label)
             self.candidate_regions.append(stored_region)
         self.selected_candidate_index = None
         if emit:
@@ -389,17 +397,19 @@ class ImageCanvas(QWidget):
         painter.drawImage(image_rect, self.image)
         for index, candidate in enumerate(self.candidate_regions):
             selected = index == self.selected_candidate_index
-            color = QColor("#ffeb3b") if selected else QColor("#00bcd4")
+            if selected:
+                color = QColor("#ffeb3b")
+            else:
+                color = QColor(candidate.get("color", "#00bcd4"))
             painter.setPen(QPen(color, 3.0 if selected else 2.0))
             points = candidate.get("points", [])
             polygon = QPolygonF(
                 [self.image_to_widget(point) for point in points]
             )
             if len(points) >= 3:
-                if selected:
-                    painter.setBrush(QColor(255, 235, 59, 55))
-                else:
-                    painter.setBrush(QColor(0, 188, 212, 30))
+                fill_color = QColor(color)
+                fill_color.setAlpha(55 if selected else 30)
+                painter.setBrush(fill_color)
                 painter.drawPolygon(polygon)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 label_point = polygon.boundingRect().topLeft()
@@ -410,18 +420,22 @@ class ImageCanvas(QWidget):
                 candidate_rect = QRectF(top_left, bottom_right).normalized()
                 painter.drawRect(candidate_rect)
                 label_point = candidate_rect.topLeft()
-            score = candidate.get("score")
-            if score is not None:
-                score_text = f"{float(score):.4f}"
+            label = candidate.get("label")
+            if label is not None:
+                text = str(label)
+            else:
+                score = candidate.get("score")
+                text = f"{float(score):.4f}" if score is not None else ""
+            if text:
                 text_rect = QRectF(
                     label_point.x(),
                     max(0.0, label_point.y() - 22.0),
-                    100.0,
+                    240.0,
                     20.0,
                 )
                 painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
                 painter.setPen(QColor("#ff1744"))
-                painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft, score_text)
+                painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft, text)
         for shape in self.shapes:
             self._draw_shape(painter, shape, QColor("#00e676"))
 
@@ -577,6 +591,8 @@ class MainWindow(QMainWindow):
         self.process: Optional[QProcess] = None
         self.current_run_dir: Optional[Path] = None
         self.results: List[Dict[str, Any]] = []
+        self.score_map: Optional[np.ndarray] = None
+        self.query_result_image: Optional[Path] = None
         self.setWindowTitle("Dinomaly2 ROI 特征库反查")
         self.resize(2100, 950)
 
@@ -728,6 +744,7 @@ class MainWindow(QMainWindow):
         self.query_button.clicked.connect(self.start_query)
         self.fit_button.clicked.connect(self.fit_all_canvases)
         self.left_canvas.shapes_changed.connect(self.update_controls)
+        self.left_canvas.shapes_changed.connect(self._update_selected_region_calculation)
         self.left_canvas.candidate_changed.connect(self.candidate_selection_changed)
         self.result_table.currentCellChanged.connect(self._result_row_changed)
         self.query_button.setEnabled(False)
@@ -755,6 +772,8 @@ class MainWindow(QMainWindow):
             self.raw_canvas.set_image(image_path)
             self.input_path_edit.setText(str(image_path))
             score_map = self.load_score_map(image_path)
+            self.score_map = score_map
+            self.query_result_image = None
             self.load_raw_regions(image_path, score_map)
             candidate_path = self.load_candidate_regions(image_path, score_map)
             self.current_run_dir = None
@@ -762,6 +781,7 @@ class MainWindow(QMainWindow):
             self.result_table.setRowCount(0)
             self.results.clear()
             self._update_two_stage_panel()
+            self._update_selected_region_calculation()
             if candidate_path is not None:
                 candidate_index = self.mode_combo.findData("candidate")
                 if candidate_index >= 0:
@@ -835,9 +855,32 @@ class MainWindow(QMainWindow):
 
     def _reset_calculation_panel(self) -> None:
         self.calculation_label.setText(
-            "两阶段调整结果将在输入图像后自动显示（读取 prediction_dir/details/）。"
+            "打开图像后，选择候选区域或绘制 ROI，即可查看该区域的两阶段计算。"
         )
-        self.adjust_canvas.clear_image()
+
+    @staticmethod
+    def _find_detail_region(
+        regions: Sequence[Mapping[str, Any]],
+        bbox: Optional[Sequence[float]] = None,
+        area: Optional[int] = None,
+    ) -> Optional[Mapping[str, Any]]:
+        """Match a canvas region to a prediction-detail region by bbox/area."""
+
+        if bbox is not None and len(bbox) == 4:
+            target = [round(float(value), 2) for value in bbox]
+            for region in regions:
+                region_bbox = region.get("bbox_original")
+                if (
+                    isinstance(region_bbox, (list, tuple))
+                    and len(region_bbox) == 4
+                    and [round(float(value), 2) for value in region_bbox] == target
+                ):
+                    return region
+        if area is not None and int(area) > 0:
+            for region in regions:
+                if int(region.get("area", -1)) == int(area):
+                    return region
+        return None
 
     @staticmethod
     def _result_library_type(result: Mapping[str, Any]) -> Optional[str]:
@@ -880,116 +923,58 @@ class MainWindow(QMainWindow):
 
         image_path = self.left_canvas.image_path
         if image_path is None:
-            self._reset_calculation_panel()
+            self.adjust_canvas.clear_image()
             return
         details_path = self._prediction_details_path(image_path)
         if details_path is None:
-            self.calculation_label.setText(
-                "未找到该图像的预测详情（prediction_dir/details/）。"
-            )
             self.adjust_canvas.clear_image()
             return
         try:
             with details_path.open("r", encoding="utf-8") as file:
                 detail = json.load(file)
-        except (OSError, json.JSONDecodeError) as error:
-            self.calculation_label.setText(f"读取预测详情失败：{error}")
+        except (OSError, json.JSONDecodeError):
             self.adjust_canvas.clear_image()
             return
 
         raw_score = float(detail.get("raw_score", 0.0))
         adjusted_score = float(detail.get("adjusted_score", raw_score))
+        final_label = str(detail.get("final_label", ""))
+        final_cn = "正常" if final_label == "good" else "异常"
         good_threshold = float(
             detail.get("good_threshold", float(self.args.good_threshold))
         )
         anomaly_threshold = float(
             detail.get("anomaly_threshold", float(self.args.anomaly_threshold))
         )
-        initial_cn = {
-            "good": "正常",
-            "anomaly": "异常",
-            "middle": "中间带",
-        }.get(str(detail.get("initial_label", "")), str(detail.get("initial_label", "")))
-        final_label = str(detail.get("final_label", ""))
-        final_cn = "正常" if final_label == "good" else "异常"
-        reason = str(detail.get("decision_reason", ""))
-        reason_cn = {
-            "adjusted_below_good_threshold": "调整后低于良品阈值",
-            "adjusted_above_anomaly_threshold": "调整后高于异常阈值",
-            "feature_library_good": "介于两阈值之间，取更近库（良品库）",
-            "feature_library_anomaly": "介于两阈值之间，取更近库（异常库）",
-            "threshold_midpoint_fallback": "两库平局，取阈值中点判定",
-        }.get(reason, reason)
-        signed_offset = float(detail.get("signed_offset", 0.0))
-
-        lines: List[str] = ['<h4 style="margin:2px;">两阶段调整结果（完整）</h4>']
-        lines.append(
-            f"raw_score（全图 max） = <b>{raw_score:.4f}</b> → 初始判定：{initial_cn}"
-        )
-        lines.append(
-            f"双阈值：good_threshold = <b>{good_threshold:.4f}</b>，"
-            f"anomaly_threshold = <b>{anomaly_threshold:.4f}</b>"
-        )
-        if bool(detail.get("stage2_applied")):
-            similar_cn = self._similar_library_cn(
-                detail.get("similar_library", "")
-            )
-            lines.append(
-                f"selected_region = R{detail.get('selected_region_id', '')}，"
-                f"d_good = <b>{float(detail.get('good_distance', 0.0)):.6f}</b>，"
-                f"d_anomaly = <b>{float(detail.get('anomaly_distance', 0.0)):.6f}</b>，"
-                f"近{similar_cn}"
-            )
-            lines.append(
-                f"confidence = {float(detail.get('confidence', 0.0)):.6f}，"
-                f"offset = {float(detail.get('offset', 0.0)):.6f}，"
-                f"signed_offset = {signed_offset:+.6f}"
-            )
-        else:
-            lines.append("未进入第二阶段（直接按阈值判定，无特征库检索）。")
-        color = "#00c853" if final_label == "good" else "#ff1744"
-        lines.append(
-            f"adjusted_score = {raw_score:.4f} + ({signed_offset:+.4f}) = "
-            f"<b>{adjusted_score:.4f}</b>"
-        )
-        lines.append(
-            f"最终判定：<span style=\"color:{color}; font-weight:bold;\">"
-            f"{final_cn}</span>（{reason_cn}）"
-        )
-
-        regions = detail.get("regions", [])
-        if regions:
-            lines.append("<b>各候选区域：</b>")
-            for region in regions:
-                lines.append(
-                    f"R{region.get('region_id', '')}：score="
-                    f"{float(region.get('region_score', 0.0)):.4f}，"
-                    f"good={float(region.get('good_distance', 0.0)):.4f}，"
-                    f"anomaly={float(region.get('anomaly_distance', 0.0)):.4f}，"
-                    f"近{self._similar_library_cn(region.get('similar_library', ''))}"
-                )
-        self.calculation_label.setText("<br>".join(lines))
 
         self.adjust_canvas.set_image(image_path)
-        candidates = []
-        for index, region in enumerate(regions, start=1):
-            bbox = region.get("bbox_original")
-            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
-                continue
-            mask = np.zeros(
-                (self.left_canvas.image.height(), self.left_canvas.image.width()),
-                dtype=bool,
+        regions = detail.get("regions", [])
+        judged = []
+        for region_data in self.left_canvas.candidate_regions:
+            candidate = dict(region_data)
+            candidate["color"] = "#00bcd4"
+            candidate["label"] = None
+            match = self._find_detail_region(
+                regions,
+                candidate.get("bbox"),
+                candidate.get("area"),
             )
-            candidates.append(
-                {
-                    "region_id": index,
-                    "mask": mask,
-                    "bbox": bbox,
-                    "area": int(region.get("area", 0)),
-                    "score": float(region.get("region_score", 0.0)),
-                }
-            )
-        self.adjust_canvas.set_candidate_regions(candidates, emit=False)
+            if match is not None:
+                region_score = float(match.get("region_score", 0.0))
+                signed_offset = float(match.get("signed_offset", 0.0))
+                adjusted = region_score + signed_offset
+                label, _reason = final_score_label(
+                    adjusted,
+                    good_threshold,
+                    anomaly_threshold,
+                    str(match.get("similar_library", "")),
+                )
+                label_cn = "正常" if label == "good" else "异常"
+                candidate["color"] = "#00c853" if label == "good" else "#ff1744"
+                candidate["score"] = region_score
+                candidate["label"] = f"{adjusted:.4f}（{label_cn}）"
+            judged.append(candidate)
+        self.adjust_canvas.set_candidate_regions(judged, emit=False)
         if regions:
             strongest = max(
                 regions,
@@ -1002,6 +987,181 @@ class MainWindow(QMainWindow):
                     text=f"raw={raw_score:.4f} → adjusted={adjusted_score:.4f}（{final_cn}）",
                     color=QColor("#ff1744"),
                 )
+
+    def _update_selected_region_calculation(self) -> None:
+        """Show the two-stage calculation of the currently selected ROI.
+
+        A selected candidate region reuses the distances stored in the
+        prediction details; a manually drawn ROI falls back to the last
+        feature-library query on the same image.
+        """
+
+        image_path = self.left_canvas.image_path
+        if image_path is None:
+            self._reset_calculation_panel()
+            return
+        if self.left_canvas.mode == "candidate":
+            index = self.left_canvas.selected_candidate_index
+            if index is None or not 0 <= index < len(
+                self.left_canvas.candidate_regions
+            ):
+                self.calculation_label.setText(
+                    "未选择候选区域：请单击左侧一个候选多边形。"
+                )
+                return
+            region_data = self.left_canvas.candidate_regions[index]
+            roi_bbox = region_data.get("bbox")
+            roi_area = int(region_data.get("area", 0))
+            roi_mask = np.asarray(region_data.get("mask"), dtype=bool)
+        else:
+            if not self.left_canvas.shapes:
+                self.calculation_label.setText("未绘制 ROI：请绘制矩形或多边形。")
+                return
+            try:
+                roi_mask = np.asarray(self.left_canvas.mask_array(), dtype=bool)
+            except (RuntimeError, ValueError) as error:
+                self.calculation_label.setText(f"无法生成 ROI 掩码：{error}")
+                return
+            roi_bbox = mask_bbox(roi_mask)
+            roi_area = int(np.count_nonzero(roi_mask))
+
+        lines: List[str] = ['<h4 style="margin:2px;">实际计算与结果（选中区域）</h4>']
+        if self.score_map is not None and np.any(roi_mask):
+            region_score = float(np.nanmax(self.score_map[roi_mask]))
+            lines.append(f"region_score（ROI 内 max） = <b>{region_score:.4f}</b>")
+        else:
+            region_score = None
+            lines.append("region_score = 未提供 score_map")
+
+        detail = None
+        details_path = self._prediction_details_path(image_path)
+        if details_path is not None:
+            try:
+                with details_path.open("r", encoding="utf-8") as file:
+                    detail = json.load(file)
+            except (OSError, json.JSONDecodeError):
+                detail = None
+        if detail:
+            good_threshold = float(
+                detail.get("good_threshold", float(self.args.good_threshold))
+            )
+            anomaly_threshold = float(
+                detail.get("anomaly_threshold", float(self.args.anomaly_threshold))
+            )
+            matched = self._find_detail_region(
+                detail.get("regions", []),
+                roi_bbox,
+                roi_area,
+            )
+            if matched is not None:
+                self._append_region_decision(
+                    lines,
+                    matched,
+                    region_score,
+                    good_threshold,
+                    anomaly_threshold,
+                )
+                self.calculation_label.setText("<br>".join(lines))
+                return
+        else:
+            good_threshold = float(self.args.good_threshold)
+            anomaly_threshold = float(self.args.anomaly_threshold)
+
+        if (
+            self.query_result_image is not None
+            and Path(self.query_result_image).resolve() == image_path.resolve()
+            and self.results
+        ):
+            good_distances = [
+                float(result.get("distance"))
+                for result in self.results
+                if self._result_library_type(result) == "good"
+            ]
+            anomaly_distances = [
+                float(result.get("distance"))
+                for result in self.results
+                if self._result_library_type(result) == "anomaly"
+            ]
+            if good_distances and anomaly_distances:
+                decision = calculate_distance_offset(
+                    min(good_distances),
+                    min(anomaly_distances),
+                    float(self.args.offset_scale),
+                    self.args.max_offset,
+                    float(self.args.offset_eps),
+                )
+                query_region = {
+                    "good_distance": min(good_distances),
+                    "anomaly_distance": min(anomaly_distances),
+                    "confidence": decision["confidence"],
+                    "offset": decision["offset"],
+                    "signed_offset": decision["signed_offset"],
+                    "similar_library": decision["similar_library"],
+                }
+                self._append_region_decision(
+                    lines,
+                    query_region,
+                    region_score,
+                    good_threshold,
+                    anomaly_threshold,
+                )
+                self.calculation_label.setText("<br>".join(lines))
+                return
+        lines.append("该 ROI 不在预测详情中；点击‘查询特征库’获取两库最近距离后显示。")
+        self.calculation_label.setText("<br>".join(lines))
+
+    def _append_region_decision(
+        self,
+        lines: List[str],
+        region: Mapping[str, Any],
+        region_score: Optional[float],
+        good_threshold: float,
+        anomaly_threshold: float,
+    ) -> None:
+        """Append one region's distance/offset calculation and final judgment."""
+
+        good_distance = float(region.get("good_distance", 0.0))
+        anomaly_distance = float(region.get("anomaly_distance", 0.0))
+        similar_library = str(region.get("similar_library", ""))
+        similar_cn = self._similar_library_cn(similar_library)
+        lines.append(f"d_good（良品库第 1 近） = <b>{good_distance:.6f}</b>")
+        lines.append(f"d_anomaly（异常库第 1 近） = <b>{anomaly_distance:.6f}</b>")
+        lines.append(
+            f"confidence = {float(region.get('confidence', 0.0)):.6f}，"
+            f"offset = {float(region.get('offset', 0.0)):.6f}，"
+            f"signed_offset = {float(region.get('signed_offset', 0.0)):+.6f}（近{similar_cn}）"
+        )
+        if region_score is None:
+            return
+        signed_offset = float(region.get("signed_offset", 0.0))
+        adjusted = region_score + signed_offset
+        lines.append(
+            f"adjusted_score = {region_score:.4f} + ({signed_offset:+.4f}) = "
+            f"<b>{adjusted:.4f}</b>"
+        )
+        lines.append(
+            f"双阈值：good_threshold = <b>{good_threshold:.4f}</b>，"
+            f"anomaly_threshold = <b>{anomaly_threshold:.4f}</b>"
+        )
+        label, reason = final_score_label(
+            adjusted,
+            good_threshold,
+            anomaly_threshold,
+            similar_library,
+        )
+        label_cn = "正常" if label == "good" else "异常"
+        color = "#00c853" if label == "good" else "#ff1744"
+        reason_cn = {
+            "adjusted_below_good_threshold": "调整后低于良品阈值",
+            "adjusted_above_anomaly_threshold": "调整后高于异常阈值",
+            "feature_library_good": "介于两阈值之间，取更近库（良品库）",
+            "feature_library_anomaly": "介于两阈值之间，取更近库（异常库）",
+            "threshold_midpoint_fallback": "两库平局，取阈值中点判定",
+        }.get(reason, reason)
+        lines.append(
+            f"最终判定：<span style=\"color:{color}; font-weight:bold;\">"
+            f"{label_cn}</span>（{reason_cn}）"
+        )
 
     def _artifact_root(self, artifact_name: str) -> Optional[Path]:
         """Return an explicit artifact root or one under --prediction_dir."""
@@ -1197,6 +1357,7 @@ class MainWindow(QMainWindow):
 
     def candidate_selection_changed(self) -> None:
         self.update_controls()
+        self._update_selected_region_calculation()
         index = self.left_canvas.selected_candidate_index
         if index is None or index >= len(self.left_canvas.candidate_regions):
             if self.left_canvas.mode == "candidate":
@@ -1324,6 +1485,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "查询失败", f"无法保存查询 Mask：{mask_path}")
             return
         self.current_run_dir = run_dir
+        self.query_result_image = self.left_canvas.image_path
 
         process = QProcess(self)
         self.process = process
@@ -1360,6 +1522,7 @@ class MainWindow(QMainWindow):
         if process is None:
             return
         if exit_code != 0 or self.current_run_dir is None:
+            self.query_result_image = None
             error = bytes(process.readAllStandardError()).decode("utf-8", errors="replace")
             QMessageBox.critical(
                 self,
@@ -1400,6 +1563,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"查询完成：{len(self.results)} 个匹配结果")
         else:
             self.status_label.setText("查询完成，但没有匹配结果")
+        self._update_selected_region_calculation()
 
     @staticmethod
     def _library_display_name(result: Mapping[str, Any]) -> str:
