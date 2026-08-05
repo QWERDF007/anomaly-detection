@@ -13,10 +13,17 @@ score is strictly greater than ``--score_threshold`` enter the second stage:
 The ``build-library`` subcommand creates either library from images and a
 binary mask (PNG/TIFF/NPY) or a Labelme JSON mask.  The ``build-libraries``
 subcommand can additionally split Labelme shapes into the good and anomaly
-libraries according to their ``label`` values.  Both library types use the
-encoder features returned by ``Dinomaly.forward`` rather than the decoder or
-a second feature extractor, so the library and query representations stay in
-the same feature space.
+libraries according to their ``label`` values.  By default both library types
+use the encoder features returned by ``Dinomaly.forward`` rather than the
+decoder or a second feature extractor, so the library and query
+representations stay in the same feature space.
+
+With ``--feature_source raw_patch``, the second stage instead uses the final
+patch-token output (``x_norm_patchtokens``) of a standalone DINOv2/DINOv3
+backbone loaded through torch.hub (``--patch_backbone``).  The Dinomaly2
+model still produces the stage-1 anomaly map; only the library/query
+representation switches to the raw patch tokens, reshaped to an NCHW feature
+map and processed by the same ROI mapping and masked ROIAlign.
 """
 
 from __future__ import annotations
@@ -612,8 +619,16 @@ def infer_image(
     device: torch.device,
     feature_merge: str,
     gaussian_filter: Optional[torch.nn.Module] = None,
+    patch_backbone=None,
+    feature_source: str = "dinomaly",
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Return ``(original-resolution score_map, encoder feature CHW)``."""
+    """Return ``(original-resolution score_map, encoder feature CHW)``.
+
+    ``feature_source`` selects the representation used for the second stage:
+    ``dinomaly`` (default) uses the Dinomaly2 encoder output, while
+    ``raw_patch`` uses the final patch-token output of a standalone
+    DINOv2/DINOv3 backbone loaded by :func:`load_patch_backbone`.
+    """
 
     original, image_tensor = _load_image_tensor(image_path, transform, device)
     with torch.no_grad():
@@ -627,7 +642,15 @@ def infer_image(
             gaussian_filter = get_gaussian_kernel(5, 4).to(device)
         anomaly_map = gaussian_filter(anomaly_map)
         score_map = anomaly_map[0, 0].detach().cpu().numpy()
-        feature = encoder_feature_map(encoder_outputs, feature_merge)[0]
+        if feature_source == "raw_patch":
+            feature = extract_raw_patch_feature(
+                patch_backbone,
+                image_path,
+                transform,
+                device,
+            )
+        else:
+            feature = encoder_feature_map(encoder_outputs, feature_merge)[0]
     score_map = np.nan_to_num(
         np.asarray(score_map, dtype=np.float32),
         nan=0.0,
@@ -659,6 +682,68 @@ def extract_encoder_feature(
     return np.nan_to_num(
         feature.detach().cpu().numpy().astype(np.float32, copy=False)
     )
+
+
+def extract_raw_patch_feature(
+    backbone,
+    image_path: Path,
+    transform,
+    device: torch.device,
+) -> np.ndarray:
+    """Extract the raw DINOv2/DINOv3 final patch-token map as CHW.
+
+    ``backbone`` is a standalone pretrained DINOv2/DINOv3 model loaded via
+    torch.hub.  ``forward_features`` returns the final normed patch tokens
+    (``x_norm_patchtokens``), which are reshaped into an NCHW feature map;
+    the ROI mapping and masked ROIAlign afterwards are identical to the
+    regular Dinomaly2 feature path.
+    """
+
+    _original, image_tensor = _load_image_tensor(image_path, transform, device)
+    with torch.no_grad():
+        output = backbone.forward_features(image_tensor)
+        if isinstance(output, Mapping) and "x_norm_patchtokens" in output:
+            patch = output["x_norm_patchtokens"]
+        elif isinstance(output, Mapping) and "x_prenorm" in output:
+            num_extra = int(
+                getattr(backbone, "num_register_tokens", 0)
+                or getattr(backbone, "n_storage_tokens", 0)
+                or 0
+            )
+            patch = output["x_prenorm"][:, num_extra + 1:, :]
+        else:
+            raise RuntimeError(
+                f"Backbone forward_features returned unsupported output: "
+                f"{type(output).__name__}"
+            )
+        side = int(round(float(patch.shape[1]) ** 0.5))
+        if side * side != int(patch.shape[1]):
+            raise ValueError(f"Non-square patch token grid: {patch.shape[1]}")
+        feature = patch.permute(0, 2, 1).reshape(
+            1, int(patch.shape[-1]), side, side
+        )
+    return np.nan_to_num(
+        feature[0].detach().cpu().numpy().astype(np.float32, copy=False)
+    )
+
+
+def load_patch_backbone(args, device: torch.device):
+    """Load a standalone DINOv2/DINOv3 backbone via torch.hub."""
+
+    name = args.patch_backbone
+    if name.startswith("dinov3"):
+        try:
+            backbone = torch.hub.load("facebookresearch/dinov3", name)
+        except (RuntimeError, ValueError) as error:
+            raise ValueError(
+                f"torch.hub cannot load DINOv3 backbone {name!r}; use a "
+                f"dinov2_* name such as 'dinov2_vitl14'"
+            ) from error
+    else:
+        backbone = torch.hub.load("facebookresearch/dinov2", name)
+    backbone.to(device).eval()
+    LOGGER.info("Loaded raw patch backbone: %s", name)
+    return backbone
 
 
 def roi_align_masked(
@@ -962,11 +1047,10 @@ def validate_library_compatibility(
     anomaly = anomaly_library.metadata
     for key in (
         "feature_dim",
-        "feature_merge",
+        "feature_source",
         "roi_size",
         "normalize",
         "backbone",
-        "feature_source",
     ):
         good_value = good.get(key)
         anomaly_value = anomaly.get(key)
@@ -975,12 +1059,17 @@ def validate_library_compatibility(
                 f"Good/anomaly library {key} differs: {good_value!r} vs {anomaly_value!r}"
             )
     expected = {
-        "backbone": args.backbone,
-        "feature_merge": args.feature_merge,
         "roi_size": int(args.roi_size),
         "image_size": int(args.image_size),
         "crop_size": int(args.crop_size),
     }
+    if str(good.get("feature_source", "")) == "raw_patch":
+        expected["backbone"] = args.patch_backbone
+        expected["feature_source"] = "raw_patch"
+    else:
+        expected["backbone"] = args.backbone
+        expected["feature_merge"] = args.feature_merge
+        expected["feature_source"] = "dinomaly_encoder_output"
     for key, value in expected.items():
         stored = good.get(key)
         if stored is not None and stored != value:
@@ -1021,6 +1110,7 @@ def _build_feature_library(
     transform=None,
     device: Optional[torch.device] = None,
     label_routing: Optional[Mapping[str, Any]] = None,
+    patch_backbone=None,
 ) -> int:
     """Extract and write one library, optionally using a custom mask loader."""
 
@@ -1030,6 +1120,9 @@ def _build_feature_library(
         transform = build_transform(args)
     if model is None:
         model = load_dinomaly_model(args, device)
+    if args.feature_source == "raw_patch":
+        if patch_backbone is None:
+            patch_backbone = load_patch_backbone(args, device)
     vectors: List[np.ndarray] = []
     records: List[Dict[str, Any]] = []
 
@@ -1058,13 +1151,21 @@ def _build_feature_library(
             if not components:
                 LOGGER.warning("Mask has no valid region: %s", mask_path)
                 continue
-            feature = extract_encoder_feature(
-                model,
-                image_path,
-                transform,
-                device,
-                args.feature_merge,
-            )
+            if args.feature_source == "raw_patch":
+                feature = extract_raw_patch_feature(
+                    patch_backbone,
+                    image_path,
+                    transform,
+                    device,
+                )
+            else:
+                feature = extract_encoder_feature(
+                    model,
+                    image_path,
+                    transform,
+                    device,
+                    args.feature_merge,
+                )
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
             LOGGER.warning("Skipping %s: %s", image_path, error)
             continue
@@ -1119,19 +1220,34 @@ def _build_feature_library(
         )
 
     vectors_array = np.stack(vectors).astype(np.float32, copy=False)
-    metadata = {
-        "library_type": library_type,
-        "feature_source": "dinomaly_encoder_output",
-        "feature_layout": "CHW before ROIAlign",
-        "feature_merge": args.feature_merge,
-        "roi_size": int(args.roi_size),
-        "normalize": bool(args.normalize),
-        "image_size": int(args.image_size),
-        "crop_size": int(args.crop_size),
-        "backbone": args.backbone,
-        "model": str(Path(args.model).expanduser()),
-        "records": records,
-    }
+    if args.feature_source == "raw_patch":
+        metadata = {
+            "library_type": library_type,
+            "feature_source": "raw_patch",
+            "feature_layout": "final normed patch tokens (x_norm_patchtokens) before ROIAlign",
+            "patch_backbone": args.patch_backbone,
+            "roi_size": int(args.roi_size),
+            "normalize": bool(args.normalize),
+            "image_size": int(args.image_size),
+            "crop_size": int(args.crop_size),
+            "backbone": args.patch_backbone,
+            "model": args.patch_backbone,
+            "records": records,
+        }
+    else:
+        metadata = {
+            "library_type": library_type,
+            "feature_source": "dinomaly_encoder_output",
+            "feature_layout": "CHW before ROIAlign",
+            "feature_merge": args.feature_merge,
+            "roi_size": int(args.roi_size),
+            "normalize": bool(args.normalize),
+            "image_size": int(args.image_size),
+            "crop_size": int(args.crop_size),
+            "backbone": args.backbone,
+            "model": str(Path(args.model).expanduser()),
+            "records": records,
+        }
     if label_routing is not None:
         metadata["label_routing"] = dict(label_routing)
     index_path, metadata_path = write_feature_library(
@@ -1259,6 +1375,9 @@ def predict_images(args) -> int:
     )
     validate_library_compatibility(good_library, anomaly_library, args)
     model = load_dinomaly_model(args, device)
+    patch_backbone = None
+    if args.feature_source == "raw_patch":
+        patch_backbone = load_patch_backbone(args, device)
     transform = build_transform(args)
     gaussian_filter = get_gaussian_kernel(5, 4).to(device)
     output_dir = Path(args.output_dir).expanduser()
@@ -1281,6 +1400,8 @@ def predict_images(args) -> int:
             device,
             args.feature_merge,
             gaussian_filter,
+            patch_backbone=patch_backbone,
+            feature_source=args.feature_source,
         )
         raw_score = float(np.max(score_map)) if score_map.size else 0.0
         stage1_label = classify_score(raw_score, args.score_threshold)
@@ -1514,6 +1635,26 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--roi_size", type=int, default=7)
     parser.add_argument("--gpu", "--cuda", dest="gpu", type=int, default=0)
+    parser.add_argument(
+        "--feature_source",
+        choices=("dinomaly", "raw_patch"),
+        default="dinomaly",
+        help=(
+            "Second-stage feature representation: 'dinomaly' uses the "
+            "Dinomaly2 encoder output; 'raw_patch' uses the final "
+            "patch-token output (x_norm_patchtokens) of a standalone "
+            "DINOv2/DINOv3 backbone loaded via torch.hub"
+        ),
+    )
+    parser.add_argument(
+        "--patch_backbone",
+        default="dinov2_vitl14",
+        help=(
+            "Standalone DINOv2/DINOv3 hub model name used with "
+            "--feature_source raw_patch, e.g. dinov2_vitl14, dinov2_vitb14, "
+            "dinov2_vits14 (default: dinov2_vitl14)"
+        ),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
