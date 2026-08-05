@@ -540,11 +540,11 @@ class MainWindow(QMainWindow):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         self.formula_label.setText(TWO_STAGE_FORMULA_HTML)
-        self._reset_calculation_panel()
 
         self.left_canvas = ImageCanvas(editable=True)
         self.right_canvas = ImageCanvas(editable=False)
         self.adjust_canvas = ImageCanvas(editable=False)
+        self._reset_calculation_panel()
         self.result_table = QTableWidget(0, 3)
         self.result_table.setHorizontalHeaderLabels(["图像路径", "距离", "库类型"])
         self.result_table.setSelectionBehavior(
