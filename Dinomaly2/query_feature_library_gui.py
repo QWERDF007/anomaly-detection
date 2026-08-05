@@ -79,6 +79,10 @@ class ImageCanvas(QWidget):
         self.overlay_bbox: Optional[Tuple[float, float, float, float]] = None
         self.overlay_text = ""
         self.overlay_color = QColor("#ff1744")
+        self.zoom = 1.0
+        self.pan = QPointF(0.0, 0.0)
+        self.panning = False
+        self.pan_last: Optional[QPointF] = None
         self.setMinimumSize(420, 360)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -91,6 +95,10 @@ class ImageCanvas(QWidget):
             raise OSError(f"无法读取图像：{image_path}")
         self.image = image.convertToFormat(QImage.Format.Format_RGB32)
         self.image_path = Path(image_path)
+        self.zoom = 1.0
+        self.pan = QPointF(0.0, 0.0)
+        self.panning = False
+        self.pan_last = None
         self.clear_shapes(emit=False)
         self.clear_candidate_regions(emit=False)
         self.clear_overlay()
@@ -99,6 +107,10 @@ class ImageCanvas(QWidget):
     def clear_image(self) -> None:
         self.image = None
         self.image_path = None
+        self.zoom = 1.0
+        self.pan = QPointF(0.0, 0.0)
+        self.panning = False
+        self.pan_last = None
         self.clear_shapes(emit=False)
         self.clear_candidate_regions(emit=False)
         self.clear_overlay()
@@ -256,24 +268,72 @@ class ImageCanvas(QWidget):
         self.overlay_text = ""
         self.update()
 
-    def image_rect(self) -> QRectF:
+    def _image_rect(self, pan: QPointF) -> QRectF:
         if self.image is None or self.image.width() < 1 or self.image.height() < 1:
             return QRectF()
         margin = 12.0
         available_width = max(float(self.width()) - 2.0 * margin, 1.0)
         available_height = max(float(self.height()) - 2.0 * margin, 1.0)
-        scale = min(
-            available_width / float(self.image.width()),
-            available_height / float(self.image.height()),
+        scale = (
+            min(
+                available_width / float(self.image.width()),
+                available_height / float(self.image.height()),
+            )
+            * self.zoom
         )
         width = float(self.image.width()) * scale
         height = float(self.image.height()) * scale
         return QRectF(
-            (float(self.width()) - width) / 2.0,
-            (float(self.height()) - height) / 2.0,
+            (float(self.width()) - width) / 2.0 + pan.x(),
+            (float(self.height()) - height) / 2.0 + pan.y(),
             width,
             height,
         )
+
+    def image_rect(self) -> QRectF:
+        return self._image_rect(self.pan)
+
+    def _clamp_pan(self) -> None:
+        if self.image is None:
+            self.pan = QPointF(0.0, 0.0)
+            return
+        rect = self._image_rect(QPointF(0.0, 0.0))
+        width, height = rect.width(), rect.height()
+        pan_x, pan_y = self.pan.x(), self.pan.y()
+        if width <= float(self.width()):
+            pan_x = 0.0
+        else:
+            pan_x = min(max(pan_x, -(width - 40.0)), float(self.width()) - 40.0)
+        if height <= float(self.height()):
+            pan_y = 0.0
+        else:
+            pan_y = min(max(pan_y, -(height - 40.0)), float(self.height()) - 40.0)
+        self.pan = QPointF(pan_x, pan_y)
+
+    def fit_to_window(self) -> None:
+        self.zoom = 1.0
+        self.pan = QPointF(0.0, 0.0)
+        self.update()
+
+    def wheelEvent(self, event) -> None:
+        if self.image is None:
+            return
+        position = event.position()
+        anchor = self.widget_to_image(position)
+        if anchor is None:
+            return
+        factor = 1.25 ** (event.angleDelta().y() / 120.0)
+        new_zoom = min(max(self.zoom * factor, 0.1), 32.0)
+        if abs(new_zoom - self.zoom) < 1e-9:
+            return
+        self.zoom = new_zoom
+        base = self._image_rect(QPointF(0.0, 0.0))
+        self.pan = QPointF(
+            position.x() - (base.left() + anchor.x() * base.width() / float(self.image.width())),
+            position.y() - (base.top() + anchor.y() * base.height() / float(self.image.height())),
+        )
+        self._clamp_pan()
+        self.update()
 
     def image_to_widget(self, point: QPointF) -> QPointF:
         image_rect = self.image_rect()
@@ -389,11 +449,15 @@ class ImageCanvas(QWidget):
             if self.overlay_text:
                 painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
                 text_rect = QRectF(top_left.x(), top_left.y() - 24, 420, 22)
-                painter.setPen(self.overlay_color)
+                painter.setPen(QColor("#ff1744"))
                 painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft, self.overlay_text)
         painter.end()
 
     def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self.panning = True
+            self.pan_last = event.position()
+            return
         if not self.editable:
             return
         if self.mode == "candidate":
@@ -426,6 +490,13 @@ class ImageCanvas(QWidget):
         self.update()
 
     def mouseMoveEvent(self, event) -> None:
+        if self.panning and self.pan_last is not None:
+            delta = event.position() - self.pan_last
+            self.pan_last = event.position()
+            self.pan = QPointF(self.pan.x() + delta.x(), self.pan.y() + delta.y())
+            self._clamp_pan()
+            self.update()
+            return
         if not self.editable or self.mode != "rectangle" or self.drag_start is None:
             return
         point = self.widget_to_image(event.position())
@@ -434,6 +505,10 @@ class ImageCanvas(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self.panning = False
+            self.pan_last = None
+            return
         if (
             not self.editable
             or self.mode != "rectangle"
@@ -521,6 +596,8 @@ class MainWindow(QMainWindow):
         self.undo_button = QPushButton("撤销")
         self.clear_button = QPushButton("清空区域")
         self.query_button = QPushButton("查询特征库")
+        self.fit_button = QPushButton("适应窗口")
+        self.fit_button.setToolTip("将所有图像视图的缩放还原到适应窗口大小")
         self.threshold_label = QLabel()
         self.threshold_label.setStyleSheet("color: #ff9800; font-weight: bold;")
         self._update_threshold_label()
@@ -578,6 +655,7 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.undo_button)
         controls.addWidget(self.clear_button)
         controls.addStretch(1)
+        controls.addWidget(self.fit_button)
         controls.addWidget(self.threshold_label)
         controls.addWidget(self.query_button)
 
@@ -621,15 +699,22 @@ class MainWindow(QMainWindow):
         calculation_layout = QVBoxLayout(calculation_panel)
         calculation_layout.addWidget(QLabel("实际计算与结果"))
         calculation_layout.addWidget(self.calculation_label)
-        info_layout = QHBoxLayout()
+        info_widget = QWidget()
+        info_layout = QHBoxLayout(info_widget)
         info_layout.addWidget(formula_panel, 1)
         info_layout.addWidget(calculation_panel, 1)
+
+        bottom_splitter = QSplitter(Qt.Orientation.Vertical)
+        bottom_splitter.addWidget(splitter)
+        bottom_splitter.addWidget(info_widget)
+        bottom_splitter.setStretchFactor(0, 3)
+        bottom_splitter.setStretchFactor(1, 1)
+        bottom_splitter.setSizes([600, 220])
 
         central = QWidget()
         layout = QVBoxLayout(central)
         layout.addLayout(controls)
-        layout.addWidget(splitter, 1)
-        layout.addLayout(info_layout)
+        layout.addWidget(bottom_splitter, 1)
         layout.addWidget(self.status_label)
         self.setCentralWidget(central)
 
@@ -641,6 +726,7 @@ class MainWindow(QMainWindow):
         self.undo_button.clicked.connect(self.left_canvas.undo)
         self.clear_button.clicked.connect(self.clear_query_selection)
         self.query_button.clicked.connect(self.start_query)
+        self.fit_button.clicked.connect(self.fit_all_canvases)
         self.left_canvas.shapes_changed.connect(self.update_controls)
         self.left_canvas.candidate_changed.connect(self.candidate_selection_changed)
         self.result_table.currentCellChanged.connect(self._result_row_changed)
@@ -706,6 +792,17 @@ class MainWindow(QMainWindow):
             self.update_controls()
         except (OSError, ValueError) as error:
             QMessageBox.critical(self, "打开失败", str(error))
+
+    def fit_all_canvases(self) -> None:
+        """Reset zoom/pan on every image view to fit the window."""
+
+        for canvas in (
+            self.left_canvas,
+            self.raw_canvas,
+            self.right_canvas,
+            self.adjust_canvas,
+        ):
+            canvas.fit_to_window()
 
     def _update_threshold_label(self) -> None:
         good_threshold = float(self.args.good_threshold)
