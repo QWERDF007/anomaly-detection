@@ -357,15 +357,16 @@ def predict_images(args) -> int:
     output_dir = root / "preds"
     output_dir.mkdir(parents=True, exist_ok=True)
     device = select_device(args.gpu)
+    faiss_on_gpu = device.type == "cuda"
     good_library = load_feature_library(
         root / "good",
         device,
-        args.faiss_on_gpu,
+        faiss_on_gpu,
     )
     anomaly_library = load_feature_library(
         root / "anomaly",
         device,
-        args.faiss_on_gpu,
+        faiss_on_gpu,
     )
     validate_library_compatibility(good_library, anomaly_library, args)
     model = load_dinomaly_model(args, device)
@@ -378,22 +379,53 @@ def predict_images(args) -> int:
     rows: List[Dict[str, Any]] = []
     details: List[Dict[str, Any]] = []
     roi_rows: List[Dict[str, Any]] = []
+    cache_root = output_dir / (
+        "features_raw_patch"
+        if args.feature_source == "raw_patch"
+        else "features"
+    )
+    cache_root.mkdir(parents=True, exist_ok=True)
     for image_path, image_relative, dataset_label in tqdm(
         image_entries,
         desc="Dinomaly2 dual-threshold prediction",
         unit="image",
         dynamic_ncols=True,
     ):
-        score_map, feature = infer_image(
-            model,
-            image_path,
-            transform,
-            device,
-            args.feature_merge,
-            gaussian_filter,
-            patch_backbone=patch_backbone,
-            feature_source=args.feature_source,
+        score_path = output_artifact_path(
+            output_dir,
+            "score_maps",
+            image_relative,
+            ".npy",
         )
+        feature_path = output_artifact_path(
+            cache_root,
+            "",
+            image_relative,
+            ".npy",
+        )
+        cached = (
+            not args.recompute_features
+            and score_path.is_file()
+            and feature_path.is_file()
+        )
+        if cached:
+            score_map = np.load(score_path)
+            feature = np.load(feature_path)
+        else:
+            score_map, feature = infer_image(
+                model,
+                image_path,
+                transform,
+                device,
+                args.feature_merge,
+                gaussian_filter,
+                patch_backbone=patch_backbone,
+                feature_source=args.feature_source,
+            )
+            score_path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(score_path, score_map)
+            feature_path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(feature_path, feature)
         raw_score = float(np.max(score_map)) if score_map.size else 0.0
         initial_label = initial_score_label(
             raw_score,
@@ -412,9 +444,19 @@ def predict_images(args) -> int:
         if initial_label == "middle":
             # Equality belongs to the middle band because the direct rules
             # intentionally use strict < and > comparisons.
+            min_area = 1
+            if float(args.min_area_pct) > 0.0:
+                min_area = max(
+                    min_area,
+                    int(
+                        round(
+                            float(args.min_area_pct) / 100.0 * score_map.size
+                        )
+                    ),
+                )
             components = connected_components(
                 score_map >= float(args.good_threshold),
-                min_area=args.min_area,
+                min_area=min_area,
                 max_regions=args.max_regions,
             )
             for component in components:
@@ -463,12 +505,6 @@ def predict_images(args) -> int:
                 }
             )
 
-        score_path = output_artifact_path(
-            output_dir,
-            "score_maps",
-            image_relative,
-            ".npy",
-        )
         raw_region_path = output_artifact_path(
             output_dir,
             "raw_regions",
@@ -487,7 +523,6 @@ def predict_images(args) -> int:
             image_relative,
             ".json",
         )
-        np.save(score_path, score_map)
         if not cv2.imwrite(str(raw_region_path), raw_region_mask * 255):
             raise OSError(f"Cannot write raw threshold region mask: {raw_region_path}")
         if not cv2.imwrite(str(region_path), candidate_mask * 255):
@@ -622,7 +657,7 @@ def predict_images(args) -> int:
                     "max_offset": args.max_offset,
                     "offset_eps": args.offset_eps,
                     "roi_dilation": args.roi_dilation,
-                    "min_area": args.min_area,
+                    "min_area_pct": args.min_area_pct,
                     "max_regions": args.max_regions,
                     "density_points": args.density_points,
                     "feature_merge": args.feature_merge,
@@ -672,6 +707,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--min_area", type=int, default=1)
+    parser.add_argument(
+        "--min_area_pct",
+        type=float,
+        default=0.0,
+        help=(
+            "Minimum connected-component area as a percentage of the image "
+            "area (e.g. 0.1 = 0.1%); applied on top of --min_area"
+        ),
+    )
     parser.add_argument("--max_regions", type=int, default=0)
     parser.add_argument(
         "--density_points",
@@ -694,9 +738,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max_offset", type=float, default=None)
     parser.add_argument("--offset_eps", type=float, default=1e-8)
     parser.add_argument(
-        "--faiss_on_gpu",
+        "--recompute_features",
         action="store_true",
-        help="Move both FAISS indexes to the selected CUDA device",
+        help=(
+            "Recompute and overwrite the cached score maps / second-stage "
+            "features instead of reusing preds/score_maps and "
+            "preds/features (or features_raw_patch)"
+        ),
     )
     return parser
 
@@ -724,6 +772,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise ValueError("good_threshold must be smaller than anomaly_threshold")
     if args.density_points < 100:
         raise ValueError("density_points must be at least 100")
+    if args.min_area_pct < 0:
+        raise ValueError("min_area_pct cannot be negative")
     return predict_images(args)
 
 

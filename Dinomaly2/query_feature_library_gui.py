@@ -1495,31 +1495,12 @@ class MainWindow(QMainWindow):
         )
         return mask_path
 
-    def _min_component_area(self) -> int:
-        """Minimum candidate-region area from --min_area_pct (image %)."""
-
-        pct = float(getattr(self.args, "min_area_pct", 0.0))
-        if pct <= 0.0 or self.left_canvas.image is None:
-            return 0
-        return int(
-            round(
-                pct / 100.0
-                * self.left_canvas.image.width()
-                * self.left_canvas.image.height()
-            )
-        )
-
     def load_candidate_regions(
         self,
         image_path: Path,
         score_map: Optional[np.ndarray] = None,
     ) -> Optional[Path]:
-        """Load one mask and split it into selectable connected components.
-
-        Components smaller than ``--min_area_pct`` percent of the image area
-        are filtered out; the adjusted-result canvas inherits the same filter
-        because it renders the same candidate list.
-        """
+        """Load one mask and split it into selectable connected components."""
 
         self.left_canvas.clear_candidate_regions(emit=False)
         root = self._artifact_root("candidate_regions")
@@ -1528,15 +1509,10 @@ class MainWindow(QMainWindow):
         mask_path = self._artifact_path(root, image_path, ".png")
         if mask_path is None:
             return None
-        components = self._mask_components(mask_path, score_map)
-        min_area = self._min_component_area()
-        if min_area > 0:
-            components = [
-                component
-                for component in components
-                if int(component["area"]) >= min_area
-            ]
-        self.left_canvas.set_candidate_regions(components, emit=False)
+        self.left_canvas.set_candidate_regions(
+            self._mask_components(mask_path, score_map),
+            emit=False,
+        )
         return mask_path
 
     def _area_ratio_text(self, area: int) -> str:
@@ -1909,16 +1885,6 @@ def build_parser() -> argparse.ArgumentParser:
             "layout; LabelMe JSON (label 'good'/'ignore' skipped) or binary "
             "masks. Anomaly regions are drawn as red polygons on the first "
             "canvas."
-        ),
-    )
-    parser.add_argument(
-        "--min_area_pct",
-        type=float,
-        default=0.0,
-        help=(
-            "Minimum candidate-region area as a percentage of the input "
-            "image (e.g. 0.1 = 0.1%%); smaller regions are filtered out of "
-            "the candidate and adjusted-result canvases"
         ),
     )
     parser.add_argument("--output_dir", default="./gui_lookup_results")
