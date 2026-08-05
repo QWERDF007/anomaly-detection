@@ -18,14 +18,13 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 from PySide6.QtCore import QPointF, QProcess, QRectF, Qt, Signal
-from dinomaly_two_stage import calculate_distance_offset, mask_bbox
-from dinomaly_two_threshold_predict import final_score_label
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -33,6 +32,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -577,9 +577,6 @@ class MainWindow(QMainWindow):
         self.process: Optional[QProcess] = None
         self.current_run_dir: Optional[Path] = None
         self.results: List[Dict[str, Any]] = []
-        self.score_map: Optional[np.ndarray] = None
-        self.query_bbox: Optional[Tuple[float, float, float, float]] = None
-        self.region_score: Optional[float] = None
         self.setWindowTitle("Dinomaly2 ROI 特征库反查")
         self.resize(2100, 950)
 
@@ -678,7 +675,7 @@ class MainWindow(QMainWindow):
 
         adjust_panel = QWidget()
         adjust_layout = QVBoxLayout(adjust_panel)
-        adjust_layout.addWidget(QLabel("两阶段调整结果（ROI 与调整后分数）"))
+        adjust_layout.addWidget(QLabel("两阶段调整结果（完整：全图分数与全部区域）"))
         adjust_layout.addWidget(self.adjust_canvas, 1)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -693,14 +690,17 @@ class MainWindow(QMainWindow):
 
         formula_panel = QWidget()
         formula_layout = QVBoxLayout(formula_panel)
+        formula_layout.setContentsMargins(0, 0, 0, 0)
         formula_layout.addWidget(QLabel("公式"))
-        formula_layout.addWidget(self.formula_label)
+        formula_layout.addWidget(self._scrollable_label(self.formula_label), 1)
         calculation_panel = QWidget()
         calculation_layout = QVBoxLayout(calculation_panel)
+        calculation_layout.setContentsMargins(0, 0, 0, 0)
         calculation_layout.addWidget(QLabel("实际计算与结果"))
-        calculation_layout.addWidget(self.calculation_label)
+        calculation_layout.addWidget(self._scrollable_label(self.calculation_label), 1)
         info_widget = QWidget()
         info_layout = QHBoxLayout(info_widget)
+        info_layout.setContentsMargins(0, 0, 0, 0)
         info_layout.addWidget(formula_panel, 1)
         info_layout.addWidget(calculation_panel, 1)
 
@@ -755,17 +755,13 @@ class MainWindow(QMainWindow):
             self.raw_canvas.set_image(image_path)
             self.input_path_edit.setText(str(image_path))
             score_map = self.load_score_map(image_path)
-            self.score_map = score_map
-            self.query_bbox = None
-            self.region_score = None
             self.load_raw_regions(image_path, score_map)
             candidate_path = self.load_candidate_regions(image_path, score_map)
             self.current_run_dir = None
             self.right_canvas.clear_image()
-            self.adjust_canvas.clear_image()
             self.result_table.setRowCount(0)
             self.results.clear()
-            self._reset_calculation_panel()
+            self._update_two_stage_panel()
             if candidate_path is not None:
                 candidate_index = self.mode_combo.findData("candidate")
                 if candidate_index >= 0:
@@ -804,6 +800,22 @@ class MainWindow(QMainWindow):
         ):
             canvas.fit_to_window()
 
+    @staticmethod
+    def _scrollable_label(label: QLabel) -> QScrollArea:
+        """Wrap a rich-text label so it scrolls instead of being clipped.
+
+        A plain QLabel reports a large minimum height for its content, which
+        blocks the vertical splitter from resizing it; a scroll area has a
+        small minimum and shows scrollbars when the content overflows.
+        """
+
+        scroll = QScrollArea()
+        scroll.setWidget(label)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setMinimumHeight(80)
+        return scroll
+
     def _update_threshold_label(self) -> None:
         good_threshold = float(self.args.good_threshold)
         anomaly_threshold = float(self.args.anomaly_threshold)
@@ -822,7 +834,9 @@ class MainWindow(QMainWindow):
         )
 
     def _reset_calculation_panel(self) -> None:
-        self.calculation_label.setText("查询特征库后，在此显示选中区域的<br>实际计算与结果。")
+        self.calculation_label.setText(
+            "两阶段调整结果将在输入图像后自动显示（读取 prediction_dir/details/）。"
+        )
         self.adjust_canvas.clear_image()
 
     @staticmethod
@@ -834,122 +848,160 @@ class MainWindow(QMainWindow):
             return "anomaly"
         return None
 
+    def _prediction_details_path(self, image_path: Path) -> Optional[Path]:
+        prediction_dir = getattr(self.args, "prediction_dir", None)
+        if not prediction_dir:
+            return None
+        details_root = Path(prediction_dir).expanduser() / "details"
+        if not details_root.is_dir():
+            return None
+        return self._artifact_path(details_root, image_path, ".json")
+
+    @staticmethod
+    def _similar_library_cn(similar_library: Any) -> str:
+        text = str(similar_library).strip().casefold()
+        if text in {"good", "good_library", "良品", "良品库"}:
+            return "良品库"
+        if text in {"anomaly", "anomaly_library", "异常", "异常库"}:
+            return "异常库"
+        if text == "tie":
+            return "平局"
+        if text == "invalid":
+            return "无效"
+        return str(similar_library) or "无"
+
     def _update_two_stage_panel(self) -> None:
-        """Show the selected-ROI two-stage calculation and the adjusted result."""
+        """Show the complete two-stage prediction result for the current image.
 
-        good_threshold = float(self.args.good_threshold)
-        anomaly_threshold = float(self.args.anomaly_threshold)
-        lines: List[str] = ['<h4 style="margin:2px;">实际计算与结果（选中区域）</h4>']
+        The result comes from ``prediction_dir/details/<image>.json`` written
+        by dinomaly_two_threshold_predict.py, so it appears as soon as the
+        input image is loaded and does not depend on a feature-library query.
+        """
 
-        if self.region_score is not None:
-            lines.append(
-                f"region_score（ROI 内 max） = <b>{self.region_score:.4f}</b>"
+        image_path = self.left_canvas.image_path
+        if image_path is None:
+            self._reset_calculation_panel()
+            return
+        details_path = self._prediction_details_path(image_path)
+        if details_path is None:
+            self.calculation_label.setText(
+                "未找到该图像的预测详情（prediction_dir/details/）。"
             )
-        else:
-            lines.append("region_score = 未提供 score_map")
-
-        good_distances = [
-            float(result.get("distance"))
-            for result in self.results
-            if self._result_library_type(result) == "good"
-        ]
-        anomaly_distances = [
-            float(result.get("distance"))
-            for result in self.results
-            if self._result_library_type(result) == "anomaly"
-        ]
-        good_distance = min(good_distances) if good_distances else None
-        anomaly_distance = min(anomaly_distances) if anomaly_distances else None
-
-        if good_distance is None or anomaly_distance is None:
-            lines.append("<b>缺少良品库或异常库检索结果，无法计算两阶段偏移。</b>")
-            self.calculation_label.setText("<br>".join(lines))
+            self.adjust_canvas.clear_image()
+            return
+        try:
+            with details_path.open("r", encoding="utf-8") as file:
+                detail = json.load(file)
+        except (OSError, json.JSONDecodeError) as error:
+            self.calculation_label.setText(f"读取预测详情失败：{error}")
             self.adjust_canvas.clear_image()
             return
 
-        decision = calculate_distance_offset(
-            good_distance,
-            anomaly_distance,
-            float(self.args.offset_scale),
-            self.args.max_offset,
-            float(self.args.offset_eps),
+        raw_score = float(detail.get("raw_score", 0.0))
+        adjusted_score = float(detail.get("adjusted_score", raw_score))
+        good_threshold = float(
+            detail.get("good_threshold", float(self.args.good_threshold))
         )
-        lines.append(f"d_good（良品库第 1 近） = <b>{good_distance:.6f}</b>")
-        lines.append(f"d_anomaly（异常库第 1 近） = <b>{anomaly_distance:.6f}</b>")
-        nearer = min(good_distance, anomaly_distance)
-        farther = max(good_distance, anomaly_distance)
-        offset_eps = float(self.args.offset_eps)
+        anomaly_threshold = float(
+            detail.get("anomaly_threshold", float(self.args.anomaly_threshold))
+        )
+        initial_cn = {
+            "good": "正常",
+            "anomaly": "异常",
+            "middle": "中间带",
+        }.get(str(detail.get("initial_label", "")), str(detail.get("initial_label", "")))
+        final_label = str(detail.get("final_label", ""))
+        final_cn = "正常" if final_label == "good" else "异常"
+        reason = str(detail.get("decision_reason", ""))
+        reason_cn = {
+            "adjusted_below_good_threshold": "调整后低于良品阈值",
+            "adjusted_above_anomaly_threshold": "调整后高于异常阈值",
+            "feature_library_good": "介于两阈值之间，取更近库（良品库）",
+            "feature_library_anomaly": "介于两阈值之间，取更近库（异常库）",
+            "threshold_midpoint_fallback": "两库平局，取阈值中点判定",
+        }.get(reason, reason)
+        signed_offset = float(detail.get("signed_offset", 0.0))
+
+        lines: List[str] = ['<h4 style="margin:2px;">两阶段调整结果（完整）</h4>']
         lines.append(
-            f"confidence = ({farther:.6f} − {nearer:.6f}) / "
-            f"({farther:.6f} + {nearer:.6f} + {offset_eps:.1e}) = "
-            f"<b>{decision['confidence']:.6f}</b>"
+            f"raw_score（全图 max） = <b>{raw_score:.4f}</b> → 初始判定：{initial_cn}"
         )
-        if self.args.max_offset is None:
-            cap_text = "∞"
-        else:
-            cap_text = f"{float(self.args.max_offset):.4f}"
         lines.append(
-            f"offset = min({decision['confidence']:.6f} × "
-            f"{float(self.args.offset_scale):.4f}, {cap_text}) = "
-            f"<b>{decision['offset']:.6f}</b>"
+            f"双阈值：good_threshold = <b>{good_threshold:.4f}</b>，"
+            f"anomaly_threshold = <b>{anomaly_threshold:.4f}</b>"
         )
-        similar_library = decision["similar_library"]
-        if similar_library == "tie":
-            sign_text = "（两库距离相同，无偏移）"
-        elif similar_library == "invalid":
-            sign_text = "（距离无效）"
-        else:
-            sign_text = (
-                "−（更近良品库）" if similar_library == "good" else "+（更近异常库）"
+        if bool(detail.get("stage2_applied")):
+            similar_cn = self._similar_library_cn(
+                detail.get("similar_library", "")
             )
+            lines.append(
+                f"selected_region = R{detail.get('selected_region_id', '')}，"
+                f"d_good = <b>{float(detail.get('good_distance', 0.0)):.6f}</b>，"
+                f"d_anomaly = <b>{float(detail.get('anomaly_distance', 0.0)):.6f}</b>，"
+                f"近{similar_cn}"
+            )
+            lines.append(
+                f"confidence = {float(detail.get('confidence', 0.0)):.6f}，"
+                f"offset = {float(detail.get('offset', 0.0)):.6f}，"
+                f"signed_offset = {signed_offset:+.6f}"
+            )
+        else:
+            lines.append("未进入第二阶段（直接按阈值判定，无特征库检索）。")
+        color = "#00c853" if final_label == "good" else "#ff1744"
         lines.append(
-            f"signed_offset = {decision['signed_offset']:+.6f} {sign_text}"
+            f"adjusted_score = {raw_score:.4f} + ({signed_offset:+.4f}) = "
+            f"<b>{adjusted_score:.4f}</b>"
+        )
+        lines.append(
+            f"最终判定：<span style=\"color:{color}; font-weight:bold;\">"
+            f"{final_cn}</span>（{reason_cn}）"
         )
 
-        if self.region_score is not None:
-            adjusted = float(self.region_score) + float(decision["signed_offset"])
-            lines.append(
-                f"adjusted_score = {self.region_score:.4f} "
-                f"+ ({decision['signed_offset']:+.4f}) = <b>{adjusted:.4f}</b>"
-            )
-            lines.append(
-                f"双阈值：good_threshold = <b>{good_threshold:.4f}</b>，"
-                f"anomaly_threshold = <b>{anomaly_threshold:.4f}</b>"
-            )
-            label, reason = final_score_label(
-                adjusted,
-                good_threshold,
-                anomaly_threshold,
-                similar_library,
-            )
-            label_cn = "正常" if label == "good" else "异常"
-            color = "#00c853" if label == "good" else "#ff1744"
-            reason_cn = {
-                "adjusted_below_good_threshold": "调整后低于良品阈值",
-                "adjusted_above_anomaly_threshold": "调整后高于异常阈值",
-                "feature_library_good": "介于两阈值之间，取更近库（良品库）",
-                "feature_library_anomaly": "介于两阈值之间，取更近库（异常库）",
-                "threshold_midpoint_fallback": "两库平局，取阈值中点判定",
-            }.get(reason, reason)
-            lines.append(
-                f"最终判定：<span style=\"color:{color}; font-weight:bold;\">"
-                f"{label_cn}</span>（{reason_cn}）"
-            )
-            if self.left_canvas.image_path is not None and self.query_bbox is not None:
-                try:
-                    self.adjust_canvas.set_image(self.left_canvas.image_path)
-                    self.adjust_canvas.set_overlay_bbox(
-                        self.query_bbox,
-                        text=f"score={self.region_score:.4f} → "
-                        f"adjusted={adjusted:.4f}（{label_cn}）",
-                        color=QColor(color),
-                    )
-                except (OSError, ValueError) as error:
-                    QMessageBox.warning(self, "显示调整结果失败", str(error))
-        else:
-            self.adjust_canvas.clear_image()
-
+        regions = detail.get("regions", [])
+        if regions:
+            lines.append("<b>各候选区域：</b>")
+            for region in regions:
+                lines.append(
+                    f"R{region.get('region_id', '')}：score="
+                    f"{float(region.get('region_score', 0.0)):.4f}，"
+                    f"good={float(region.get('good_distance', 0.0)):.4f}，"
+                    f"anomaly={float(region.get('anomaly_distance', 0.0)):.4f}，"
+                    f"近{self._similar_library_cn(region.get('similar_library', ''))}"
+                )
         self.calculation_label.setText("<br>".join(lines))
+
+        self.adjust_canvas.set_image(image_path)
+        candidates = []
+        for index, region in enumerate(regions, start=1):
+            bbox = region.get("bbox_original")
+            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                continue
+            mask = np.zeros(
+                (self.left_canvas.image.height(), self.left_canvas.image.width()),
+                dtype=bool,
+            )
+            candidates.append(
+                {
+                    "region_id": index,
+                    "mask": mask,
+                    "bbox": bbox,
+                    "area": int(region.get("area", 0)),
+                    "score": float(region.get("region_score", 0.0)),
+                }
+            )
+        self.adjust_canvas.set_candidate_regions(candidates, emit=False)
+        if regions:
+            strongest = max(
+                regions,
+                key=lambda region: float(region.get("region_score", 0.0)),
+            )
+            strongest_bbox = strongest.get("bbox_original")
+            if isinstance(strongest_bbox, (list, tuple)) and len(strongest_bbox) == 4:
+                self.adjust_canvas.set_overlay_bbox(
+                    strongest_bbox,
+                    text=f"raw={raw_score:.4f} → adjusted={adjusted_score:.4f}（{final_cn}）",
+                    color=QColor("#ff1744"),
+                )
 
     def _artifact_root(self, artifact_name: str) -> Optional[Path]:
         """Return an explicit artifact root or one under --prediction_dir."""
@@ -1263,15 +1315,6 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "查询失败", "请先选择或绘制一个有效 ROI。")
             return
 
-        self.query_bbox = mask_bbox(mask)
-        if self.score_map is not None:
-            region_values = np.asarray(self.score_map)[np.asarray(mask, dtype=bool)]
-            self.region_score = (
-                float(np.nanmax(region_values)) if region_values.size else None
-            )
-        else:
-            self.region_score = None
-
         output_root = Path(self.args.output_dir).expanduser()
         output_root.mkdir(parents=True, exist_ok=True)
         run_dir = output_root / f"query_{time.strftime('%Y%m%d_%H%M%S')}_{time.time_ns() % 1000000:06d}"
@@ -1357,7 +1400,6 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"查询完成：{len(self.results)} 个匹配结果")
         else:
             self.status_label.setText("查询完成，但没有匹配结果")
-        self._update_two_stage_panel()
 
     @staticmethod
     def _library_display_name(result: Mapping[str, Any]) -> str:
