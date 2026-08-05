@@ -39,6 +39,7 @@ from dinomaly_two_stage import (
     l2_normalize,
     load_dinomaly_model,
     load_feature_library,
+    load_patch_backbone,
     mask_bbox,
     record_for_vector_id,
     roi_align_masked,
@@ -365,6 +366,9 @@ def predict_images(args) -> int:
     )
     validate_library_compatibility(good_library, anomaly_library, args)
     model = load_dinomaly_model(args, device)
+    patch_backbone = None
+    if args.feature_source == "raw_patch":
+        patch_backbone = load_patch_backbone(args, device)
     transform = build_transform(args)
     gaussian_filter = get_gaussian_kernel(5, 4).to(device)
 
@@ -384,6 +388,8 @@ def predict_images(args) -> int:
             device,
             args.feature_merge,
             gaussian_filter,
+            patch_backbone=patch_backbone,
+            feature_source=args.feature_source,
         )
         raw_score = float(np.max(score_map)) if score_map.size else 0.0
         initial_label = initial_score_label(
