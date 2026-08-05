@@ -86,6 +86,7 @@ class ImageCanvas(QWidget):
         self.overlay_bbox: Optional[Tuple[float, float, float, float]] = None
         self.overlay_text = ""
         self.overlay_color = QColor("#ff1744")
+        self.overlay_dashed = False
         self.zoom = 1.0
         self.pan = QPointF(0.0, 0.0)
         self.panning = False
@@ -265,6 +266,7 @@ class ImageCanvas(QWidget):
         bbox: Optional[Sequence[float]],
         text: str = "",
         color: Optional[QColor] = None,
+        dashed: bool = False,
     ) -> None:
         self.overlay_bbox = (
             tuple(float(value) for value in bbox)
@@ -272,6 +274,7 @@ class ImageCanvas(QWidget):
             else None
         )
         self.overlay_text = text
+        self.overlay_dashed = bool(dashed)
         if color is not None:
             self.overlay_color = QColor(color)
         self.update()
@@ -279,6 +282,7 @@ class ImageCanvas(QWidget):
     def clear_overlay(self) -> None:
         self.overlay_bbox = None
         self.overlay_text = ""
+        self.overlay_dashed = False
         self.update()
 
     def _image_rect(self, pan: QPointF) -> QRectF:
@@ -463,7 +467,11 @@ class ImageCanvas(QWidget):
             x1, y1, x2, y2 = self.overlay_bbox
             top_left = self.image_to_widget(QPointF(x1, y1))
             bottom_right = self.image_to_widget(QPointF(x2, y2))
-            painter.setPen(QPen(self.overlay_color, 3.0))
+            pen = QPen(self.overlay_color, 3.0)
+            if self.overlay_dashed:
+                pen.setWidth(2.0)
+                pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(pen)
             painter.drawRect(QRectF(top_left, bottom_right).normalized())
             if self.overlay_text:
                 painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
@@ -983,51 +991,34 @@ class MainWindow(QMainWindow):
                 candidate["score"] = adjusted
             judged.append(candidate)
         self.adjust_canvas.set_candidate_regions(judged, emit=False)
+        if regions:
+            strongest = max(
+                regions,
+                key=lambda region: float(region.get("region_score", 0.0)),
+            )
+            strongest_bbox = strongest.get("bbox_original")
+            if isinstance(strongest_bbox, (list, tuple)) and len(strongest_bbox) == 4:
+                self.adjust_canvas.set_overlay_bbox(
+                    strongest_bbox,
+                    color=QColor("#ff1744"),
+                    dashed=True,
+                )
 
     def _update_selected_region_calculation(self) -> None:
-        """Show the two-stage calculation of the currently selected ROI.
+        """Show the whole-image final score and the selected ROI's calculation.
 
-        A selected candidate region reuses the distances stored in the
-        prediction details; a manually drawn ROI falls back to the last
-        feature-library query on the same image.
+        The first line reproduces the image-level adjusted_score written to
+        results.csv (raw_score + selected-region signed_offset); the rest
+        details the currently selected ROI, reusing the distances stored in
+        the prediction details or falling back to the last feature-library
+        query on the same image.
         """
 
         image_path = self.left_canvas.image_path
         if image_path is None:
             self._reset_calculation_panel()
             return
-        if self.left_canvas.mode == "candidate":
-            index = self.left_canvas.selected_candidate_index
-            if index is None or not 0 <= index < len(
-                self.left_canvas.candidate_regions
-            ):
-                self.calculation_label.setText(
-                    "未选择候选区域：请单击左侧一个候选多边形。"
-                )
-                return
-            region_data = self.left_canvas.candidate_regions[index]
-            roi_bbox = region_data.get("bbox")
-            roi_area = int(region_data.get("area", 0))
-            roi_mask = np.asarray(region_data.get("mask"), dtype=bool)
-        else:
-            if not self.left_canvas.shapes:
-                self.calculation_label.setText("未绘制 ROI：请绘制矩形或多边形。")
-                return
-            try:
-                roi_mask = np.asarray(self.left_canvas.mask_array(), dtype=bool)
-            except (RuntimeError, ValueError) as error:
-                self.calculation_label.setText(f"无法生成 ROI 掩码：{error}")
-                return
-            roi_bbox = mask_bbox(roi_mask)
-            roi_area = int(np.count_nonzero(roi_mask))
-
-        lines: List[str] = ['<h4 style="margin:2px;">实际计算与结果（选中区域）</h4>']
-        if self.score_map is not None and np.any(roi_mask):
-            region_score = float(np.nanmax(self.score_map[roi_mask]))
-            lines.append(f"region_score（ROI 内 max） = <b>{region_score:.4f}</b>")
-        else:
-            region_score = None
-            lines.append("region_score = 未提供 score_map")
+        lines: List[str] = ['<h4 style="margin:2px;">实际计算与结果</h4>']
 
         detail = None
         details_path = self._prediction_details_path(image_path)
@@ -1038,12 +1029,64 @@ class MainWindow(QMainWindow):
             except (OSError, json.JSONDecodeError):
                 detail = None
         if detail:
+            raw_score = float(detail.get("raw_score", 0.0))
+            signed_offset = float(detail.get("signed_offset", 0.0))
+            adjusted_score = float(
+                detail.get("adjusted_score", raw_score + signed_offset)
+            )
+            final_label = str(detail.get("final_label", ""))
+            final_cn = "正常" if final_label == "good" else "异常"
+            lines.append(
+                f"整图最终调整（results.csv 一致）：adjusted_score = "
+                f"{raw_score:.4f} + ({signed_offset:+.4f}) = "
+                f"<b>{adjusted_score:.4f}</b>（{final_cn}）"
+            )
             good_threshold = float(
                 detail.get("good_threshold", float(self.args.good_threshold))
             )
             anomaly_threshold = float(
                 detail.get("anomaly_threshold", float(self.args.anomaly_threshold))
             )
+        else:
+            lines.append("整图最终调整：未找到预测详情（--root/preds/details/）。")
+            good_threshold = float(self.args.good_threshold)
+            anomaly_threshold = float(self.args.anomaly_threshold)
+        lines.append("<hr>")
+
+        if self.left_canvas.mode == "candidate":
+            index = self.left_canvas.selected_candidate_index
+            if index is None or not 0 <= index < len(
+                self.left_canvas.candidate_regions
+            ):
+                lines.append("未选择候选区域：请单击左侧一个候选多边形。")
+                self.calculation_label.setText("<br>".join(lines))
+                return
+            region_data = self.left_canvas.candidate_regions[index]
+            roi_bbox = region_data.get("bbox")
+            roi_area = int(region_data.get("area", 0))
+            roi_mask = np.asarray(region_data.get("mask"), dtype=bool)
+        else:
+            if not self.left_canvas.shapes:
+                lines.append("未绘制 ROI：请绘制矩形或多边形。")
+                self.calculation_label.setText("<br>".join(lines))
+                return
+            try:
+                roi_mask = np.asarray(self.left_canvas.mask_array(), dtype=bool)
+            except (RuntimeError, ValueError) as error:
+                lines.append(f"无法生成 ROI 掩码：{error}")
+                self.calculation_label.setText("<br>".join(lines))
+                return
+            roi_bbox = mask_bbox(roi_mask)
+            roi_area = int(np.count_nonzero(roi_mask))
+
+        if self.score_map is not None and np.any(roi_mask):
+            region_score = float(np.nanmax(self.score_map[roi_mask]))
+            lines.append(f"region_score（ROI 内 max） = <b>{region_score:.4f}</b>")
+        else:
+            region_score = None
+            lines.append("region_score = 未提供 score_map")
+
+        if detail:
             matched = self._find_detail_region(
                 detail.get("regions", []),
                 roi_bbox,
@@ -1059,9 +1102,6 @@ class MainWindow(QMainWindow):
                 )
                 self.calculation_label.setText("<br>".join(lines))
                 return
-        else:
-            good_threshold = float(self.args.good_threshold)
-            anomaly_threshold = float(self.args.anomaly_threshold)
 
         if (
             self.query_result_image is not None
