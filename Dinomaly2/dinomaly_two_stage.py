@@ -19,11 +19,11 @@ decoder or a second feature extractor, so the library and query
 representations stay in the same feature space.
 
 With ``--feature_source raw_patch``, the second stage instead uses the final
-patch-token output (``x_norm_patchtokens``) of a standalone DINOv2/DINOv3
-backbone loaded through torch.hub (``--patch_backbone``).  The Dinomaly2
-model still produces the stage-1 anomaly map; only the library/query
-representation switches to the raw patch tokens, reshaped to an NCHW feature
-map and processed by the same ROI mapping and masked ROIAlign.
+patch-token output (``x_norm_patchtokens``) of the same ``--backbone``
+loaded standalone through torch.hub.  The Dinomaly2 model still produces the
+stage-1 anomaly map; only the library/query representation switches to the
+raw patch tokens, reshaped to an NCHW feature map and processed by the same
+ROI mapping and masked ROIAlign.
 """
 
 from __future__ import annotations
@@ -727,20 +727,44 @@ def extract_raw_patch_feature(
     )
 
 
-def load_patch_backbone(args, device: torch.device):
-    """Load a standalone DINOv2/DINOv3 backbone via torch.hub."""
+def hub_backbone_name(backbone_name: str) -> str:
+    """Map a Dinomaly2 backbone name to the torch.hub DINOv2 model name.
 
-    name = args.patch_backbone
+    ``dinov2reg_vit_small_14`` -> ``dinov2_vits14_reg``,
+    ``dinov2_vit_base_14`` -> ``dinov2_vitb14``.
+    """
+
+    parts = str(backbone_name).split("_")
+    family = parts[0]
+    if not family.startswith("dinov2"):
+        raise ValueError(
+            f"--backbone {backbone_name!r} is not a torch.hub DINOv2 model; "
+            "use a dinov2/dinov2reg name such as 'dinov2_vitl14' or "
+            "'dinov2reg_vit_small_14'"
+        )
+    if len(parts) < 3:
+        raise ValueError(f"Cannot parse backbone name: {backbone_name!r}")
+    arch = parts[-2]
+    patch = parts[-1]
+    letters = {"small": "s", "base": "b", "large": "l", "giant": "g"}
+    if arch not in letters:
+        raise ValueError(f"Unsupported backbone size {arch!r}: {backbone_name!r}")
+    hub_name = f"dinov2_vit{letters[arch]}{patch}"
+    if "reg" in family:
+        hub_name += "_reg"
+    return hub_name
+
+
+def load_patch_backbone(args, device: torch.device):
+    """Load the raw patch-token backbone, reusing ``--backbone``."""
+
+    name = args.backbone
     if name.startswith("dinov3"):
-        try:
-            backbone = torch.hub.load("facebookresearch/dinov3", name)
-        except (RuntimeError, ValueError) as error:
-            raise ValueError(
-                f"torch.hub cannot load DINOv3 backbone {name!r}; use a "
-                f"dinov2_* name such as 'dinov2_vitl14'"
-            ) from error
+        from models import vit_encoder
+
+        backbone = vit_encoder.load(name)
     else:
-        backbone = torch.hub.load("facebookresearch/dinov2", name)
+        backbone = torch.hub.load("facebookresearch/dinov2", hub_backbone_name(name))
     backbone.to(device).eval()
     LOGGER.info("Loaded raw patch backbone: %s", name)
     return backbone
@@ -1064,7 +1088,7 @@ def validate_library_compatibility(
         "crop_size": int(args.crop_size),
     }
     if str(good.get("feature_source", "")) == "raw_patch":
-        expected["backbone"] = args.patch_backbone
+        expected["backbone"] = args.backbone
         expected["feature_source"] = "raw_patch"
     else:
         expected["backbone"] = args.backbone
@@ -1225,13 +1249,12 @@ def _build_feature_library(
             "library_type": library_type,
             "feature_source": "raw_patch",
             "feature_layout": "final normed patch tokens (x_norm_patchtokens) before ROIAlign",
-            "patch_backbone": args.patch_backbone,
             "roi_size": int(args.roi_size),
             "normalize": bool(args.normalize),
             "image_size": int(args.image_size),
             "crop_size": int(args.crop_size),
-            "backbone": args.patch_backbone,
-            "model": args.patch_backbone,
+            "backbone": args.backbone,
+            "model": args.backbone,
             "records": records,
         }
     else:
@@ -1619,7 +1642,19 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--backbone",
         default="dinov2reg_vit_small_14",
-        help="Dinomaly2 DINOv2 backbone used during training",
+        help=(
+            "DINOv2 backbone used during training, and (with "
+            "--feature_source raw_patch) loaded standalone for patch-token "
+            "features. Available: dinov2_vit_small_14, dinov2_vit_base_14, "
+            "dinov2_vit_large_14; dinov2reg_vit_small_14, "
+            "dinov2reg_vit_base_14, dinov2reg_vit_large_14 (4 register "
+            "tokens); dinov3_vit_small_16, dinov3_vit_base_16, "
+            "dinov3_vit_large_16 (raw_patch loads dinov3 through the local "
+            "vit_encoder, others via torch.hub); also dinov1 "
+            "(dino_vit_small_8/16, dino_vit_base_8/16), tips_vit_small_14/"
+            "base_14/large_14, beit_vit_base_16, deit_vit_small_16/base_16 "
+            "(these are NOT usable with --feature_source raw_patch)"
+        ),
     )
     parser.add_argument("--image_size", type=int, default=672)
     parser.add_argument("--crop_size", type=int, default=672)
@@ -1642,17 +1677,8 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Second-stage feature representation: 'dinomaly' uses the "
             "Dinomaly2 encoder output; 'raw_patch' uses the final "
-            "patch-token output (x_norm_patchtokens) of a standalone "
-            "DINOv2/DINOv3 backbone loaded via torch.hub"
-        ),
-    )
-    parser.add_argument(
-        "--patch_backbone",
-        default="dinov2_vitl14",
-        help=(
-            "Standalone DINOv2/DINOv3 hub model name used with "
-            "--feature_source raw_patch, e.g. dinov2_vitl14, dinov2_vitb14, "
-            "dinov2_vits14 (default: dinov2_vitl14)"
+            "patch-token output (x_norm_patchtokens) of the same --backbone "
+            "loaded standalone via torch.hub"
         ),
     )
 
