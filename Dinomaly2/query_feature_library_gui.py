@@ -332,20 +332,17 @@ class ImageCanvas(QWidget):
                 painter.drawRect(candidate_rect)
                 label_point = candidate_rect.topLeft()
             score = candidate.get("score")
-            label = (
-                f"R{index + 1}: {float(score):.4f}"
-                if score is not None
-                else f"R{index + 1}"
-            )
-            text_rect = QRectF(
-                label_point.x(),
-                max(0.0, label_point.y() - 22.0),
-                150.0 if score is not None else 70.0,
-                20.0,
-            )
-            painter.fillRect(text_rect, QColor(0, 0, 0, 180))
-            painter.setPen(QColor("#ffffff"))
-            painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft, label)
+            if score is not None:
+                score_text = f"{float(score):.4f}"
+                text_rect = QRectF(
+                    label_point.x(),
+                    max(0.0, label_point.y() - 22.0),
+                    100.0,
+                    20.0,
+                )
+                painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+                painter.setPen(QColor("#ff1744"))
+                painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft, score_text)
         for shape in self.shapes:
             self._draw_shape(painter, shape, QColor("#00e676"))
 
@@ -373,8 +370,7 @@ class ImageCanvas(QWidget):
             if self.overlay_text:
                 painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
                 text_rect = QRectF(top_left.x(), top_left.y() - 24, 420, 22)
-                painter.fillRect(text_rect, QColor(0, 0, 0, 180))
-                painter.setPen(QColor("#ffffff"))
+                painter.setPen(self.overlay_color)
                 painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft, self.overlay_text)
         painter.end()
 
@@ -1089,7 +1085,7 @@ class MainWindow(QMainWindow):
                 self.right_canvas.set_image(source_path)
                 self.right_canvas.set_overlay_bbox(
                     result.get("bbox_original"),
-                    text=f"{library_name} ROI",
+                    text=f"distance={float(result.get('distance', 0.0)):.6f}",
                     color=overlay_color,
                 )
                 self.status_label.setText(
