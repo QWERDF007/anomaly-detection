@@ -658,12 +658,8 @@ def infer_image(
         posinf=np.finfo(np.float32).max,
         neginf=0.0,
     )
-    feature = (
-        feature.detach()
-        .cpu()
-        .numpy()
-        .astype(np.float32, copy=False)
-    )
+    if isinstance(feature, torch.Tensor):
+        feature = feature.detach().cpu().numpy().astype(np.float32, copy=False)
     return score_map, np.nan_to_num(feature)
 
 
