@@ -972,6 +972,7 @@ class MainWindow(QMainWindow):
             candidate = dict(region_data)
             candidate["color"] = "#00bcd4"
             candidate["label"] = None
+            candidate["is_judged"] = False
             match = self._find_detail_region(
                 regions,
                 candidate.get("bbox"),
@@ -991,6 +992,7 @@ class MainWindow(QMainWindow):
                     "#00c853" if label == "good" else "#ff1744"
                 )
                 candidate["score"] = adjusted
+                candidate["is_judged"] = True
             else:
                 unmatched_count += 1
             judged.append(candidate)
@@ -999,7 +1001,7 @@ class MainWindow(QMainWindow):
         judged_with_score = [
             candidate
             for candidate in judged
-            if candidate.get("score") is not None
+            if candidate.get("is_judged") and candidate.get("score") is not None
         ]
         if judged_with_score:
             strongest = max(
@@ -1122,6 +1124,9 @@ class MainWindow(QMainWindow):
         else:
             region_score = None
             lines.append("region_score = 未提供 score_map")
+        lines.append(
+            f"ROI 面积 = {roi_area} 像素（占图像 {self._area_ratio_text(roi_area)}）"
+        )
 
         if detail:
             matched = self._find_detail_region(
@@ -1490,12 +1495,31 @@ class MainWindow(QMainWindow):
         )
         return mask_path
 
+    def _min_component_area(self) -> int:
+        """Minimum candidate-region area from --min_area_pct (image %)."""
+
+        pct = float(getattr(self.args, "min_area_pct", 0.0))
+        if pct <= 0.0 or self.left_canvas.image is None:
+            return 0
+        return int(
+            round(
+                pct / 100.0
+                * self.left_canvas.image.width()
+                * self.left_canvas.image.height()
+            )
+        )
+
     def load_candidate_regions(
         self,
         image_path: Path,
         score_map: Optional[np.ndarray] = None,
     ) -> Optional[Path]:
-        """Load one mask and split it into selectable connected components."""
+        """Load one mask and split it into selectable connected components.
+
+        Components smaller than ``--min_area_pct`` percent of the image area
+        are filtered out; the adjusted-result canvas inherits the same filter
+        because it renders the same candidate list.
+        """
 
         self.left_canvas.clear_candidate_regions(emit=False)
         root = self._artifact_root("candidate_regions")
@@ -1504,11 +1528,26 @@ class MainWindow(QMainWindow):
         mask_path = self._artifact_path(root, image_path, ".png")
         if mask_path is None:
             return None
-        self.left_canvas.set_candidate_regions(
-            self._mask_components(mask_path, score_map),
-            emit=False,
-        )
+        components = self._mask_components(mask_path, score_map)
+        min_area = self._min_component_area()
+        if min_area > 0:
+            components = [
+                component
+                for component in components
+                if int(component["area"]) >= min_area
+            ]
+        self.left_canvas.set_candidate_regions(components, emit=False)
         return mask_path
+
+    def _area_ratio_text(self, area: int) -> str:
+        """Format an area in pixels as a percentage of the input image."""
+
+        if self.left_canvas.image is None:
+            return ""
+        total = self.left_canvas.image.width() * self.left_canvas.image.height()
+        if total <= 0:
+            return ""
+        return f"{float(area) / total * 100.0:.3f}%"
 
     def candidate_selection_changed(self) -> None:
         self.update_controls()
@@ -1520,7 +1559,9 @@ class MainWindow(QMainWindow):
             return
         region = self.left_canvas.candidate_regions[index]
         self.status_label.setText(
-            f"已选择候选区域 R{index + 1}（面积 {region['area']}），请点击‘查询特征库’。"
+            f"已选择候选区域 R{index + 1}（面积 {region['area']}，"
+            f"占图像 {self._area_ratio_text(int(region['area']))}），"
+            "请点击‘查询特征库’。"
         )
 
     def clear_query_selection(self) -> None:
@@ -1868,6 +1909,16 @@ def build_parser() -> argparse.ArgumentParser:
             "layout; LabelMe JSON (label 'good'/'ignore' skipped) or binary "
             "masks. Anomaly regions are drawn as red polygons on the first "
             "canvas."
+        ),
+    )
+    parser.add_argument(
+        "--min_area_pct",
+        type=float,
+        default=0.0,
+        help=(
+            "Minimum candidate-region area as a percentage of the input "
+            "image (e.g. 0.1 = 0.1%%); smaller regions are filtered out of "
+            "the candidate and adjusted-result canvases"
         ),
     )
     parser.add_argument("--output_dir", default="./gui_lookup_results")
