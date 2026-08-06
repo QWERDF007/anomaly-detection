@@ -318,15 +318,25 @@ class ImageCanvas(QWidget):
             return
         rect = self._image_rect(QPointF(0.0, 0.0))
         width, height = rect.width(), rect.height()
+        widget_width = float(self.width())
+        widget_height = float(self.height())
         pan_x, pan_y = self.pan.x(), self.pan.y()
-        if width <= float(self.width()):
+        if width <= widget_width:
             pan_x = 0.0
         else:
-            pan_x = min(max(pan_x, -(width - 40.0)), float(self.width()) - 40.0)
-        if height <= float(self.height()):
+            # rect.left = (W - w)/2 + pan_x must stay within
+            # [W - w - 40, 40] so every image edge is reachable.
+            center_x = (widget_width - width) / 2.0
+            min_pan_x = center_x - 40.0
+            max_pan_x = 40.0 - center_x
+            pan_x = min(max(pan_x, min_pan_x), max_pan_x)
+        if height <= widget_height:
             pan_y = 0.0
         else:
-            pan_y = min(max(pan_y, -(height - 40.0)), float(self.height()) - 40.0)
+            center_y = (widget_height - height) / 2.0
+            min_pan_y = center_y - 40.0
+            max_pan_y = 40.0 - center_y
+            pan_y = min(max(pan_y, min_pan_y), max_pan_y)
         self.pan = QPointF(pan_x, pan_y)
 
     def fit_to_window(self) -> None:
@@ -709,7 +719,8 @@ class MainWindow(QMainWindow):
 
         candidate_panel = QWidget()
         candidate_layout = QVBoxLayout(candidate_panel)
-        candidate_layout.addWidget(QLabel("候选区域 / 手动画 ROI（单选后查询）"))
+        self.candidate_panel_label = QLabel("候选区域 / 手动画 ROI（单选后查询）")
+        candidate_layout.addWidget(self.candidate_panel_label)
         candidate_layout.addWidget(self.left_canvas, 1)
 
         right_panel = QWidget()
@@ -720,7 +731,8 @@ class MainWindow(QMainWindow):
 
         adjust_panel = QWidget()
         adjust_layout = QVBoxLayout(adjust_panel)
-        adjust_layout.addWidget(QLabel("两阶段调整结果（完整：全图分数与全部区域）"))
+        self.adjust_panel_label = QLabel("两阶段调整结果")
+        adjust_layout.addWidget(self.adjust_panel_label)
         adjust_layout.addWidget(self.adjust_canvas, 1)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -1061,6 +1073,38 @@ class MainWindow(QMainWindow):
                     color=QColor("#ff1744"),
                     dashed=True,
                 )
+
+        # 整图最终结果（与计算面板同一套逻辑：调整后分数最大区域 + raw_score）
+        if regions:
+            strongest = max(
+                regions,
+                key=lambda region: (
+                    float(region.get("region_score", 0.0))
+                    + float(region.get("signed_offset", 0.0)),
+                    float(region.get("region_score", 0.0)),
+                ),
+            )
+            signed_offset = float(strongest.get("signed_offset", 0.0))
+            similar_library = str(strongest.get("similar_library", ""))
+        else:
+            signed_offset = 0.0
+            similar_library = ""
+        adjusted_score = raw_score + signed_offset
+        label, _reason = final_score_label(
+            adjusted_score,
+            good_threshold,
+            anomaly_threshold,
+            similar_library,
+        )
+        label_cn = "正常" if label == "good" else "异常"
+        color = "#00c853" if label == "good" else "#ff1744"
+        self.adjust_panel_label.setText(
+            f"两阶段调整结果（整图最终：{label_cn}，"
+            f"adjusted={adjusted_score:.4f}）"
+        )
+        self.adjust_panel_label.setStyleSheet(
+            f"color: {color}; font-weight: bold;"
+        )
 
     def _update_selected_region_calculation(self) -> None:
         """Show the whole-image final score and the selected ROI's calculation.
@@ -1553,25 +1597,64 @@ class MainWindow(QMainWindow):
         )
         return mask_path
 
+    def _load_detail_for(self, image_path: Path) -> Optional[Dict[str, Any]]:
+        details_path = self._prediction_details_path(image_path)
+        if details_path is None:
+            return None
+        try:
+            with details_path.open("r", encoding="utf-8") as file:
+                return json.load(file)
+        except (OSError, json.JSONDecodeError):
+            return None
+
     def load_candidate_regions(
         self,
         image_path: Path,
         score_map: Optional[np.ndarray] = None,
     ) -> Optional[Path]:
-        """Load one mask and split it into selectable connected components."""
+        """Load one mask and split it into selectable connected components.
+
+        Directly-classified anomaly images have no middle-band candidates; in
+        that case the raw threshold regions are shown instead so ROIs can
+        still be queried.  The panel title states the image band.
+        """
 
         self.left_canvas.clear_candidate_regions(emit=False)
         root = self._artifact_root("candidate_regions")
-        if root is None:
-            return None
-        mask_path = self._artifact_path(root, image_path, ".png")
-        if mask_path is None:
-            return None
-        self.left_canvas.set_candidate_regions(
-            self._mask_components(mask_path, score_map),
-            emit=False,
-        )
-        return mask_path
+        band = str((self._load_detail_for(image_path) or {}).get("initial_label", ""))
+        fallback_used = False
+        mask_path = None
+        if root is not None:
+            mask_path = self._artifact_path(root, image_path, ".png")
+        components = []
+        if mask_path is not None:
+            components = self._mask_components(mask_path, score_map)
+        if not components and band == "anomaly":
+            raw_root = self._artifact_root("raw_regions")
+            if raw_root is not None:
+                raw_mask_path = self._artifact_path(raw_root, image_path, ".png")
+                if raw_mask_path is not None:
+                    raw_components = self._mask_components(raw_mask_path, score_map)
+                    if raw_components:
+                        components = raw_components
+                        fallback_used = True
+        self.left_canvas.set_candidate_regions(components, emit=False)
+        self._update_candidate_band_label(band, fallback_used)
+        return mask_path if not fallback_used else None
+
+    def _update_candidate_band_label(self, band: str, fallback_used: bool) -> None:
+        if band == "middle":
+            text = "候选区域 / 手动画 ROI（中间带图：预测候选，单选后查询）"
+        elif band == "anomaly":
+            if fallback_used:
+                text = "候选区域 / 手动画 ROI（异常图：显示原始阈值区域）"
+            else:
+                text = "候选区域 / 手动画 ROI（异常图：无候选区域）"
+        elif band == "good":
+            text = "候选区域 / 手动画 ROI（良品图：无候选区域）"
+        else:
+            text = "候选区域 / 手动画 ROI（单选后查询）"
+        self.candidate_panel_label.setText(text)
 
     def _area_ratio_text(self, area: int) -> str:
         """Format an area in pixels as a percentage of the input image."""
