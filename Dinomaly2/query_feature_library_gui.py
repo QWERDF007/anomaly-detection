@@ -1719,7 +1719,7 @@ class MainWindow(QMainWindow):
             key=lambda path: str(path).casefold(),
         )
 
-        groups: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        groups: Dict[str, Dict[str, Dict[str, List[Dict[str, Any]]]]] = {}
         for image_path in image_paths:
             try:
                 relative = image_path.relative_to(self.images_root)
@@ -1728,6 +1728,7 @@ class MainWindow(QMainWindow):
             group = relative.parts[0] if relative.parts else ""
             raw_score = None
             adjusted_score = None
+            initial_label = ""
             final_label = ""
             details_path = self._prediction_details_path(image_path)
             if details_path is not None:
@@ -1740,58 +1741,85 @@ class MainWindow(QMainWindow):
                         raw_score = None
                     if not np.isfinite(adjusted_score):
                         adjusted_score = None
+                    initial_label = str(detail.get("initial_label", ""))
                     final_label = str(detail.get("final_label", ""))
                 except (OSError, json.JSONDecodeError, TypeError, ValueError):
                     pass
-            groups.setdefault(group, {}).setdefault(final_label, []).append(
+            groups.setdefault(group, {}).setdefault(initial_label, {}).setdefault(
+                final_label, []
+            ).append(
                 {
                     "path": image_path,
                     "group": group,
                     "raw": raw_score,
                     "adjusted": adjusted_score,
+                    "initial_label": initial_label,
                     "final_label": final_label,
                 }
             )
 
-        label_order = {"good": 0, "anomaly": 1, "": 2}
-        for group, label_groups in sorted(groups.items()):
+        label_order = {"good": 0, "middle": 1, "anomaly": 2, "": 3}
+        for group, initial_groups in sorted(groups.items()):
             group_item = QTreeWidgetItem(
-                [f"{group}（{sum(len(r) for r in label_groups.values())}）"]
+                [
+                    f"{group}（{sum(len(r) for rows in initial_groups.values() for r in rows.values())}）"
+                ]
             )
             self.file_tree.addTopLevelItem(group_item)
-            for final_label, rows in sorted(
-                label_groups.items(),
-                key=lambda item: label_order.get(item[0], 2),
+            for initial_label, final_groups in sorted(
+                initial_groups.items(),
+                key=lambda item: label_order.get(item[0], 3),
             ):
-                rows.sort(
-                    key=lambda row: (
-                        row["adjusted"]
-                        if row["adjusted"] is not None
-                        else float("inf"),
-                    )
-                )
-                final_cn = {
+                initial_cn = {
                     "good": "正常",
+                    "middle": "中间带",
                     "anomaly": "异常",
-                }.get(final_label, "无详情")
-                label_item = QTreeWidgetItem([f"{final_cn}（{len(rows)}）"])
-                group_item.addChild(label_item)
-                for row in rows:
-                    raw_text = f"{row['raw']:.4f}" if row["raw"] is not None else "—"
-                    adjusted_text = (
-                        f"{row['adjusted']:.4f}"
-                        if row["adjusted"] is not None
-                        else "—"
+                }.get(initial_label, "无详情")
+                initial_item = QTreeWidgetItem(
+                    [
+                        f"{initial_cn}（{sum(len(r) for r in final_groups.values())}）"
+                    ]
+                )
+                group_item.addChild(initial_item)
+                for final_label, rows in sorted(
+                    final_groups.items(),
+                    key=lambda item: label_order.get(item[0], 3),
+                ):
+                    rows.sort(
+                        key=lambda row: (
+                            row["adjusted"]
+                            if row["adjusted"] is not None
+                            else float("inf"),
+                        )
                     )
-                    item = QTreeWidgetItem(
-                        [f"{row['path'].name}  raw={raw_text}  adj={adjusted_text}"]
-                    )
-                    item.setData(0, Qt.ItemDataRole.UserRole, str(row["path"]))
-                    item.setToolTip(0, str(row["path"]))
-                    label_item.addChild(item)
-                    row["item"] = item
-                    self._file_rows.append(row)
-                label_item.setExpanded(True)
+                    final_cn = {
+                        "good": "正常",
+                        "anomaly": "异常",
+                    }.get(final_label, "无详情")
+                    final_item = QTreeWidgetItem([f"{final_cn}（{len(rows)}）"])
+                    initial_item.addChild(final_item)
+                    for row in rows:
+                        raw_text = (
+                            f"{row['raw']:.4f}" if row["raw"] is not None else "—"
+                        )
+                        adjusted_text = (
+                            f"{row['adjusted']:.4f}"
+                            if row["adjusted"] is not None
+                            else "—"
+                        )
+                        item = QTreeWidgetItem(
+                            [
+                                f"{row['path'].name}  raw={raw_text}  "
+                                f"adj={adjusted_text}"
+                            ]
+                        )
+                        item.setData(0, Qt.ItemDataRole.UserRole, str(row["path"]))
+                        item.setToolTip(0, str(row["path"]))
+                        final_item.addChild(item)
+                        row["item"] = item
+                        self._file_rows.append(row)
+                    final_item.setExpanded(True)
+                initial_item.setExpanded(True)
             group_item.setExpanded(True)
 
     def _apply_search(self, text: str) -> None:
@@ -1810,19 +1838,28 @@ class MainWindow(QMainWindow):
         for index in range(self.file_tree.topLevelItemCount()):
             group_item = self.file_tree.topLevelItem(index)
             for child_index in range(group_item.childCount()):
-                label_item = group_item.child(child_index)
-                if label_item.childCount() == 0:
+                initial_item = group_item.child(child_index)
+                if initial_item.childCount() == 0:
                     continue
-                visible = any(
-                    not label_item.child(leaf).isHidden()
-                    for leaf in range(label_item.childCount())
+                for final_index in range(initial_item.childCount()):
+                    final_item = initial_item.child(final_index)
+                    if final_item.childCount() == 0:
+                        continue
+                    visible = any(
+                        not final_item.child(leaf).isHidden()
+                        for leaf in range(final_item.childCount())
+                    )
+                    final_item.setHidden(not visible)
+                initial_visible = any(
+                    not initial_item.child(fi).isHidden()
+                    for fi in range(initial_item.childCount())
                 )
-                label_item.setHidden(not visible)
+                initial_item.setHidden(not initial_visible)
             if group_item.childCount() == 0:
                 continue
             group_visible = any(
-                not group_item.child(child_index).isHidden()
-                for child_index in range(group_item.childCount())
+                not group_item.child(ci).isHidden()
+                for ci in range(group_item.childCount())
             )
             group_item.setHidden(not group_visible)
 

@@ -19,6 +19,7 @@ import argparse
 import csv
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -385,6 +386,10 @@ def predict_images(args) -> int:
         else "features"
     )
     cache_root.mkdir(parents=True, exist_ok=True)
+    process_size = int(args.process_size)
+    cache_hits = 0
+    computed = 0
+    start_time = time.time()
     for image_path, image_relative, dataset_label in tqdm(
         image_entries,
         desc="Dinomaly2 dual-threshold prediction",
@@ -411,6 +416,7 @@ def predict_images(args) -> int:
         if cached:
             score_map = np.load(score_path)
             feature = np.load(feature_path)
+            cache_hits += 1
         else:
             score_map, feature = infer_image(
                 model,
@@ -426,6 +432,13 @@ def predict_images(args) -> int:
             np.save(score_path, score_map)
             feature_path.parent.mkdir(parents=True, exist_ok=True)
             np.save(feature_path, feature)
+            computed += 1
+        if process_size > 0:
+            score_map = cv2.resize(
+                score_map,
+                (process_size, process_size),
+                interpolation=cv2.INTER_LINEAR,
+            )
         raw_score = float(np.max(score_map)) if score_map.size else 0.0
         initial_label = initial_score_label(
             raw_score,
@@ -535,6 +548,7 @@ def predict_images(args) -> int:
             "raw_score": raw_score,
             "good_threshold": float(args.good_threshold),
             "anomaly_threshold": float(args.anomaly_threshold),
+            "process_size": process_size,
             "initial_label": initial_label,
             "adjusted_score": adjusted_score,
             "final_label": final_label,
@@ -659,6 +673,7 @@ def predict_images(args) -> int:
                     "roi_dilation": args.roi_dilation,
                     "min_area_pct": args.min_area_pct,
                     "max_regions": args.max_regions,
+                    "process_size": process_size,
                     "density_points": args.density_points,
                     "feature_merge": args.feature_merge,
                     "roi_size": args.roi_size,
@@ -670,6 +685,14 @@ def predict_images(args) -> int:
             ensure_ascii=False,
             indent=2,
         )
+    elapsed = time.time() - start_time
+    print(
+        f"Prediction finished: {len(image_entries)} images, "
+        f"{cache_hits} cache hits, {computed} computed, "
+        f"elapsed {elapsed:.1f}s "
+        f"({elapsed / max(len(image_entries), 1) * 1000.0:.0f} ms/image)",
+        flush=True,
+    )
     return 0
 
 
@@ -713,7 +736,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help=(
             "Minimum connected-component area as a percentage of the image "
-            "area (e.g. 0.1 = 0.1%); applied on top of --min_area"
+            "area (e.g. 0.1 = 0.1%)"
+        ),
+    )
+    parser.add_argument(
+        "--process_size",
+        type=int,
+        default=0,
+        help=(
+            "Downsample the score map to this square resolution before "
+            "thresholding, connected components and mask writing "
+            "(0 = keep the original resolution)"
         ),
     )
     parser.add_argument("--max_regions", type=int, default=0)
