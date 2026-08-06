@@ -1728,7 +1728,7 @@ class MainWindow(QMainWindow):
             group = relative.parts[0] if relative.parts else ""
             raw_score = None
             adjusted_score = None
-            initial_label = ""
+            final_label = ""
             details_path = self._prediction_details_path(image_path)
             if details_path is not None:
                 try:
@@ -1740,28 +1740,28 @@ class MainWindow(QMainWindow):
                         raw_score = None
                     if not np.isfinite(adjusted_score):
                         adjusted_score = None
-                    initial_label = str(detail.get("initial_label", ""))
+                    final_label = str(detail.get("final_label", ""))
                 except (OSError, json.JSONDecodeError, TypeError, ValueError):
                     pass
-            groups.setdefault(group, {}).setdefault(initial_label, []).append(
+            groups.setdefault(group, {}).setdefault(final_label, []).append(
                 {
                     "path": image_path,
                     "group": group,
                     "raw": raw_score,
                     "adjusted": adjusted_score,
-                    "initial_label": initial_label,
+                    "final_label": final_label,
                 }
             )
 
-        label_order = {"good": 0, "middle": 1, "anomaly": 2, "": 3}
+        label_order = {"good": 0, "anomaly": 1, "": 2}
         for group, label_groups in sorted(groups.items()):
             group_item = QTreeWidgetItem(
                 [f"{group}（{sum(len(r) for r in label_groups.values())}）"]
             )
             self.file_tree.addTopLevelItem(group_item)
-            for initial_label, rows in sorted(
+            for final_label, rows in sorted(
                 label_groups.items(),
-                key=lambda item: label_order.get(item[0], 3),
+                key=lambda item: label_order.get(item[0], 2),
             ):
                 rows.sort(
                     key=lambda row: (
@@ -1770,12 +1770,11 @@ class MainWindow(QMainWindow):
                         else float("inf"),
                     )
                 )
-                initial_cn = {
+                final_cn = {
                     "good": "正常",
-                    "middle": "中间带",
                     "anomaly": "异常",
-                }.get(initial_label, "无详情")
-                label_item = QTreeWidgetItem([f"{initial_cn}（{len(rows)}）"])
+                }.get(final_label, "无详情")
+                label_item = QTreeWidgetItem([f"{final_cn}（{len(rows)}）"])
                 group_item.addChild(label_item)
                 for row in rows:
                     raw_text = f"{row['raw']:.4f}" if row["raw"] is not None else "—"
