@@ -34,8 +34,10 @@ if str(_UTILS_DIR) not in sys.path:
 
 from anomaly_evaluation import (  # noqa: E402
     max_f1,
+    pixel_f1_score_and_threshold,
     safe_ap,
     safe_auroc,
+    safe_aupro,
     write_metrics,
 )
 
@@ -52,6 +54,7 @@ from dinomaly_two_stage import (
     l2_normalize,
     load_dinomaly_model,
     load_feature_library,
+    load_mask,
     load_patch_backbone,
     mask_bbox,
     record_for_vector_id,
@@ -402,6 +405,86 @@ def evaluate_image_level(
     return evaluations
 
 
+def evaluate_pixel_level(
+    rows: Sequence[Mapping[str, Any]],
+    output_dir: Path,
+    ground_truth_dir: Optional[Path],
+    metric_size: int,
+) -> Dict[str, float]:
+    """Evaluate pixel-level metrics on the saved score maps.
+
+    The two-stage adjustment only changes image-level scores, so the pixel
+    metrics are computed once on the raw score maps and reused by both
+    evaluations.  Only anomaly images with a ground-truth mask contribute.
+    """
+
+    if ground_truth_dir is None:
+        print("未提供 GT 目录，跳过像素级评估。", flush=True)
+        return {}
+    anomaly_maps = []
+    gt_masks = []
+    skipped = 0
+    for row in rows:
+        if str(row.get("dataset_label", "")) == "good":
+            continue
+        image_relative = Path(row["image_relative"])
+        score_path = (
+            output_dir / "score_maps" / image_relative.with_suffix(".npy")
+        )
+        if not score_path.is_file():
+            continue
+        score_map = np.asarray(np.load(score_path), dtype=np.float32)
+        gt_path = None
+        for suffix in (".png", ".jpg", ".jpeg", ".npy", ".tif", ".json"):
+            candidate = ground_truth_dir / image_relative.with_suffix(suffix)
+            if candidate.is_file():
+                gt_path = candidate
+                break
+        if gt_path is None:
+            skipped += 1
+            continue
+        try:
+            gt_mask = load_mask(gt_path, score_map.shape[:2])
+        except (OSError, ValueError) as error:
+            LOGGER.warning("Skipping GT %s: %s", gt_path, error)
+            skipped += 1
+            continue
+        anomaly_maps.append(score_map)
+        gt_masks.append(gt_mask.astype(np.uint8))
+    if not anomaly_maps:
+        print(f"无可用 GT 掩码（跳过 {skipped} 张），无法计算像素级指标。", flush=True)
+        return {}
+    target = (int(metric_size), int(metric_size))
+    maps = np.stack(
+        [
+            cv2.resize(score_map, target, interpolation=cv2.INTER_LINEAR)
+            for score_map in anomaly_maps
+        ]
+    ).astype(np.float32)
+    masks = np.stack(
+        [
+            cv2.resize(gt_mask, target, interpolation=cv2.INTER_NEAREST)
+            for gt_mask in gt_masks
+        ]
+    ).astype(np.uint8)
+    masks = (masks > 0).astype(np.uint8)
+    pixel_labels = masks.reshape(-1)
+    pixel_scores = maps.reshape(-1)
+    pixel_f1, _ = pixel_f1_score_and_threshold(masks, maps)
+    metrics = {
+        "P-AUROC": safe_auroc(pixel_labels, pixel_scores),
+        "P-AP": safe_ap(pixel_labels, pixel_scores),
+        "P-F1": pixel_f1,
+        "P-AUPRO": safe_aupro(masks, maps, show_progress=False),
+    }
+    print(
+        "\n像素级评估（score maps，两阶段共用）："
+        + "  ".join(f"{k}={v:.4f}" for k, v in metrics.items()),
+        flush=True,
+    )
+    return metrics
+
+
 def predict_images(args) -> int:
     data_root = Path(args.data_root).expanduser()
     image_entries = collect_data_root_images(data_root)
@@ -747,7 +830,18 @@ def predict_images(args) -> int:
         f"({elapsed / max(len(image_entries), 1) * 1000.0:.0f} ms/image)",
         flush=True,
     )
-    evaluate_image_level(rows, output_dir)
+    evaluations = evaluate_image_level(rows, output_dir)
+    if args.ground_truth_dir:
+        ground_truth_dir = Path(args.ground_truth_dir).expanduser()
+    else:
+        ground_truth_dir = data_root / "ground_truth"
+    if not ground_truth_dir.is_dir():
+        ground_truth_dir = None
+    pixel_metrics = evaluate_pixel_level(rows, output_dir, ground_truth_dir, args.metric_size)
+    if pixel_metrics:
+        for stage_metrics in evaluations.values():
+            stage_metrics.update(pixel_metrics)
+        write_metrics(evaluations, output_dir)
     return 0
 
 
@@ -825,6 +919,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max_offset", type=float, default=None)
     parser.add_argument("--offset_eps", type=float, default=1e-8)
+    parser.add_argument(
+        "--ground_truth_dir",
+        default=None,
+        help=(
+            "GT anomaly mask directory mirroring --data_root's layout; "
+            "defaults to --data_root/ground_truth. Used for pixel-level "
+            "evaluation after prediction."
+        ),
+    )
+    parser.add_argument(
+        "--metric_size",
+        type=int,
+        default=256,
+        help="Side length used for pixel-metric arrays (default: 256)",
+    )
     parser.add_argument(
         "--recompute_features",
         action="store_true",
