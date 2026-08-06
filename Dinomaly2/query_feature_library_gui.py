@@ -686,7 +686,15 @@ class MainWindow(QMainWindow):
         self.result_table.horizontalHeader().setSectionResizeMode(
             2, QHeaderView.ResizeMode.ResizeToContents
         )
-        self.result_table.setMinimumHeight(150)
+        self.result_table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.result_table.setMinimumHeight(120)
+        self.result_table.setMaximumHeight(320)
+        self.result_table_scroll = QScrollArea()
+        self.result_table_scroll.setWidgetResizable(True)
+        self.result_table_scroll.setWidget(self.result_table)
+        self.result_table_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.result_table_scroll.setMinimumHeight(120)
+        self.result_table_scroll.setMaximumHeight(320)
 
         controls = QHBoxLayout()
         controls.addWidget(QLabel("图像根目录/搜索："))
@@ -709,7 +717,11 @@ class MainWindow(QMainWindow):
         self.file_tree = QTreeWidget()
         self.file_tree.setHeaderHidden(True)
         self.file_tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.file_tree.setColumnWidth(0, 300)
+        self.file_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.file_tree.setTextElideMode(Qt.TextElideMode.ElideRight)
         file_layout.addWidget(self.file_tree, 1)
+        file_panel.setMaximumWidth(560)
 
         raw_panel = QWidget()
         raw_layout = QVBoxLayout(raw_panel)
@@ -727,7 +739,7 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(right_panel)
         right_layout.addWidget(QLabel("最近邻原图 / 对应 ROI（良品库绿色，异常库红色）"))
         right_layout.addWidget(self.right_canvas, 1)
-        right_layout.addWidget(self.result_table)
+        right_layout.addWidget(self.result_table_scroll)
 
         adjust_panel = QWidget()
         adjust_layout = QVBoxLayout(adjust_panel)
@@ -741,6 +753,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(candidate_panel)
         splitter.addWidget(right_panel)
         splitter.addWidget(adjust_panel)
+        splitter.setChildrenCollapsible(False)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 1)
