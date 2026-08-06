@@ -845,7 +845,7 @@ class MainWindow(QMainWindow):
                         f"{len(self.raw_canvas.candidate_regions)} 个。"
                     )
             self.update_controls()
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, TypeError) as error:
             QMessageBox.critical(self, "打开失败", str(error))
 
     def fit_all_canvases(self) -> None:
@@ -1015,7 +1015,7 @@ class MainWindow(QMainWindow):
                 regions,
                 candidate.get("bbox"),
                 candidate.get("area"),
-                process_size=int(detail.get("process_size", 0)),
+                process_size=int(detail.get("process_size") or 0),
                 image_shape=(
                     self.left_canvas.image.height(),
                     self.left_canvas.image.width(),
@@ -1176,7 +1176,7 @@ class MainWindow(QMainWindow):
                 detail.get("regions", []),
                 roi_bbox,
                 roi_area,
-                process_size=int(detail.get("process_size", 0)),
+                process_size=int(detail.get("process_size") or 0),
                 image_shape=(
                     self.left_canvas.image.height(),
                     self.left_canvas.image.width(),
