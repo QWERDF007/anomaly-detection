@@ -1717,8 +1717,13 @@ def predict_images(args) -> int:
     return 0
 
 
-def add_model_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--model", required=True, help="Dinomaly2 model.pth checkpoint")
+def add_model_arguments(parser: argparse.ArgumentParser, model_required: bool = True) -> None:
+    parser.add_argument(
+        "--model",
+        required=model_required,
+        default=None,
+        help="Dinomaly2 model.pth checkpoint",
+    )
     parser.add_argument(
         "--backbone",
         default="dinov2reg_vit_small_14",

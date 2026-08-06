@@ -21,13 +21,9 @@ import numpy as np
 from PIL import Image
 
 from dinomaly_two_stage import (
-    add_model_arguments,
-    build_transform,
     connected_components,
     dilate_mask,
-    extract_encoder_feature,
     l2_normalize,
-    load_dinomaly_model,
     load_feature_library,
     load_mask,
     make_image_id,
@@ -68,6 +64,46 @@ def load_score_region_mask(
     return np.asarray(score_map > float(threshold), dtype=bool)
 
 
+def load_cached_feature(args, input_path: Path, libraries) -> np.ndarray:
+    """Load the cached second-stage feature map for the query image.
+
+    The cache root is derived from the libraries: ``<root>/preds/features``
+    (or ``features_raw_patch`` when the library uses raw patch tokens).  The
+    image is matched by its file name; the query fails unless exactly one
+    cached feature exists, so the model is never needed.
+    """
+
+    library = libraries[0]
+    root = library.index_path.parent.parent
+    source = str(library.metadata.get("feature_source", ""))
+    cache_root = root / "preds" / (
+        "features_raw_patch" if source == "raw_patch" else "features"
+    )
+    if not cache_root.is_dir():
+        raise RuntimeError(
+            f"Feature cache directory missing: {cache_root}. "
+            "Run dinomaly_two_threshold_predict.py first."
+        )
+    matches = sorted(
+        path
+        for path in cache_root.rglob(f"{input_path.stem}.npy")
+        if path.is_file()
+    )
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"Expected exactly one cached feature for {input_path} under "
+            f"{cache_root}; found {len(matches)}. "
+            "Run dinomaly_two_threshold_predict.py first."
+        )
+    feature = np.asarray(np.load(matches[0]), dtype=np.float32)
+    if feature.ndim != 3:
+        raise ValueError(
+            f"Cached feature must be CHW: {matches[0]}; got {feature.shape}"
+        )
+    LOGGER.info("Using cached feature: %s", matches[0])
+    return np.nan_to_num(feature)
+
+
 def resolve_library_paths(args) -> List[Path]:
     paths = [Path(path).expanduser() for path in args.library]
     paths.extend(
@@ -91,20 +127,22 @@ def resolve_library_paths(args) -> List[Path]:
 
 
 def validate_query_libraries(libraries, args) -> None:
-    expected = {
-        "backbone": args.backbone,
-        "feature_merge": args.feature_merge,
-        "roi_size": int(args.roi_size),
-        "image_size": int(args.image_size),
-        "crop_size": int(args.crop_size),
-    }
-    for library in libraries:
-        for key, value in expected.items():
-            stored = library.metadata.get(key)
-            if stored is not None and stored != value:
+    """Check that all libraries share one feature configuration.
+
+    The query parameters come from the cached features and the library
+    metadata; the first library defines the expected ``roi_size`` and
+    feature layout, and every library must agree with it.
+    """
+
+    reference = libraries[0]
+    for key in ("feature_dim", "feature_source", "roi_size", "normalize", "backbone"):
+        stored = reference.metadata.get(key)
+        for library in libraries[1:]:
+            other = library.metadata.get(key)
+            if stored is not None and other is not None and stored != other:
                 raise ValueError(
-                    f"Query {key}={value!r} does not match "
-                    f"{library.index_path} metadata {stored!r}."
+                    f"Library {key} differs: {reference.index_path} {stored!r} "
+                    f"vs {library.index_path} {other!r}"
                 )
 
 
@@ -150,27 +188,22 @@ def query_feature_library(args) -> int:
         for path in library_paths
     ]
     validate_query_libraries(libraries, args)
-    model = load_dinomaly_model(args, device)
-    transform = build_transform(args)
-    feature = extract_encoder_feature(
-        model,
-        input_path,
-        transform,
-        device,
-        args.feature_merge,
-    )
+    feature = load_cached_feature(args, input_path, libraries)
     feature_shape = feature.shape[-2:]
     query_image_relative = input_path.name
     query_image_id = make_image_id(query_image_relative)
     results: List[Dict[str, Any]] = []
     vanished_count = 0
+    image_size = int(libraries[0].metadata.get("image_size", 672))
+    crop_size = int(libraries[0].metadata.get("crop_size", 672))
+    roi_size = int(libraries[0].metadata.get("roi_size", 7))
 
     for component in components:
         mask_feature = resize_mask_to_feature(
             preprocess_mask(
                 component["mask"],
-                args.image_size,
-                args.crop_size,
+                image_size,
+                crop_size,
             ),
             feature_shape,
         )
@@ -186,7 +219,7 @@ def query_feature_library(args) -> int:
         vector = roi_align_masked(
             feature,
             mask_feature,
-            args.roi_size,
+            roi_size,
             device,
         )
         for library in libraries:
@@ -321,7 +354,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Find source images and ROIs for an input Dinomaly2 anomaly region"
     )
-    add_model_arguments(parser)
+    parser.add_argument("--gpu", "--cuda", dest="gpu", type=int, default=0)
     parser.add_argument("--input", required=True, help="One query image")
     region = parser.add_mutually_exclusive_group(required=True)
     region.add_argument("--region_mask", "--anomaly_mask", dest="region_mask")
@@ -345,8 +378,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def validate_args(args) -> None:
-    if args.roi_size < 1:
-        raise ValueError("roi_size must be positive")
     if args.min_area < 1:
         raise ValueError("min_area must be at least 1")
     if args.max_regions < 0:

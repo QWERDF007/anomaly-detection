@@ -612,7 +612,7 @@ class MainWindow(QMainWindow):
         self.images_root: Optional[Path] = None
         self._file_rows: List[Dict[str, Any]] = []
         self.setWindowTitle(
-            f"Dinomaly2 ROI 特征库反查 — root: {Path(self.args.root).expanduser()}"
+            f"Dinomaly2 ROI 特征库反查 — preds: {Path(self.args.preds).expanduser()}"
         )
         self.resize(2300, 950)
 
@@ -950,11 +950,8 @@ class MainWindow(QMainWindow):
         return None
 
     def _prediction_details_path(self, image_path: Path) -> Optional[Path]:
-        root = Path(self.args.root).expanduser()
-        prediction_dir = root / "preds"
-        if not prediction_dir.is_dir():
-            prediction_dir = root
-        details_root = prediction_dir / "details"
+        preds = self._preds_dir()
+        details_root = preds / "details"
         if not details_root.is_dir():
             return None
         return self._artifact_path(details_root, image_path, ".json")
@@ -1292,17 +1289,16 @@ class MainWindow(QMainWindow):
             f"{label_cn}</span>（{reason_cn}）"
         )
 
-    def _artifact_root(self, artifact_name: str) -> Optional[Path]:
-        """Return an explicit artifact root or one under --root (preds/)."""
+    def _preds_dir(self) -> Path:
+        return Path(self.args.preds).expanduser()
 
-        configured = getattr(self.args, artifact_name, None)
-        if configured:
-            return Path(configured).expanduser()
-        root = Path(self.args.root).expanduser()
-        prediction_dir = root / "preds"
-        if (prediction_dir / artifact_name).is_dir():
-            return prediction_dir / artifact_name
-        return root / artifact_name
+    def _artifact_root(self, artifact_name: str) -> Optional[Path]:
+        """Return ``preds/<artifact_name>`` or None when preds is missing."""
+
+        preds = self._preds_dir()
+        if not preds.is_dir():
+            return None
+        return preds / artifact_name
 
     def _artifact_path(
         self,
@@ -1764,12 +1760,10 @@ class MainWindow(QMainWindow):
 
     def _query_arguments(self, mask_path: Path, run_dir: Path) -> List[str]:
         query_script = Path(__file__).with_name("query_feature_library.py")
-        root = Path(self.args.root).expanduser()
+        root = self._preds_dir().parent
         arguments = [
             "-u",
             str(query_script),
-            "--model",
-            str(Path(self.args.model).expanduser()),
             "--input",
             str(self.left_canvas.image_path.resolve()),
             "--region_mask",
@@ -1782,24 +1776,6 @@ class MainWindow(QMainWindow):
             str(self.args.top_k),
             "--output_dir",
             str(run_dir),
-            "--backbone",
-            self.args.backbone,
-            "--image_size",
-            str(self.args.image_size),
-            "--crop_size",
-            str(self.args.crop_size),
-            "--dropout",
-            str(self.args.dropout),
-            "--la",
-            str(self.args.la),
-            "--lc",
-            str(self.args.lc),
-            "--cr",
-            str(self.args.cr),
-            "--feature_merge",
-            self.args.feature_merge,
-            "--roi_size",
-            str(self.args.roi_size),
             "--gpu",
             str(self.args.gpu),
         ]
@@ -2002,63 +1978,23 @@ def build_parser() -> argparse.ArgumentParser:
             "querying ROI feature libraries"
         )
     )
-    parser.add_argument("--model", required=True)
     parser.add_argument(
-        "--root",
+        "--preds",
         required=True,
         help=(
-            "Root directory containing good/, anomaly/ feature libraries and "
-            "preds/ prediction output (score_maps/, raw_regions/, "
-            "candidate_regions/, details/, run.json)"
-        ),
-    )
-    parser.add_argument("--backbone", default="dinov2reg_vit_small_14")
-    parser.add_argument("--image_size", type=int, default=672)
-    parser.add_argument("--crop_size", type=int, default=672)
-    parser.add_argument("--dropout", type=float, default=0.4)
-    parser.add_argument("--la", type=int, default=1)
-    parser.add_argument("--lc", type=int, default=2)
-    parser.add_argument("--cr", type=int, default=1)
-    parser.add_argument("--feature_merge", choices=("mean", "concat"), default="mean")
-    parser.add_argument("--roi_size", type=int, default=7)
-    parser.add_argument("--top_k", type=int, default=1)
-    parser.add_argument("--gpu", "--cuda", dest="gpu", type=int, default=0)
-    parser.add_argument("--faiss_on_gpu", action="store_true")
-    parser.add_argument("--good_threshold", type=float, default=0.5)
-    parser.add_argument("--anomaly_threshold", type=float, default=0.7)
-    parser.add_argument("--offset_scale", type=float, default=1.0)
-    parser.add_argument("--max_offset", type=float, default=None)
-    parser.add_argument("--offset_eps", type=float, default=1e-8)
-    parser.add_argument("--input", default=None, help="Optional initial input image")
-    parser.add_argument(
-        "--score_maps",
-        default=None,
-        help=(
-            "Optional score-map .npy file or directory; defaults to "
-            "--root/preds/score_maps"
-        ),
-    )
-    parser.add_argument(
-        "--raw_regions",
-        default=None,
-        help=(
-            "Optional raw good-threshold Mask file or directory; defaults to "
-            "--root/preds/raw_regions"
-        ),
-    )
-    parser.add_argument(
-        "--candidate_regions",
-        default=None,
-        help=(
-            "Optional candidate-region mask file or directory; defaults to "
-            "--root/preds/candidate_regions. A directory is matched by "
-            "input's data_root-relative path and .png suffix."
+            "Output directory of dinomaly_two_threshold_predict.py "
+            "(<root>/preds/); the good/ anomaly/ libraries are read from its "
+            "parent and all artifacts (score_maps/, raw_regions/, "
+            "candidate_regions/, details/, run.json) from this directory"
         ),
     )
     parser.add_argument(
         "--data_root",
         default=None,
-        help="Optional input root used to map input images to candidate_regions/<relative>.png",
+        help=(
+            "Optional image root containing good/ and bad/ subdirectories; "
+            "drives the left file list (grouped, sorted by adjusted score)"
+        ),
     )
     parser.add_argument(
         "--mask_dir",
@@ -2070,24 +2006,32 @@ def build_parser() -> argparse.ArgumentParser:
             "canvas."
         ),
     )
+    parser.add_argument("--input", default=None, help="Optional initial input image")
+    parser.add_argument("--top_k", type=int, default=1)
+    parser.add_argument("--gpu", "--cuda", dest="gpu", type=int, default=0)
+    parser.add_argument("--faiss_on_gpu", action="store_true")
     parser.add_argument("--output_dir", default="./gui_lookup_results")
     return parser
 
 
 def load_prediction_config(args) -> Dict[str, Any]:
-    """Overlay thresholds/offset settings from ``root/preds/run.json``.
+    """Overlay thresholds/offset settings from ``preds/run.json``.
 
     The two-threshold predictor records the exact parameters it used in
     ``run.json``, so the on-screen calculation matches the actual prediction.
+    Defaults are applied first, then the run.json values.
     """
 
-    root = Path(args.root).expanduser()
-    run_path = None
-    for candidate in (root / "preds" / "run.json", root / "run.json"):
-        if candidate.is_file():
-            run_path = candidate
-            break
-    if run_path is None:
+    for key, default in (
+        ("good_threshold", 0.5),
+        ("anomaly_threshold", 0.7),
+        ("offset_scale", 1.0),
+        ("max_offset", None),
+        ("offset_eps", 1e-8),
+    ):
+        setattr(args, key, default)
+    run_path = Path(args.preds).expanduser() / "run.json"
+    if not run_path.is_file():
         return {}
     try:
         with run_path.open("r", encoding="utf-8") as file:
@@ -2121,12 +2065,15 @@ def load_prediction_config(args) -> Dict[str, Any]:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    root = Path(args.root).expanduser()
-    if not root.is_dir():
-        raise SystemExit(f"--root does not exist: {root}")
+    preds = Path(args.preds).expanduser()
+    if not preds.is_dir():
+        raise SystemExit(f"--preds does not exist: {preds}")
+    root = preds.parent
     for subdir in ("good", "anomaly"):
         if not (root / subdir).is_dir():
-            raise SystemExit(f"--root must contain a {subdir}/ directory: {root}")
+            raise SystemExit(
+                f"--preds parent must contain a {subdir}/ directory: {root}"
+            )
     load_prediction_config(args)
     if args.good_threshold >= args.anomaly_threshold:
         raise SystemExit(
