@@ -831,17 +831,20 @@ def predict_images(args) -> int:
         flush=True,
     )
     evaluations = evaluate_image_level(rows, output_dir)
-    if args.ground_truth_dir:
-        ground_truth_dir = Path(args.ground_truth_dir).expanduser()
-    else:
-        ground_truth_dir = data_root / "ground_truth"
-    if not ground_truth_dir.is_dir():
-        ground_truth_dir = None
-    pixel_metrics = evaluate_pixel_level(rows, output_dir, ground_truth_dir, args.metric_size)
-    if pixel_metrics:
-        for stage_metrics in evaluations.values():
-            stage_metrics.update(pixel_metrics)
-        write_metrics(evaluations, output_dir)
+    if args.pixel_metrics:
+        if args.ground_truth_dir:
+            ground_truth_dir = Path(args.ground_truth_dir).expanduser()
+        else:
+            ground_truth_dir = data_root / "ground_truth"
+        if not ground_truth_dir.is_dir():
+            ground_truth_dir = None
+        pixel_metrics = evaluate_pixel_level(
+            rows, output_dir, ground_truth_dir, args.metric_size
+        )
+        if pixel_metrics:
+            for stage_metrics in evaluations.values():
+                stage_metrics.update(pixel_metrics)
+            write_metrics(evaluations, output_dir)
     return 0
 
 
@@ -925,7 +928,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "GT anomaly mask directory mirroring --data_root's layout; "
             "defaults to --data_root/ground_truth. Used for pixel-level "
-            "evaluation after prediction."
+            "evaluation (requires --pixel_metrics)."
+        ),
+    )
+    parser.add_argument(
+        "--pixel_metrics",
+        action="store_true",
+        help=(
+            "Also evaluate pixel-level metrics (P-AUROC/P-AP/P-F1/P-AUPRO) "
+            "on the saved score maps against the GT masks; requires a "
+            "ground-truth directory"
         ),
     )
     parser.add_argument(
