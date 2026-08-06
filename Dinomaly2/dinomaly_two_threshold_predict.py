@@ -19,6 +19,7 @@ import argparse
 import csv
 import json
 import logging
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -26,6 +27,17 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 from tqdm import tqdm
+
+_UTILS_DIR = Path(__file__).resolve().parent.parent / "utils"
+if str(_UTILS_DIR) not in sys.path:
+    sys.path.insert(1, str(_UTILS_DIR))
+
+from anomaly_evaluation import (  # noqa: E402
+    max_f1,
+    safe_ap,
+    safe_auroc,
+    write_metrics,
+)
 
 from dinomaly_two_stage import (
     _json_safe,
@@ -346,6 +358,48 @@ def _build_region_result(
     region["good_neighbour"] = int(good_neighbour)
     region["anomaly_neighbour"] = int(anomaly_neighbour)
     return region
+
+
+def evaluate_image_level(
+    rows: Sequence[Mapping[str, Any]],
+    output_dir: Path,
+) -> Dict[str, Dict[str, float]]:
+    """Evaluate the raw and adjusted image scores with canonical metrics.
+
+    Reuses the same image-level metrics as dinomaly_score_visualization
+    (I-AUROC / I-AP / I-F1); anomaly is the positive class.
+    """
+
+    labels = np.asarray(
+        [
+            1 if str(row.get("dataset_label", "")) != "good" else 0
+            for row in rows
+        ],
+        dtype=np.uint8,
+    )
+    evaluations: Dict[str, Dict[str, float]] = {}
+    for key, name in (("raw_score", "raw"), ("adjusted_score", "adjusted")):
+        scores = np.asarray(
+            [float(row.get(key, np.nan)) for row in rows],
+            dtype=np.float32,
+        )
+        finite = np.isfinite(scores)
+        if not np.all(finite):
+            scores = scores[finite]
+            valid_labels = labels[finite]
+        else:
+            valid_labels = labels
+        evaluations[name] = {
+            "I-AUROC": safe_auroc(valid_labels, scores),
+            "I-AP": safe_ap(valid_labels, scores),
+            "I-F1": max_f1(valid_labels, scores),
+        }
+    write_metrics(evaluations, output_dir)
+    print("\n图像级评估（原始 vs 调整后）：", flush=True)
+    for name, metrics in evaluations.items():
+        line = "  ".join(f"{metric}={value:.4f}" for metric, value in metrics.items())
+        print(f"  {name}: {line}", flush=True)
+    return evaluations
 
 
 def predict_images(args) -> int:
@@ -693,6 +747,7 @@ def predict_images(args) -> int:
         f"({elapsed / max(len(image_entries), 1) * 1000.0:.0f} ms/image)",
         flush=True,
     )
+    evaluate_image_level(rows, output_dir)
     return 0
 
 
