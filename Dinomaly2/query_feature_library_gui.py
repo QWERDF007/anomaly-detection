@@ -43,6 +43,8 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -607,14 +609,17 @@ class MainWindow(QMainWindow):
         self.score_map: Optional[np.ndarray] = None
         self.query_result_image: Optional[Path] = None
         self.unmatched_region_count = 0
+        self.images_root: Optional[Path] = None
+        self._file_rows: List[Dict[str, Any]] = []
         self.setWindowTitle(
             f"Dinomaly2 ROI 特征库反查 — root: {Path(self.args.root).expanduser()}"
         )
-        self.resize(2100, 950)
+        self.resize(2300, 950)
 
-        self.input_path_edit = QLineEdit()
-        self.input_path_edit.setPlaceholderText("输入图像路径，可直接粘贴后加载")
-        self.load_input_button = QPushButton("加载")
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText(
+            "搜索路径/文件名；回车输入含 good/bad 子目录的图像根目录"
+        )
         self.open_button = QPushButton("选择文件")
         self.mode_combo = QComboBox()
         if self._artifact_root("candidate_regions") is not None:
@@ -674,9 +679,8 @@ class MainWindow(QMainWindow):
         self.result_table.setMinimumHeight(150)
 
         controls = QHBoxLayout()
-        controls.addWidget(QLabel("输入图像："))
-        controls.addWidget(self.input_path_edit, 2)
-        controls.addWidget(self.load_input_button)
+        controls.addWidget(QLabel("图像根目录/搜索："))
+        controls.addWidget(self.search_edit, 2)
         controls.addWidget(self.open_button)
         controls.addWidget(QLabel("中间区域："))
         controls.addWidget(self.mode_combo)
@@ -687,6 +691,15 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.fit_button)
         controls.addWidget(self.threshold_label)
         controls.addWidget(self.query_button)
+
+        file_panel = QWidget()
+        file_layout = QVBoxLayout(file_panel)
+        file_layout.setContentsMargins(0, 0, 0, 0)
+        file_layout.addWidget(QLabel("图像列表（good/bad 分组，按调整后分数升序，点击加载）"))
+        self.file_tree = QTreeWidget()
+        self.file_tree.setHeaderHidden(True)
+        self.file_tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        file_layout.addWidget(self.file_tree, 1)
 
         raw_panel = QWidget()
         raw_layout = QVBoxLayout(raw_panel)
@@ -711,14 +724,17 @@ class MainWindow(QMainWindow):
         adjust_layout.addWidget(self.adjust_canvas, 1)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(file_panel)
         splitter.addWidget(raw_panel)
         splitter.addWidget(candidate_panel)
         splitter.addWidget(right_panel)
         splitter.addWidget(adjust_panel)
-        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 1)
         splitter.setStretchFactor(3, 1)
+        splitter.setStretchFactor(4, 1)
+        splitter.setSizes([320, 430, 430, 430, 430])
 
         formula_panel = QWidget()
         formula_layout = QVBoxLayout(formula_panel)
@@ -751,8 +767,9 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self.open_button.clicked.connect(self.open_image)
-        self.load_input_button.clicked.connect(self.load_input_from_text)
-        self.input_path_edit.returnPressed.connect(self.load_input_from_text)
+        self.search_edit.textChanged.connect(self._apply_search)
+        self.search_edit.returnPressed.connect(self._search_box_entered)
+        self.file_tree.itemClicked.connect(self.file_item_clicked)
         self.mode_combo.currentIndexChanged.connect(self.change_mode)
         self.finish_button.clicked.connect(self.left_canvas.finish_polygon)
         self.undo_button.clicked.connect(self.left_canvas.undo)
@@ -766,6 +783,12 @@ class MainWindow(QMainWindow):
         self.query_button.setEnabled(False)
 
         self.change_mode(self.mode_combo.currentIndex())
+
+        data_root = getattr(args, "data_root", None)
+        if data_root:
+            self._set_images_root(Path(data_root).expanduser())
+        else:
+            self._rebuild_file_list()
 
         if args.input:
             self.load_input_image(Path(args.input).expanduser())
@@ -786,12 +809,11 @@ class MainWindow(QMainWindow):
         try:
             self.left_canvas.set_image(image_path)
             self.raw_canvas.set_image(image_path)
-            self.input_path_edit.setText(str(image_path))
             score_map = self.load_score_map(image_path)
             self.score_map = score_map
             self.query_result_image = None
             self.load_raw_regions(image_path, score_map)
-            self.load_annotation_regions(image_path)
+            self.load_annotation_regions(image_path, score_map)
             candidate_path = self.load_candidate_regions(image_path, score_map)
             self.current_run_dir = None
             self.right_canvas.clear_image()
@@ -880,9 +902,21 @@ class MainWindow(QMainWindow):
         regions: Sequence[Mapping[str, Any]],
         bbox: Optional[Sequence[float]] = None,
         area: Optional[int] = None,
+        process_size: int = 0,
+        image_shape: Optional[Tuple[int, int]] = None,
     ) -> Optional[Mapping[str, Any]]:
-        """Match a canvas region to a prediction-detail region by bbox/area."""
+        """Match a canvas region to a prediction-detail region.
 
+        Details written with ``--process_size`` store bboxes/areas in the
+        downsampled space; they are scaled to the image space before the
+        exact (2-decimal) bbox comparison and the area fallback.
+        """
+
+        scale_x = scale_y = 1.0
+        if int(process_size) > 0 and image_shape:
+            height, width = image_shape
+            scale_x = float(width) / float(process_size)
+            scale_y = float(height) / float(process_size)
         if bbox is not None and len(bbox) == 4:
             target = [round(float(value), 2) for value in bbox]
             for region in regions:
@@ -890,12 +924,19 @@ class MainWindow(QMainWindow):
                 if (
                     isinstance(region_bbox, (list, tuple))
                     and len(region_bbox) == 4
-                    and [round(float(value), 2) for value in region_bbox] == target
                 ):
-                    return region
+                    scaled = [
+                        round(float(region_bbox[0]) * scale_x, 2),
+                        round(float(region_bbox[1]) * scale_y, 2),
+                        round(float(region_bbox[2]) * scale_x, 2),
+                        round(float(region_bbox[3]) * scale_y, 2),
+                    ]
+                    if scaled == target:
+                        return region
         if area is not None and int(area) > 0:
             for region in regions:
-                if int(region.get("area", -1)) == int(area):
+                detail_area = int(round(int(region.get("area", -1)) * scale_x * scale_y))
+                if detail_area == int(area):
                     return region
         return None
 
@@ -977,6 +1018,11 @@ class MainWindow(QMainWindow):
                 regions,
                 candidate.get("bbox"),
                 candidate.get("area"),
+                process_size=int(detail.get("process_size", 0)),
+                image_shape=(
+                    self.left_canvas.image.height(),
+                    self.left_canvas.image.width(),
+                ),
             )
             if match is not None:
                 region_score = float(match.get("region_score", 0.0))
@@ -1133,6 +1179,11 @@ class MainWindow(QMainWindow):
                 detail.get("regions", []),
                 roi_bbox,
                 roi_area,
+                process_size=int(detail.get("process_size", 0)),
+                image_shape=(
+                    self.left_canvas.image.height(),
+                    self.left_canvas.image.width(),
+                ),
             )
             if matched is not None:
                 self._append_region_decision(
@@ -1365,13 +1416,18 @@ class MainWindow(QMainWindow):
             region["region_id"] = index
         return regions
 
-    def load_annotation_regions(self, image_path: Path) -> None:
+    def load_annotation_regions(
+        self,
+        image_path: Path,
+        score_map: Optional[np.ndarray] = None,
+    ) -> None:
         """Overlay annotation-mask anomaly regions on the raw-region canvas.
 
         ``--mask_dir`` mirrors the ``--data_root`` layout, so an image maps to
         ``mask_dir/<relative>.json`` (LabelMe, label 'good'/'ignore' are
         skipped) or to a binary mask with another extension.  Anomaly regions
-        are drawn as red polygons on the first canvas.
+        are drawn as red polygons on the first canvas, labelled with the
+        maximum of the original Dinomaly2 score map inside each region.
         """
 
         mask_dir = getattr(self.args, "mask_dir", None)
@@ -1410,6 +1466,12 @@ class MainWindow(QMainWindow):
             return
         for region in mask_regions:
             region["color"] = "#ff1744"
+            if score_map is not None and np.any(region["mask"]):
+                region_values = np.asarray(score_map)[region["mask"]]
+                if region_values.size:
+                    score = float(np.nanmax(region_values))
+                    if np.isfinite(score):
+                        region["score"] = score
         combined = list(self.raw_canvas.candidate_regions) + mask_regions
         self.raw_canvas.set_candidate_regions(combined, emit=False)
 
@@ -1550,24 +1612,145 @@ class MainWindow(QMainWindow):
             self.left_canvas.shapes_changed.emit()
         self.status_label.setText("已清空当前查询区域，请重新选择或绘制 ROI。")
 
+    def _set_images_root(self, root: Path) -> None:
+        """Set the good/bad image root and rebuild the file list."""
+
+        self.images_root = Path(root)
+        self.args.data_root = str(self.images_root)
+        self._rebuild_file_list()
+        self.status_label.setText(f"图像根目录：{self.images_root}")
+
+    def _rebuild_file_list(self) -> None:
+        """Build the grouped, adjusted-score-sorted image file list."""
+
+        self.file_tree.clear()
+        self._file_rows = []
+        if self.images_root is None or not self.images_root.is_dir():
+            item = QTreeWidgetItem(["(未设置图像根目录；在搜索框输入含 good/bad 的目录后回车)"])
+            self.file_tree.addTopLevelItem(item)
+            return
+
+        image_paths: List[Path] = []
+        for extension in (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"):
+            image_paths.extend(self.images_root.rglob(f"*{extension}"))
+        image_paths.extend(self.images_root.rglob("*.JPG"))
+        image_paths = sorted(
+            {path for path in image_paths if path.is_file()},
+            key=lambda path: str(path).casefold(),
+        )
+
+        groups: Dict[str, List[Dict[str, Any]]] = {}
+        for image_path in image_paths:
+            try:
+                relative = image_path.relative_to(self.images_root)
+            except ValueError:
+                relative = Path(image_path.name)
+            group = relative.parts[0] if relative.parts else ""
+            raw_score = None
+            adjusted_score = None
+            details_path = self._prediction_details_path(image_path)
+            if details_path is not None:
+                try:
+                    with details_path.open("r", encoding="utf-8") as file:
+                        detail = json.load(file)
+                    raw_score = float(detail.get("raw_score", np.nan))
+                    adjusted_score = float(detail.get("adjusted_score", np.nan))
+                    if not np.isfinite(raw_score):
+                        raw_score = None
+                    if not np.isfinite(adjusted_score):
+                        adjusted_score = None
+                except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                    pass
+            groups.setdefault(group, []).append(
+                {
+                    "path": image_path,
+                    "group": group,
+                    "raw": raw_score,
+                    "adjusted": adjusted_score,
+                }
+            )
+
+        for group, rows in sorted(groups.items()):
+            rows.sort(
+                key=lambda row: (
+                    row["adjusted"]
+                    if row["adjusted"] is not None
+                    else float("inf"),
+                )
+            )
+            group_item = QTreeWidgetItem([f"{group}（{len(rows)}）"])
+            self.file_tree.addTopLevelItem(group_item)
+            for row in rows:
+                raw_text = f"{row['raw']:.4f}" if row["raw"] is not None else "—"
+                adjusted_text = (
+                    f"{row['adjusted']:.4f}"
+                    if row["adjusted"] is not None
+                    else "—"
+                )
+                item = QTreeWidgetItem(
+                    [f"{row['path'].name}  raw={raw_text}  adj={adjusted_text}"]
+                )
+                item.setData(0, Qt.ItemDataRole.UserRole, str(row["path"]))
+                item.setToolTip(0, str(row["path"]))
+                group_item.addChild(item)
+                row["item"] = item
+                self._file_rows.append(row)
+            group_item.setExpanded(True)
+
+    def _apply_search(self, text: str) -> None:
+        """Filter the file list by path/filename substring (empty = all)."""
+
+        query = str(text).strip().casefold()
+        for row in self._file_rows:
+            item = row.get("item")
+            if item is None:
+                continue
+            relative = str(row["path"]).casefold()
+            if not query or query in relative or query in str(row["path"].name).casefold():
+                item.setHidden(False)
+            else:
+                item.setHidden(True)
+        for index in range(self.file_tree.topLevelItemCount()):
+            group_item = self.file_tree.topLevelItem(index)
+            if group_item.childCount() == 0:
+                continue
+            visible = any(
+                not group_item.child(child).isHidden()
+                for child in range(group_item.childCount())
+            )
+            group_item.setHidden(not visible)
+
+    def _search_box_entered(self) -> None:
+        """Enter in the search box: load a root dir, a single image, or filter."""
+
+        text = self.search_edit.text().strip().strip('"')
+        if not text:
+            self._apply_search("")
+            return
+        path = Path(text).expanduser()
+        if path.is_dir():
+            self._set_images_root(path)
+            return
+        if path.is_file():
+            self.load_input_image(path)
+            return
+        self._apply_search(text)
+
+    def file_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
+        path_text = item.data(0, Qt.ItemDataRole.UserRole)
+        if not path_text:
+            return
+        self.load_input_image(Path(path_text))
+
     def open_image(self) -> None:
         image_path, _ = QFileDialog.getOpenFileName(
             self,
             "选择输入图像",
-            "",
+            str(self.images_root) if self.images_root is not None else "",
             "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)",
         )
         if image_path:
             self.load_input_image(Path(image_path))
-
-    def load_input_from_text(self) -> None:
-        """Load the image path entered in the input field."""
-
-        image_text = self.input_path_edit.text().strip().strip('"')
-        if not image_text:
-            QMessageBox.warning(self, "打开失败", "请输入输入图像路径。")
-            return
-        self.load_input_image(Path(image_text).expanduser())
 
     def update_controls(self) -> None:
         has_image = self.left_canvas.image is not None
