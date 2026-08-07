@@ -105,6 +105,25 @@ def load_cached_feature(args, input_path: Path, libraries) -> np.ndarray:
     return np.nan_to_num(feature)
 
 
+def patch_to_image_coords(
+    row: int,
+    col: int,
+    feature_shape: Tuple[int, int],
+    image_shape: Tuple[int, int],
+    image_size: int,
+    crop_size: int,
+) -> Tuple[float, float]:
+    """Map a feature-grid patch centre back to original-image coordinates."""
+
+    feature_height, feature_width = feature_shape
+    crop_offset = (int(image_size) - int(crop_size)) / 2.0
+    x_resized = (float(col) + 0.5) / float(feature_width) * float(crop_size) + crop_offset
+    y_resized = (float(row) + 0.5) / float(feature_height) * float(crop_size) + crop_offset
+    scale_x = float(image_shape[1]) / float(image_size)
+    scale_y = float(image_shape[0]) / float(image_size)
+    return x_resized * scale_x, y_resized * scale_y
+
+
 def load_run_config(libraries) -> Dict[str, Any]:
     """Load ``preds/run.json`` beside the libraries for prediction settings."""
 
