@@ -761,7 +761,10 @@ class MainWindow(QMainWindow):
 
         raw_panel = QWidget()
         raw_layout = QVBoxLayout(raw_panel)
-        raw_layout.addWidget(QLabel("原始 Dinomaly2 区域（青色）/ 标注异常区域（红色）"))
+        self.raw_panel_label = QLabel(
+            "原始 Dinomaly2 区域（青色）/ 标注异常区域（红色）"
+        )
+        raw_layout.addWidget(self.raw_panel_label)
         self.raw_canvas = ImageCanvas(editable=False)
         raw_layout.addWidget(self.raw_canvas, 1)
 
@@ -867,6 +870,23 @@ class MainWindow(QMainWindow):
             )
         self.update_controls()
 
+    def _update_raw_score_label(self, image_path: Path) -> None:
+        raw_text = "—"
+        details_path = self._prediction_details_path(image_path)
+        if details_path is not None:
+            try:
+                with details_path.open("r", encoding="utf-8") as file:
+                    detail = json.load(file)
+                raw_score = float(detail.get("raw_score", float("nan")))
+                if np.isfinite(raw_score):
+                    raw_text = f"{raw_score:.4f}"
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                pass
+        self.raw_panel_label.setText(
+            f"原始 Dinomaly2 区域（青色）/ 标注异常区域（红色）"
+            f"　raw_score={raw_text}"
+        )
+
     def load_input_image(self, image_path: Path) -> None:
         try:
             self.left_canvas.set_image(image_path)
@@ -881,6 +901,7 @@ class MainWindow(QMainWindow):
             self.right_canvas.clear_image()
             self.result_table.setRowCount(0)
             self.results.clear()
+            self._update_raw_score_label(image_path)
             self._update_two_stage_panel()
             self._update_selected_region_calculation()
             if candidate_path is not None:
