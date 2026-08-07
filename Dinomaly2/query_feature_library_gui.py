@@ -1238,7 +1238,8 @@ class MainWindow(QMainWindow):
             ):
                 final_judged.append(candidate)
         self.unmatched_region_count = unmatched_count
-        self.left_canvas.set_candidate_regions(candidate_judged, emit=False)
+        # 候选面板保持一阶段着色（load_candidate_regions 已按原始分数分档），
+        # 不把二阶段判定结果写回；二阶段着色只用于下方调整结果面板。
         self.adjust_canvas.set_candidate_regions(final_judged, emit=False)
         judged_with_score = [
             candidate
