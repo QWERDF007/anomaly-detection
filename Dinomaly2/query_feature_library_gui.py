@@ -888,6 +888,54 @@ class MainWindow(QMainWindow):
             )
         self.update_controls()
 
+    def _predictor_process_size(self) -> int:
+        """Read ``process_size`` from run.json, as recorded by the predictor."""
+
+        run_path = self._preds_dir() / "run.json"
+        if not run_path.is_file():
+            return 0
+        try:
+            with run_path.open("r", encoding="utf-8") as file:
+                config = json.load(file)
+            return int(config.get("process_size", 0) or 0)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return 0
+
+    def _predictor_region_score(self, roi_mask: np.ndarray) -> float:
+        """Compute the region score exactly like dinomaly_two_threshold_predict.py.
+
+        The predictor scores the ROI in ``process_size`` space (when set):
+        its score map is downsampled there and the top-ratio mean is taken
+        over the mask pixels.  The GUI repeats the same downsampling on both
+        the score map and the image-space mask so the displayed value matches
+        the prediction.
+        """
+
+        if self.score_map is None or not np.any(roi_mask):
+            return 0.0
+        region_ratio = float(self.region_top_spin.value()) / 100.0
+        process_size = self._predictor_process_size()
+        if process_size > 0:
+            score = cv2.resize(
+                self.score_map,
+                (process_size, process_size),
+                interpolation=cv2.INTER_LINEAR,
+            )
+            mask = (
+                cv2.resize(
+                    np.asarray(roi_mask, dtype=np.uint8),
+                    (process_size, process_size),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+                > 0
+            )
+        else:
+            score = self.score_map
+            mask = roi_mask
+        values = np.asarray(score, dtype=np.float32)[mask]
+        top_count = max(1, int(values.size * region_ratio))
+        return float(np.sort(values)[-top_count:].mean())
+
     def _update_raw_score_label(self, image_path: Path) -> None:
         raw_text = "—"
         details_path = self._prediction_details_path(image_path)
@@ -1318,11 +1366,7 @@ class MainWindow(QMainWindow):
 
         if self.score_map is not None and np.any(roi_mask):
             region_ratio = float(self.region_top_spin.value()) / 100.0
-            roi_values = np.sort(
-                np.asarray(self.score_map[roi_mask], dtype=np.float32).reshape(-1)
-            )
-            top_count = max(1, int(roi_values.size * region_ratio))
-            region_score = float(roi_values[-top_count:].mean())
+            region_score = self._predictor_region_score(roi_mask)
             lines.append(
                 f"region_score（ROI 内 top {region_ratio * 100.0:g}% 均值） = "
                 f"<b>{region_score:.4f}</b>"
