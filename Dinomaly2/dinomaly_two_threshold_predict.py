@@ -647,6 +647,33 @@ def evaluate_pixel_level(
     return metrics
 
 
+def apply_library_metadata(args, metadata: Mapping[str, Any]) -> None:
+    """Overlay prediction parameters from the library metadata onto ``args``.
+
+    The library records the exact feature configuration used at build time
+    (image/crop size, ROI size, backbone, merge and feature source), so the
+    prediction command only needs the model, data root, root and thresholds.
+    Metadata wins; values absent from the metadata keep the CLI/defaults.
+    """
+
+    for arg_key, meta_key, cast in (
+        ("image_size", "image_size", int),
+        ("crop_size", "crop_size", int),
+        ("roi_size", "roi_size", int),
+        ("backbone", "backbone", str),
+        ("feature_merge", "feature_merge", str),
+    ):
+        value = metadata.get(meta_key)
+        if value is None:
+            continue
+        setattr(args, arg_key, cast(value))
+    source = str(metadata.get("feature_source", ""))
+    if source == "raw_patch":
+        args.feature_source = "raw_patch"
+    elif source == "dinomaly_encoder_output":
+        args.feature_source = "dinomaly"
+
+
 def predict_images(args) -> int:
     data_root = Path(args.data_root).expanduser()
     image_entries = collect_data_root_images(data_root)
@@ -668,6 +695,7 @@ def predict_images(args) -> int:
         device,
         faiss_on_gpu,
     )
+    apply_library_metadata(args, good_library.metadata)
     validate_library_compatibility(good_library, anomaly_library, args)
     model = load_dinomaly_model(args, device)
     patch_backbone = None

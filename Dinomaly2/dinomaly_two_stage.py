@@ -1154,6 +1154,10 @@ def validate_library_compatibility(
         expected["feature_source"] = "dinomaly_encoder_output"
     for key, value in expected.items():
         stored = good.get(key)
+        # Libraries built by earlier patch-mode versions recorded the raw
+        # CLI value "dinomaly" instead of "dinomaly_encoder_output".
+        if key == "feature_source" and stored == "dinomaly":
+            stored = "dinomaly_encoder_output"
         if stored is not None and stored != value:
             raise ValueError(
                 f"Prediction {key}={value!r} does not match library metadata {stored!r}."
@@ -1400,7 +1404,11 @@ def _build_feature_library(
             "library_type": library_type,
             "library_mode": "patch",
             "patch_top_ratio": float(getattr(args, "patch_top_ratio", 0.5)),
-            "feature_source": args.feature_source,
+            "feature_source": (
+                "raw_patch"
+                if args.feature_source == "raw_patch"
+                else "dinomaly_encoder_output"
+            ),
             "feature_layout": (
                 "per-patch top-ratio patch tokens; each patch is one vector"
             ),
