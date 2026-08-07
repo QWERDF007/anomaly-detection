@@ -353,8 +353,8 @@ def _build_region_result(
         )
         if positions.shape[0] == 0:
             return None
-        good_distances = []
-        anomaly_distances = []
+        good_matches = []
+        anomaly_matches = []
         for row, col in positions:
             patch_vector = feature[:, int(row), int(col)]
             if bool(good_library.metadata.get("normalize", True)):
@@ -367,10 +367,19 @@ def _build_region_result(
                 anomaly_library,
                 patch_vector,
             )
-            good_distances.append(good_distance)
-            anomaly_distances.append(anomaly_distance)
-        good_distance = float(np.mean(good_distances))
-        anomaly_distance = float(np.mean(anomaly_distances))
+            good_matches.append((good_distance, good_neighbour))
+            anomaly_matches.append((anomaly_distance, anomaly_neighbour))
+        good_distance, good_neighbour = min(
+            good_matches,
+            key=lambda match: match[0],
+        )
+        anomaly_distance, anomaly_neighbour = min(
+            anomaly_matches,
+            key=lambda match: match[0],
+        )
+        best_row, best_col = positions[
+            min(range(len(good_matches)), key=lambda i: good_matches[i][0])
+        ]
         decision = calculate_distance_offset(
             good_distance,
             anomaly_distance,
@@ -387,6 +396,8 @@ def _build_region_result(
             "library_mode": "patch",
             "patch_count": int(positions.shape[0]),
             "patch_top_ratio": patch_ratio,
+            "best_patch_row": int(best_row),
+            "best_patch_col": int(best_col),
             "area": int(component["area"]),
             "bbox_original": [float(value) for value in component["bbox"]],
             "bbox_feature": [float(value) for value in bbox_feature],

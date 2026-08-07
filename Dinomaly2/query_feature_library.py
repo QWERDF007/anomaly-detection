@@ -105,6 +105,23 @@ def load_cached_feature(args, input_path: Path, libraries) -> np.ndarray:
     return np.nan_to_num(feature)
 
 
+def load_run_config(libraries) -> Dict[str, Any]:
+    """Load ``preds/run.json`` beside the libraries for prediction settings."""
+
+    library = libraries[0]
+    root = library.index_path.parent.parent
+    run_path = root / "preds" / "run.json"
+    if not run_path.is_file():
+        return {}
+    try:
+        with run_path.open("r", encoding="utf-8") as file:
+            config = json.load(file)
+    except (OSError, json.JSONDecodeError) as error:
+        LOGGER.warning("Cannot read %s: %s", run_path, error)
+        return {}
+    return config if isinstance(config, dict) else {}
+
+
 def load_cached_score_map(args, input_path: Path, libraries) -> np.ndarray:
     """Load the cached score map for the query image (patch library mode)."""
 
@@ -250,6 +267,14 @@ def query_feature_library(args) -> int:
     score_map = None
     if library_mode == "patch":
         score_map = load_cached_score_map(args, input_path, libraries)
+        run_config = load_run_config(libraries)
+        process_size = int(run_config.get("process_size", 0) or 0)
+        if process_size > 0:
+            score_map = cv2.resize(
+                score_map,
+                (process_size, process_size),
+                interpolation=cv2.INTER_LINEAR,
+            )
 
     def add_result(
         library,
@@ -325,39 +350,53 @@ def query_feature_library(args) -> int:
             if positions.shape[0] == 0:
                 vanished_count += 1
                 continue
-            for patch_index, (row, col) in enumerate(positions):
+            patch_vectors = []
+            for row, col in positions:
                 patch_vector = feature[:, int(row), int(col)]
-                patch_info = {
-                    "query_patch_index": int(patch_index),
-                    "patch_row": int(row),
-                    "patch_col": int(col),
-                }
-                for library in libraries:
-                    if bool(library.metadata.get("normalize", True)):
-                        query_vector = l2_normalize(patch_vector)
-                    else:
-                        query_vector = patch_vector
+                if bool(libraries[0].metadata.get("normalize", True)):
+                    patch_vector = l2_normalize(patch_vector)
+                patch_vectors.append((int(row), int(col), patch_vector))
+            for library in libraries:
+                library_type = str(
+                    library.metadata.get(
+                        "library_type",
+                        library.index_path.parent.name,
+                    )
+                )
+                best_match = None
+                for patch_index, (row, col, patch_vector) in enumerate(
+                    patch_vectors
+                ):
                     neighbours = search_library_topk(
                         library,
-                        query_vector,
+                        patch_vector,
                         args.top_k,
-                    )
-                    library_type = str(
-                        library.metadata.get(
-                            "library_type",
-                            library.index_path.parent.name,
-                        )
                     )
                     for rank, (distance, vector_id) in enumerate(
                         neighbours, start=1
                     ):
-                        add_result(
-                            library,
-                            distance,
-                            vector_id,
-                            rank,
-                            patch_info=patch_info,
-                        )
+                        if (
+                            best_match is None
+                            or distance < best_match["distance"]
+                        ):
+                            best_match = {
+                                "distance": float(distance),
+                                "vector_id": int(vector_id),
+                                "rank": int(rank),
+                                "patch_info": {
+                                    "query_patch_index": int(patch_index),
+                                    "patch_row": int(row),
+                                    "patch_col": int(col),
+                                },
+                            }
+                if best_match is not None:
+                    add_result(
+                        library,
+                        best_match["distance"],
+                        best_match["vector_id"],
+                        best_match["rank"],
+                        patch_info=best_match["patch_info"],
+                    )
             continue
         vector = roi_align_masked(
             feature,
