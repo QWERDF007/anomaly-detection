@@ -572,17 +572,16 @@ def evaluate_pixel_level(
         "P-F1": pixel_f1,
         "P-AUPRO": safe_aupro(masks, maps, show_progress=False),
     }
-    if adjusted:
-        metrics.update(
-            region_detection_metrics(
-                masks,
-                maps,
-                float(good_threshold),
-            )
+    metrics.update(
+        region_detection_metrics(
+            masks,
+            maps,
+            float(good_threshold),
         )
+    )
     label_text = "调整后" if adjusted else "原始"
     print(
-        f"\n像素级评估（{label_text} score maps）："
+        f"\n像素级/区域级评估（{label_text} score maps）："
         + "  ".join(f"{k}={v:.4f}" for k, v in metrics.items()),
         flush=True,
     )
@@ -946,7 +945,11 @@ def predict_images(args) -> int:
         if not ground_truth_dir.is_dir():
             ground_truth_dir = None
         pixel_raw = evaluate_pixel_level(
-            rows, output_dir, ground_truth_dir, args.metric_size
+            rows,
+            output_dir,
+            ground_truth_dir,
+            args.metric_size,
+            good_threshold=args.good_threshold,
         )
         pixel_adjusted = evaluate_pixel_level(
             rows,
@@ -956,6 +959,17 @@ def predict_images(args) -> int:
             good_threshold=args.good_threshold,
             adjusted=True,
         )
+        if pixel_raw and pixel_adjusted:
+            print("\n像素级/区域级评估对比（原始 vs 二次调整后）：", flush=True)
+            for name in ("P-AUROC", "P-AP", "P-F1", "P-AUPRO", "R-MissRate", "R-PixelCoverage"):
+                raw_value = float(pixel_raw.get(name, float("nan")))
+                adjusted_value = float(pixel_adjusted.get(name, float("nan")))
+                print(
+                    f"  {name:>16}   raw={raw_value:.4f}   "
+                    f"adjusted={adjusted_value:.4f}",
+                    flush=True,
+                )
+            print(flush=True)
         if pixel_raw:
             evaluations["raw"].update(pixel_raw)
         if pixel_adjusted:

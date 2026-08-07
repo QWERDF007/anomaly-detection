@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -642,6 +643,17 @@ class MainWindow(QMainWindow):
         self.query_button = QPushButton("查询特征库")
         self.fit_button = QPushButton("适应窗口")
         self.fit_button.setToolTip("将所有图像视图的缩放还原到适应窗口大小")
+        self.region_top_spin = QDoubleSpinBox()
+        self.region_top_spin.setRange(0.1, 100.0)
+        self.region_top_spin.setDecimals(1)
+        self.region_top_spin.setSingleStep(1.0)
+        self.region_top_spin.setSuffix("%")
+        self.region_top_spin.setValue(
+            float(getattr(args, "region_top_ratio", 0.10)) * 100.0
+        )
+        self.region_top_spin.setToolTip(
+            "区域分数 top x% 均值；初始值来自 run.json 元数据，可在此调整"
+        )
         self.threshold_label = QLabel()
         self.threshold_label.setStyleSheet("color: #ff9800; font-weight: bold;")
         self._update_threshold_label()
@@ -706,6 +718,8 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.undo_button)
         controls.addWidget(self.clear_button)
         controls.addStretch(1)
+        controls.addWidget(QLabel("区域 top%："))
+        controls.addWidget(self.region_top_spin)
         controls.addWidget(self.fit_button)
         controls.addWidget(self.threshold_label)
         controls.addWidget(self.query_button)
@@ -805,6 +819,7 @@ class MainWindow(QMainWindow):
         self.clear_button.clicked.connect(self.clear_query_selection)
         self.query_button.clicked.connect(self.start_query)
         self.fit_button.clicked.connect(self.fit_all_canvases)
+        self.region_top_spin.valueChanged.connect(self._region_top_ratio_changed)
         self.left_canvas.shapes_changed.connect(self.update_controls)
         self.left_canvas.shapes_changed.connect(self._update_selected_region_calculation)
         self.left_canvas.candidate_changed.connect(self.candidate_selection_changed)
@@ -913,15 +928,20 @@ class MainWindow(QMainWindow):
         else:
             max_offset_text = f"{float(self.args.max_offset):.4f}"
         source = getattr(self.args, "config_source", "CLI")
-        region_ratio = float(getattr(self.args, "region_top_ratio", 0.10))
         self.threshold_label.setText(
             f"good_threshold={good_threshold:.4f}   "
             f"anomaly_threshold={anomaly_threshold:.4f}   "
             f"offset_scale={offset_scale:.4f}   "
             f"max_offset={max_offset_text}   "
-            f"region_top_ratio={region_ratio:.4f}   "
             f"({source})"
         )
+
+    def _region_top_ratio_changed(self, value: float) -> None:
+        ratio = float(value) / 100.0
+        if not 0.0 < ratio <= 1.0:
+            return
+        setattr(self.args, "region_top_ratio", ratio)
+        self._update_selected_region_calculation()
 
     def _reset_calculation_panel(self) -> None:
         self.calculation_label.setText(
@@ -1225,7 +1245,7 @@ class MainWindow(QMainWindow):
             roi_area = int(np.count_nonzero(roi_mask))
 
         if self.score_map is not None and np.any(roi_mask):
-            region_ratio = float(getattr(self.args, "region_top_ratio", 0.10))
+            region_ratio = float(self.region_top_spin.value()) / 100.0
             roi_values = np.sort(
                 np.asarray(self.score_map[roi_mask], dtype=np.float32).reshape(-1)
             )
