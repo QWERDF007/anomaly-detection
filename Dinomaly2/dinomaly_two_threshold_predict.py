@@ -798,7 +798,35 @@ def predict_images(args) -> int:
 
         selected = select_strongest_region(regions)
         signed_offset = float(selected["signed_offset"]) if selected else 0.0
-        adjusted_score = float(raw_score + signed_offset)
+        if regions:
+            overlay = score_map.copy()
+            count, labels, _stats, _ = cv2.connectedComponentsWithStats(
+                (candidate_mask > 0).astype(np.uint8),
+                8,
+            )
+            for region in regions:
+                region_id = int(region["region_id"])
+                if not 0 < region_id < count:
+                    continue
+                region_mask = labels == region_id
+                region_adjusted = float(region["region_score"]) + float(
+                    region["signed_offset"]
+                )
+                region_label, _region_reason = final_score_label(
+                    region_adjusted,
+                    args.good_threshold,
+                    args.anomaly_threshold,
+                    str(region.get("similar_library", "")),
+                )
+                if region_label == "good":
+                    overlay[region_mask] = 0.0
+                else:
+                    overlay[region_mask] = region_adjusted
+            adjusted_score = (
+                float(training_image_score(overlay)) if overlay.size else 0.0
+            )
+        else:
+            adjusted_score = raw_score
         final_label, decision_reason = final_score_label(
             adjusted_score,
             args.good_threshold,

@@ -1143,27 +1143,13 @@ class MainWindow(QMainWindow):
                     dashed=True,
                 )
 
-        # 整图最终结果（与计算面板同一套逻辑：调整后分数最大区域 + raw_score）
-        if regions:
-            strongest = max(
-                regions,
-                key=lambda region: (
-                    float(region.get("region_score", 0.0))
-                    + float(region.get("signed_offset", 0.0)),
-                    float(region.get("region_score", 0.0)),
-                ),
-            )
-            signed_offset = float(strongest.get("signed_offset", 0.0))
-            similar_library = str(strongest.get("similar_library", ""))
-        else:
-            signed_offset = 0.0
-            similar_library = ""
-        adjusted_score = raw_score + signed_offset
+        # 整图最终结果：predict 已把 ROI 结果覆写进 score map 副本后
+        # 取 top 1% 均值（与 raw_score 同口径），直接使用 details 的值。
+        adjusted_score = float(detail.get("adjusted_score", raw_score))
         label, _reason = final_score_label(
             adjusted_score,
             good_threshold,
             anomaly_threshold,
-            similar_library,
         )
         label_cn = "正常" if label == "good" else "异常"
         color = "#00c853" if label == "good" else "#ff1744"
@@ -1208,31 +1194,17 @@ class MainWindow(QMainWindow):
                 detail.get("anomaly_threshold", float(self.args.anomaly_threshold))
             )
             regions = detail.get("regions", [])
-            if regions:
-                strongest = max(
-                    regions,
-                    key=lambda region: (
-                        float(region.get("region_score", 0.0))
-                        + float(region.get("signed_offset", 0.0)),
-                        float(region.get("region_score", 0.0)),
-                    ),
-                )
-                signed_offset = float(strongest.get("signed_offset", 0.0))
-                similar_library = str(strongest.get("similar_library", ""))
-            else:
-                signed_offset = 0.0
-                similar_library = ""
-            adjusted_score = raw_score + signed_offset
+            adjusted_score = float(detail.get("adjusted_score", raw_score))
             label, _reason = final_score_label(
                 adjusted_score,
                 good_threshold,
                 anomaly_threshold,
-                similar_library,
             )
             final_cn = "正常" if label == "good" else "异常"
+            region_count = len(regions)
             lines.append(
-                f"整图最终调整（按调整后分数最大区域）：adjusted_score = "
-                f"{raw_score:.4f} + ({signed_offset:+.4f}) = "
+                f"整图最终调整（{region_count} 个 ROI 结果覆写后 "
+                f"score map 的 top 1% 均值）：adjusted_score = "
                 f"<b>{adjusted_score:.4f}</b>（{final_cn}）"
             )
         else:
