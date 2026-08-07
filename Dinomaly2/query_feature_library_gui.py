@@ -444,7 +444,11 @@ class ImageCanvas(QWidget):
                 painter.drawRect(candidate_rect)
                 label_point = candidate_rect.topLeft()
             label = candidate.get("label")
-            if label is not None:
+            if label in {"GOOD", "Anomaly"}:
+                # Keep the color-coded ROI, but do not clutter the image with
+                # classification text labels.
+                text = ""
+            elif label is not None:
                 text = str(label)
             else:
                 score = candidate.get("score")
@@ -766,16 +770,14 @@ class MainWindow(QMainWindow):
 
         raw_panel = QWidget()
         raw_layout = QVBoxLayout(raw_panel)
-        self.raw_panel_label = QLabel(
-            "原始 Dinomaly2 区域（青色）/ 标注异常区域（红色）"
-        )
+        self.raw_panel_label = QLabel("原始区域")
         raw_layout.addWidget(self.raw_panel_label)
         self.raw_canvas = ImageCanvas(editable=False)
         raw_layout.addWidget(self.raw_canvas, 1)
 
         candidate_panel = QWidget()
         candidate_layout = QVBoxLayout(candidate_panel)
-        self.candidate_panel_label = QLabel("候选区域 / 手动画 ROI（单选后查询）")
+        self.candidate_panel_label = QLabel("候选区域")
         candidate_layout.addWidget(self.candidate_panel_label)
         candidate_layout.addWidget(self.left_canvas, 1)
 
@@ -888,8 +890,7 @@ class MainWindow(QMainWindow):
             except (OSError, json.JSONDecodeError, TypeError, ValueError):
                 pass
         self.raw_panel_label.setText(
-            f"原始 Dinomaly2 区域（青色）/ 标注异常区域（红色）"
-            f"　raw_score={raw_text}"
+            f"原始区域　原始图像分数={raw_text}"
         )
 
     def load_input_image(self, image_path: Path) -> None:
@@ -1760,18 +1761,7 @@ class MainWindow(QMainWindow):
         return result_path
 
     def _update_candidate_band_label(self, band: str, fallback_used: bool) -> None:
-        if band == "middle":
-            text = "候选区域 / 手动画 ROI（候选、GOOD绿色、Anomaly红色、标注异常红色；单选后查询）"
-        elif band == "anomaly":
-            if fallback_used:
-                text = "候选区域 / 手动画 ROI（GOOD绿色、Anomaly红色、标注异常红色；单选后查询）"
-            else:
-                text = "候选区域 / 手动画 ROI（Anomaly红色、标注异常红色；单选后查询）"
-        elif band == "good":
-            text = "候选区域 / 手动画 ROI（GOOD绿色、标注异常红色；单选后查询）"
-        else:
-            text = "候选区域 / 手动画 ROI（单选后查询）"
-        self.candidate_panel_label.setText(text)
+        self.candidate_panel_label.setText("候选区域")
 
     def _area_ratio_text(self, area: int) -> str:
         """Format an area in pixels as a percentage of the input image."""
