@@ -23,8 +23,11 @@ from dinomaly_two_stage import (
     load_labelme_library_mask,
     load_mask,
     mask_bbox,
+    preprocess_mask,
+    resize_mask_to_feature,
 )
 from dinomaly_two_threshold_predict import final_score_label
+from query_feature_library import patch_to_image_coords
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -104,6 +107,22 @@ class ImageCanvas(QWidget):
         )
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.show_scores = True
+        self.patch_boxes: List[Tuple[QPointF, float]] = []
+
+    def set_patch_boxes(self, boxes: Sequence[Tuple[QPointF, float]]) -> None:
+        """Show blue dashed boxes for the queried patch positions.
+
+        Each entry is ``(center image point, half patch size in image px)``.
+        """
+
+        self.patch_boxes = [
+            (QPointF(center), float(half_size)) for center, half_size in boxes
+        ]
+        self.update()
+
+    def clear_patch_boxes(self) -> None:
+        self.patch_boxes.clear()
+        self.update()
 
     def sizeHint(self):
         return self.minimumSizeHint()
@@ -121,6 +140,7 @@ class ImageCanvas(QWidget):
         self.clear_shapes(emit=False)
         self.clear_candidate_regions(emit=False)
         self.clear_overlay()
+        self.clear_patch_boxes()
         self.update()
 
     def clear_image(self) -> None:
@@ -133,6 +153,7 @@ class ImageCanvas(QWidget):
         self.clear_shapes(emit=False)
         self.clear_candidate_regions(emit=False)
         self.clear_overlay()
+        self.clear_patch_boxes()
         self.update()
 
     def set_mode(self, mode: str) -> None:
@@ -507,6 +528,22 @@ class ImageCanvas(QWidget):
                 text_rect = QRectF(top_left.x(), top_left.y() - 24, 420, 22)
                 painter.setPen(QColor("#ff1744"))
                 painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft, self.overlay_text)
+        for center, half_size in self.patch_boxes:
+            widget_center = self.image_to_widget(center)
+            widget_half = (
+                half_size * self.image_rect().width() / float(self.image.width())
+            )
+            pen = QPen(QColor("#2196f3"), 2.0)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.drawRect(
+                QRectF(
+                    widget_center.x() - widget_half,
+                    widget_center.y() - widget_half,
+                    widget_half * 2.0,
+                    widget_half * 2.0,
+                )
+            )
         painter.end()
 
     def mousePressEvent(self, event) -> None:
@@ -940,6 +977,84 @@ class MainWindow(QMainWindow):
         top_count = max(1, int(values.size * region_ratio))
         return float(np.sort(values)[-top_count:].mean())
 
+    def _library_metadata(self) -> Dict[str, Any]:
+        root = self._preds_dir().parent
+        metadata_path = root / "good" / "metadata.json"
+        try:
+            with metadata_path.open("r", encoding="utf-8") as file:
+                return json.load(file)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return {}
+
+    @staticmethod
+    def _backbone_patch_size(backbone: str) -> int:
+        name = str(backbone).casefold()
+        for token, size in (("_8", 8), ("_16", 16), ("_14", 14)):
+            if token in name:
+                return size
+        return 14
+
+    def _max_patch_boxes(self) -> List[Tuple[QPointF, float]]:
+        """Blue dashed boxes marking each region's highest-score patch.
+
+        Only meaningful for patch-mode libraries: the predictor queries the
+        single highest-score patch of every ROI, and this marks exactly that
+        patch at its original-image position.
+        """
+
+        metadata = self._library_metadata()
+        if str(metadata.get("library_mode", "roi")) != "patch":
+            return []
+        if self.score_map is None or self.left_canvas.image is None:
+            return []
+        image_size = int(metadata.get("image_size", 672))
+        crop_size = int(metadata.get("crop_size", 672))
+        patch_size = self._backbone_patch_size(str(metadata.get("backbone", "")))
+        feature_size = max(1, int(crop_size) // patch_size)
+        image_height = self.left_canvas.image.height()
+        image_width = self.left_canvas.image.width()
+        score_feature = cv2.resize(
+            self.score_map,
+            (feature_size, feature_size),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        boxes: List[Tuple[QPointF, float]] = []
+        for region in self.left_canvas.candidate_regions:
+            if region.get("is_annotation"):
+                continue
+            mask_feature = resize_mask_to_feature(
+                preprocess_mask(
+                    np.asarray(region["mask"], dtype=bool),
+                    image_size,
+                    crop_size,
+                ),
+                (feature_size, feature_size),
+            )
+            if not mask_feature.any():
+                continue
+            coords = np.argwhere(mask_feature)
+            scores = score_feature[coords[:, 0], coords[:, 1]]
+            row, col = coords[int(np.argmax(scores))]
+            x, y = patch_to_image_coords(
+                int(row),
+                int(col),
+                (feature_size, feature_size),
+                (image_height, image_width),
+                image_size,
+                crop_size,
+            )
+            patch_px = (
+                float(crop_size)
+                / feature_size
+                * float(image_width)
+                / float(image_size)
+            )
+            boxes.append((QPointF(x, y), patch_px / 2.0))
+        return boxes
+
+    def _update_patch_boxes(self) -> None:
+        self.left_canvas.set_patch_boxes(self._max_patch_boxes())
+
     def _update_raw_score_label(self, image_path: Path) -> None:
         raw_text = "—"
         details_path = self._prediction_details_path(image_path)
@@ -970,6 +1085,7 @@ class MainWindow(QMainWindow):
             self.right_canvas.clear_image()
             self.result_table.setRowCount(0)
             self.results.clear()
+            self._update_patch_boxes()
             self._update_raw_score_label(image_path)
             self._update_two_stage_panel()
             self._update_selected_region_calculation()
