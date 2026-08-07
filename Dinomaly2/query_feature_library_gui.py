@@ -675,6 +675,7 @@ class MainWindow(QMainWindow):
         self.unmatched_region_count = 0
         self.images_root: Optional[Path] = None
         self._file_rows: List[Dict[str, Any]] = []
+        self._queried_candidate_index: Optional[int] = None
         self.setWindowTitle(
             f"Dinomaly2 ROI 特征库反查 — preds: {Path(self.args.preds).expanduser()}"
         )
@@ -995,17 +996,24 @@ class MainWindow(QMainWindow):
         return 14
 
     def _max_patch_boxes(self) -> List[Tuple[QPointF, float]]:
-        """Blue dashed boxes marking each region's highest-score patch.
+        """Blue dashed box marking the queried ROI's highest-score patch.
 
-        Only meaningful for patch-mode libraries: the predictor queries the
-        single highest-score patch of every ROI, and this marks exactly that
-        patch at its original-image position.
+        Only shown for patch-mode libraries after a query has been executed
+        for the currently selected candidate region: the box marks the exact
+        patch (highest score inside the ROI) that the predictor queries.
         """
 
         metadata = self._library_metadata()
         if str(metadata.get("library_mode", "roi")) != "patch":
             return []
         if self.score_map is None or self.left_canvas.image is None:
+            return []
+        if not self.results:
+            return []
+        index = self._queried_candidate_index
+        if index is None or self.left_canvas.selected_candidate_index != index:
+            return []
+        if not 0 <= index < len(self.left_canvas.candidate_regions):
             return []
         image_size = int(metadata.get("image_size", 672))
         crop_size = int(metadata.get("crop_size", 672))
@@ -1018,42 +1026,79 @@ class MainWindow(QMainWindow):
             (feature_size, feature_size),
             interpolation=cv2.INTER_LINEAR,
         )
-        boxes: List[Tuple[QPointF, float]] = []
-        for region in self.left_canvas.candidate_regions:
-            if region.get("is_annotation"):
-                continue
-            mask_feature = resize_mask_to_feature(
-                preprocess_mask(
-                    np.asarray(region["mask"], dtype=bool),
-                    image_size,
-                    crop_size,
-                ),
-                (feature_size, feature_size),
-            )
-            if not mask_feature.any():
-                continue
-            coords = np.argwhere(mask_feature)
-            scores = score_feature[coords[:, 0], coords[:, 1]]
-            row, col = coords[int(np.argmax(scores))]
-            x, y = patch_to_image_coords(
-                int(row),
-                int(col),
-                (feature_size, feature_size),
-                (image_height, image_width),
+        region = self.left_canvas.candidate_regions[index]
+        mask_feature = resize_mask_to_feature(
+            preprocess_mask(
+                np.asarray(region["mask"], dtype=bool),
                 image_size,
                 crop_size,
-            )
-            patch_px = (
-                float(crop_size)
-                / feature_size
-                * float(image_width)
-                / float(image_size)
-            )
-            boxes.append((QPointF(x, y), patch_px / 2.0))
-        return boxes
+            ),
+            (feature_size, feature_size),
+        )
+        if not mask_feature.any():
+            return []
+        coords = np.argwhere(mask_feature)
+        scores = score_feature[coords[:, 0], coords[:, 1]]
+        row, col = coords[int(np.argmax(scores))]
+        x, y = patch_to_image_coords(
+            int(row),
+            int(col),
+            (feature_size, feature_size),
+            (image_height, image_width),
+            image_size,
+            crop_size,
+        )
+        patch_px = (
+            float(crop_size)
+            / feature_size
+            * float(image_width)
+            / float(image_size)
+        )
+        return [(QPointF(x, y), patch_px / 2.0)]
 
     def _update_patch_boxes(self) -> None:
         self.left_canvas.set_patch_boxes(self._max_patch_boxes())
+
+    def _update_right_patch_box(self, result: Mapping[str, Any]) -> None:
+        """Mark the matched library patch on the nearest-neighbour canvas.
+
+        In patch-mode libraries every stored vector is one patch, whose
+        feature-space bbox (``bbox_feature``) is converted back to the
+        library image's original coordinates and drawn as a blue dashed box.
+        """
+
+        self.right_canvas.clear_patch_boxes()
+        metadata = self._library_metadata()
+        if str(metadata.get("library_mode", "roi")) != "patch":
+            return
+        if self.right_canvas.image is None:
+            return
+        bbox_feature = result.get("bbox_feature")
+        if not isinstance(bbox_feature, (list, tuple)) or len(bbox_feature) != 4:
+            return
+        image_size = int(metadata.get("image_size", 672))
+        crop_size = int(metadata.get("crop_size", 672))
+        patch_size = self._backbone_patch_size(str(metadata.get("backbone", "")))
+        feature_size = max(1, int(crop_size) // patch_size)
+        image_height = self.right_canvas.image.height()
+        image_width = self.right_canvas.image.width()
+        row = (float(bbox_feature[1]) + float(bbox_feature[3])) / 2.0
+        col = (float(bbox_feature[0]) + float(bbox_feature[2])) / 2.0
+        x, y = patch_to_image_coords(
+            row,
+            col,
+            (feature_size, feature_size),
+            (image_height, image_width),
+            image_size,
+            crop_size,
+        )
+        patch_px = (
+            float(crop_size)
+            / feature_size
+            * float(image_width)
+            / float(image_size)
+        )
+        self.right_canvas.set_patch_boxes([(QPointF(x, y), patch_px / 2.0)])
 
     def _update_raw_score_label(self, image_path: Path) -> None:
         raw_text = "—"
@@ -1085,7 +1130,8 @@ class MainWindow(QMainWindow):
             self.right_canvas.clear_image()
             self.result_table.setRowCount(0)
             self.results.clear()
-            self._update_patch_boxes()
+            self._queried_candidate_index = None
+            self.left_canvas.clear_patch_boxes()
             self._update_raw_score_label(image_path)
             self._update_two_stage_panel()
             self._update_selected_region_calculation()
@@ -1995,6 +2041,7 @@ class MainWindow(QMainWindow):
 
     def candidate_selection_changed(self) -> None:
         self.update_controls()
+        self._update_patch_boxes()
         self._update_selected_region_calculation()
         index = self.left_canvas.selected_candidate_index
         if index is None or index >= len(self.left_canvas.candidate_regions):
@@ -2291,6 +2338,9 @@ class MainWindow(QMainWindow):
                 )
                 return
             mask = np.asarray(selected_mask, dtype=np.uint8)
+            self._queried_candidate_index = (
+                self.left_canvas.selected_candidate_index
+            )
         else:
             try:
                 mask = self.left_canvas.mask_array()
@@ -2388,6 +2438,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"查询完成：{len(self.results)} 个匹配结果")
         else:
             self.status_label.setText("查询完成，但没有匹配结果")
+        self._update_patch_boxes()
         self._update_selected_region_calculation()
         self._fit_image_splitter()
 
@@ -2443,6 +2494,7 @@ class MainWindow(QMainWindow):
                     text=f"distance={float(result.get('distance', 0.0)):.6f}",
                     color=overlay_color,
                 )
+                self._update_right_patch_box(result)
                 self.status_label.setText(
                     f"匹配：{source_path}，"
                     f"distance={float(result.get('distance', 0.0)):.6f}，"
