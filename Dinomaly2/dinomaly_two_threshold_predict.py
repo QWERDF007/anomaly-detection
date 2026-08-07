@@ -937,44 +937,43 @@ def predict_images(args) -> int:
         flush=True,
     )
     evaluations = evaluate_image_level(rows, output_dir)
-    if args.pixel_metrics:
-        if args.ground_truth_dir:
-            ground_truth_dir = Path(args.ground_truth_dir).expanduser()
-        else:
-            ground_truth_dir = data_root / "ground_truth"
-        if not ground_truth_dir.is_dir():
-            ground_truth_dir = None
-        pixel_raw = evaluate_pixel_level(
-            rows,
-            output_dir,
-            ground_truth_dir,
-            args.metric_size,
-            good_threshold=args.good_threshold,
-        )
-        pixel_adjusted = evaluate_pixel_level(
-            rows,
-            output_dir,
-            ground_truth_dir,
-            args.metric_size,
-            good_threshold=args.good_threshold,
-            adjusted=True,
-        )
-        if pixel_raw and pixel_adjusted:
-            print("\n像素级/区域级评估对比（原始 vs 二次调整后）：", flush=True)
-            for name in ("P-AUROC", "P-AP", "P-F1", "P-AUPRO", "R-MissRate", "R-PixelCoverage"):
-                raw_value = float(pixel_raw.get(name, float("nan")))
-                adjusted_value = float(pixel_adjusted.get(name, float("nan")))
-                print(
-                    f"  {name:>16}   raw={raw_value:.4f}   "
-                    f"adjusted={adjusted_value:.4f}",
-                    flush=True,
-                )
-            print(flush=True)
-        if pixel_raw:
-            evaluations["raw"].update(pixel_raw)
-        if pixel_adjusted:
-            evaluations["adjusted"].update(pixel_adjusted)
-        write_metrics(evaluations, output_dir)
+    if args.ground_truth_dir:
+        ground_truth_dir = Path(args.ground_truth_dir).expanduser()
+    else:
+        ground_truth_dir = data_root / "ground_truth"
+    if not ground_truth_dir.is_dir():
+        ground_truth_dir = None
+    pixel_raw = evaluate_pixel_level(
+        rows,
+        output_dir,
+        ground_truth_dir,
+        args.metric_size,
+        good_threshold=args.good_threshold,
+    )
+    pixel_adjusted = evaluate_pixel_level(
+        rows,
+        output_dir,
+        ground_truth_dir,
+        args.metric_size,
+        good_threshold=args.good_threshold,
+        adjusted=True,
+    )
+    if pixel_raw and pixel_adjusted:
+        print("\n像素级/区域级评估对比（原始 vs 二次调整后）：", flush=True)
+        for name in ("P-AUROC", "P-AP", "P-F1", "P-AUPRO", "R-MissRate", "R-PixelCoverage"):
+            raw_value = float(pixel_raw.get(name, float("nan")))
+            adjusted_value = float(pixel_adjusted.get(name, float("nan")))
+            print(
+                f"  {name:>16}   raw={raw_value:.4f}   "
+                f"adjusted={adjusted_value:.4f}",
+                flush=True,
+            )
+        print(flush=True)
+    if pixel_raw:
+        evaluations["raw"].update(pixel_raw)
+    if pixel_adjusted:
+        evaluations["adjusted"].update(pixel_adjusted)
+    write_metrics(evaluations, output_dir)
     return 0
 
 
@@ -1066,17 +1065,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "GT anomaly mask directory mirroring --data_root's layout; "
-            "defaults to --data_root/ground_truth. Used for pixel-level "
-            "evaluation (requires --pixel_metrics)."
-        ),
-    )
-    parser.add_argument(
-        "--pixel_metrics",
-        action="store_true",
-        help=(
-            "Also evaluate pixel-level metrics (P-AUROC/P-AP/P-F1/P-AUPRO) "
-            "on the saved score maps against the GT masks; requires a "
-            "ground-truth directory"
+            "defaults to --data_root/ground_truth. Used for pixel-level and "
+            "region-level evaluation of the raw and two-stage-adjusted score "
+            "maps."
         ),
     )
     parser.add_argument(
