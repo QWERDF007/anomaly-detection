@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -93,7 +94,14 @@ class ImageCanvas(QWidget):
         self.pan = QPointF(0.0, 0.0)
         self.panning = False
         self.pan_last: Optional[QPointF] = None
-        self.setMinimumSize(420, 360)
+        # The GUI has four image columns plus the file list.  Keep the
+        # horizontal minimum small enough that the splitter can fit on a
+        # normal laptop display; fit_to_window scales the image itself.
+        self.setMinimumSize(240, 240)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def sizeHint(self):
@@ -720,12 +728,14 @@ class MainWindow(QMainWindow):
             2, QHeaderView.ResizeMode.ResizeToContents
         )
         self.result_table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.result_table.setMinimumWidth(0)
         self.result_table.setMinimumHeight(120)
         self.result_table.setMaximumHeight(320)
         self.result_table_scroll = QScrollArea()
         self.result_table_scroll.setWidgetResizable(True)
         self.result_table_scroll.setWidget(self.result_table)
         self.result_table_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.result_table_scroll.setMinimumWidth(0)
         self.result_table_scroll.setMinimumHeight(120)
         self.result_table_scroll.setMaximumHeight(320)
 
@@ -806,6 +816,7 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(3, 1)
         splitter.setStretchFactor(4, 1)
         splitter.setSizes([320, 430, 430, 430, 430])
+        self.image_splitter = splitter
 
         formula_panel = QWidget()
         formula_layout = QVBoxLayout(formula_panel)
@@ -940,6 +951,7 @@ class MainWindow(QMainWindow):
     def fit_all_canvases(self) -> None:
         """Reset zoom/pan on every image view to fit the window."""
 
+        self._fit_image_splitter()
         for canvas in (
             self.left_canvas,
             self.raw_canvas,
@@ -947,6 +959,23 @@ class MainWindow(QMainWindow):
             self.adjust_canvas,
         ):
             canvas.fit_to_window()
+
+    def _fit_image_splitter(self) -> None:
+        """Redistribute the file list and four image panels to the window."""
+
+        splitter = getattr(self, "image_splitter", None)
+        if splitter is None or splitter.width() <= 0:
+            return
+        count = splitter.count()
+        if count != 5:
+            return
+        handle_space = splitter.handleWidth() * (count - 1)
+        available = max(splitter.width() - handle_space, 0)
+        file_width = min(320, max(240, int(available * 0.15)))
+        image_width = max(240, (available - file_width) // 4)
+        sizes = [file_width] + [image_width] * 4
+        sizes[-1] += max(0, available - sum(sizes))
+        splitter.setSizes(sizes)
 
     @staticmethod
     def _scrollable_label(label: QLabel) -> QScrollArea:
@@ -2169,6 +2198,7 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setText("查询完成，但没有匹配结果")
         self._update_selected_region_calculation()
+        self._fit_image_splitter()
 
     @staticmethod
     def _library_display_name(result: Mapping[str, Any]) -> str:
