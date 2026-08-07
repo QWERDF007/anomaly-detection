@@ -103,6 +103,7 @@ class ImageCanvas(QWidget):
             QSizePolicy.Policy.Expanding,
         )
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.show_scores = True
 
     def sizeHint(self):
         return self.minimumSizeHint()
@@ -458,9 +459,11 @@ class ImageCanvas(QWidget):
                 text = ""
             elif label is not None:
                 text = str(label)
-            else:
+            elif self.show_scores:
                 score = candidate.get("score")
                 text = f"{float(score):.4f}" if score is not None else ""
+            else:
+                text = ""
             if text:
                 text_rect = QRectF(
                     label_point.x(),
@@ -704,6 +707,7 @@ class MainWindow(QMainWindow):
         self.formula_label.setText(TWO_STAGE_FORMULA_HTML)
 
         self.left_canvas = ImageCanvas(editable=True)
+        self.left_canvas.show_scores = False
         self.right_canvas = ImageCanvas(editable=False)
         self.adjust_canvas = ImageCanvas(editable=False)
         self._reset_calculation_panel()
