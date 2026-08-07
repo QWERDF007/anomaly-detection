@@ -1136,6 +1136,7 @@ def validate_library_compatibility(
         "roi_size",
         "normalize",
         "backbone",
+        "library_mode",
     ):
         good_value = good.get(key)
         anomaly_value = anomaly.get(key)
@@ -1183,6 +1184,40 @@ def _model_feature_mask(
     return resize_mask_to_feature(model_mask, feature_shape)
 
 
+def select_patch_positions(
+    score_map: np.ndarray,
+    mask_feature: np.ndarray,
+    ratio: float,
+) -> np.ndarray:
+    """Return the ``(row, col)`` positions of the highest-score patches inside a region.
+
+    The score map is resampled onto the feature-map grid, then the
+    ``ratio`` fraction of feature pixels with the highest scores inside
+    ``mask_feature`` is selected (stable sort, descending).  Used by the
+    ``patch`` library mode where every selected patch is stored/queried as
+    its own vector instead of one pooled ROIAlign vector.
+    """
+
+    if not 0.0 < float(ratio) <= 1.0:
+        raise ValueError("ratio must be in (0, 1].")
+    mask_feature = np.asarray(mask_feature, dtype=bool)
+    score_map = np.asarray(score_map, dtype=np.float32)
+    feature_height, feature_width = mask_feature.shape
+    if score_map.shape[:2] != (feature_height, feature_width):
+        score_map = cv2.resize(
+            score_map,
+            (feature_width, feature_height),
+            interpolation=cv2.INTER_LINEAR,
+        )
+    coords = np.argwhere(mask_feature)
+    if coords.shape[0] == 0:
+        return coords
+    scores = score_map[coords[:, 0], coords[:, 1]]
+    count = max(1, int(round(coords.shape[0] * float(ratio))))
+    order = np.argsort(-scores, kind="stable")[:count]
+    return coords[order]
+
+
 def _build_feature_library(
     args,
     images_root: Path,
@@ -1208,6 +1243,9 @@ def _build_feature_library(
     if args.feature_source == "raw_patch":
         if patch_backbone is None:
             patch_backbone = load_patch_backbone(args, device)
+    library_mode = str(getattr(args, "library_mode", "roi"))
+    if library_mode not in ("roi", "patch"):
+        raise ValueError(f"Unsupported library_mode: {library_mode}")
     vectors: List[np.ndarray] = []
     records: List[Dict[str, Any]] = []
 
@@ -1236,7 +1274,17 @@ def _build_feature_library(
             if not components:
                 LOGGER.warning("Mask has no valid region: %s", mask_path)
                 continue
-            if args.feature_source == "raw_patch":
+            if library_mode == "patch":
+                score_map, feature = infer_image(
+                    model,
+                    image_path,
+                    transform,
+                    device,
+                    args.feature_merge,
+                    patch_backbone=patch_backbone,
+                    feature_source=args.feature_source,
+                )
+            elif args.feature_source == "raw_patch":
                 feature = extract_raw_patch_feature(
                     patch_backbone,
                     image_path,
@@ -1267,6 +1315,52 @@ def _build_feature_library(
                     image_path,
                     component["component_id"],
                 )
+                continue
+            if library_mode == "patch":
+                patch_ratio = float(getattr(args, "patch_top_ratio", 0.5))
+                positions = select_patch_positions(
+                    score_map,
+                    mask_feature,
+                    patch_ratio,
+                )
+                if positions.shape[0] == 0:
+                    continue
+                base_roi_id = make_roi_id(
+                    image_id,
+                    component["component_id"],
+                )
+                for patch_index, (row, col) in enumerate(positions):
+                    vector = feature[:, int(row), int(col)]
+                    if args.normalize:
+                        vector = l2_normalize(vector)
+                    vector_id = len(vectors)
+                    vectors.append(vector)
+                    records.append(
+                        {
+                            "vector_id": vector_id,
+                            "id": vector_id,
+                            "image_id": image_id,
+                            "roi_id": f"{base_roi_id}_p{patch_index}",
+                            "image_name": image_path.name,
+                            "image_path": str(image_path.resolve()),
+                            "image_relative": image_relative,
+                            "mask_path": str(mask_path.resolve()),
+                            "component_id": int(component["component_id"]),
+                            "patch_index": int(patch_index),
+                            "patch_row": int(row),
+                            "patch_col": int(col),
+                            "area": 1,
+                            "bbox_original": [
+                                float(value) for value in component["bbox"]
+                            ],
+                            "bbox_feature": [
+                                float(col),
+                                float(row),
+                                float(col + 1),
+                                float(row + 1),
+                            ],
+                        }
+                    )
                 continue
             vector = roi_align_masked(
                 feature,
@@ -1305,9 +1399,27 @@ def _build_feature_library(
         )
 
     vectors_array = np.stack(vectors).astype(np.float32, copy=False)
-    if args.feature_source == "raw_patch":
+    if library_mode == "patch":
         metadata = {
             "library_type": library_type,
+            "library_mode": "patch",
+            "patch_top_ratio": float(getattr(args, "patch_top_ratio", 0.5)),
+            "feature_source": args.feature_source,
+            "feature_layout": (
+                "per-patch top-ratio patch tokens; each patch is one vector"
+            ),
+            "roi_size": int(args.roi_size),
+            "normalize": bool(args.normalize),
+            "image_size": int(args.image_size),
+            "crop_size": int(args.crop_size),
+            "backbone": args.backbone,
+            "model": str(Path(args.model).expanduser()),
+            "records": records,
+        }
+    elif args.feature_source == "raw_patch":
+        metadata = {
+            "library_type": library_type,
+            "library_mode": "roi",
             "feature_source": "raw_patch",
             "feature_layout": "final normed patch tokens (x_norm_patchtokens) before ROIAlign",
             "roi_size": int(args.roi_size),
@@ -1321,6 +1433,7 @@ def _build_feature_library(
     else:
         metadata = {
             "library_type": library_type,
+            "library_mode": "roi",
             "feature_source": "dinomaly_encoder_output",
             "feature_layout": "CHW before ROIAlign",
             "feature_merge": args.feature_merge,
@@ -1799,6 +1912,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Do not L2-normalize vectors before adding them to FAISS",
     )
+    build.add_argument(
+        "--library_mode",
+        choices=("roi", "patch"),
+        default="roi",
+        help=(
+            "roi = one pooled ROIAlign vector per annotated region "
+            "(default); patch = one vector per highest-score patch inside "
+            "each region (no ROIAlign)"
+        ),
+    )
+    build.add_argument(
+        "--patch_top_ratio",
+        type=float,
+        default=0.5,
+        help=(
+            "Fraction of highest-score feature patches stored per region in "
+            "patch library mode (default: 0.5 = 50%)"
+        ),
+    )
     build.set_defaults(normalize=True)
 
     build_by_label = subparsers.add_parser(
@@ -1837,6 +1969,25 @@ def build_parser() -> argparse.ArgumentParser:
         dest="normalize",
         action="store_false",
         help="Do not L2-normalize vectors before adding them to FAISS",
+    )
+    build_by_label.add_argument(
+        "--library_mode",
+        choices=("roi", "patch"),
+        default="roi",
+        help=(
+            "roi = one pooled ROIAlign vector per annotated region "
+            "(default); patch = one vector per highest-score patch inside "
+            "each region (no ROIAlign)"
+        ),
+    )
+    build_by_label.add_argument(
+        "--patch_top_ratio",
+        type=float,
+        default=0.5,
+        help=(
+            "Fraction of highest-score feature patches stored per region in "
+            "patch library mode (default: 0.5 = 50%)"
+        ),
     )
     build_by_label.set_defaults(normalize=True)
 
@@ -1916,6 +2067,9 @@ def validate_args(args) -> None:
         raise ValueError("offset_eps cannot be negative")
     if hasattr(args, "score_threshold") and not np.isfinite(args.score_threshold):
         raise ValueError("score_threshold must be finite")
+    if hasattr(args, "library_mode") and args.library_mode == "patch":
+        if not 0.0 < args.patch_top_ratio <= 1.0:
+            raise ValueError("patch_top_ratio must be in (0, 1]")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

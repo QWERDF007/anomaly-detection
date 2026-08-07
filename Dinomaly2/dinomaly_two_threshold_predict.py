@@ -63,6 +63,7 @@ from dinomaly_two_stage import (
     roi_align_masked,
     search_library,
     select_device,
+    select_patch_positions,
     select_strongest_region,
     validate_args,
     validate_library_compatibility,
@@ -342,6 +343,63 @@ def _build_region_result(
     if bbox_feature is None:
         return None
 
+    library_mode = str(good_library.metadata.get("library_mode", "roi"))
+    if library_mode == "patch":
+        patch_ratio = float(good_library.metadata.get("patch_top_ratio", 0.5))
+        positions = select_patch_positions(
+            score_map,
+            mask_feature,
+            patch_ratio,
+        )
+        if positions.shape[0] == 0:
+            return None
+        good_distances = []
+        anomaly_distances = []
+        for row, col in positions:
+            patch_vector = feature[:, int(row), int(col)]
+            if bool(good_library.metadata.get("normalize", True)):
+                patch_vector = l2_normalize(patch_vector)
+            good_distance, good_neighbour = search_library(
+                good_library,
+                patch_vector,
+            )
+            anomaly_distance, anomaly_neighbour = search_library(
+                anomaly_library,
+                patch_vector,
+            )
+            good_distances.append(good_distance)
+            anomaly_distances.append(anomaly_distance)
+        good_distance = float(np.mean(good_distances))
+        anomaly_distance = float(np.mean(anomaly_distances))
+        decision = calculate_distance_offset(
+            good_distance,
+            anomaly_distance,
+            args.offset_scale,
+            args.max_offset,
+            args.offset_eps,
+        )
+        region = {
+            "region_id": int(component["component_id"]),
+            "region_score": top_ratio_mean(
+                score_map[component["mask"]],
+                args.region_top_ratio,
+            ),
+            "library_mode": "patch",
+            "patch_count": int(positions.shape[0]),
+            "patch_top_ratio": patch_ratio,
+            "area": int(component["area"]),
+            "bbox_original": [float(value) for value in component["bbox"]],
+            "bbox_feature": [float(value) for value in bbox_feature],
+            "good_distance": float(good_distance),
+            "anomaly_distance": float(anomaly_distance),
+            **decision,
+            **_match_metadata(good_library, good_neighbour, "good"),
+            **_match_metadata(anomaly_library, anomaly_neighbour, "anomaly"),
+        }
+        region["good_neighbour"] = int(good_neighbour)
+        region["anomaly_neighbour"] = int(anomaly_neighbour)
+        return region
+
     vector = roi_align_masked(
         feature,
         mask_feature,
@@ -365,6 +423,7 @@ def _build_region_result(
             score_map[component["mask"]],
             args.region_top_ratio,
         ),
+        "library_mode": "roi",
         "area": int(component["area"]),
         "bbox_original": [float(value) for value in component["bbox"]],
         "bbox_feature": [float(value) for value in bbox_feature],
@@ -914,6 +973,12 @@ def predict_images(args) -> int:
                     "offset_eps": args.offset_eps,
                     "roi_dilation": args.roi_dilation,
                     "region_top_ratio": args.region_top_ratio,
+                    "library_mode": str(
+                        good_library.metadata.get("library_mode", "roi")
+                    ),
+                    "patch_top_ratio": float(
+                        good_library.metadata.get("patch_top_ratio", 0.5)
+                    ),
                     "min_area_pct": args.min_area_pct,
                     "max_regions": args.max_regions,
                     "process_size": process_size,

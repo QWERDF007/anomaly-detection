@@ -34,6 +34,7 @@ from dinomaly_two_stage import (
     roi_align_masked,
     search_library_topk,
     select_device,
+    select_patch_positions,
 )
 
 
@@ -104,6 +105,41 @@ def load_cached_feature(args, input_path: Path, libraries) -> np.ndarray:
     return np.nan_to_num(feature)
 
 
+def load_cached_score_map(args, input_path: Path, libraries) -> np.ndarray:
+    """Load the cached score map for the query image (patch library mode)."""
+
+    library = libraries[0]
+    root = library.index_path.parent.parent
+    cache_root = root / "preds" / "score_maps"
+    if not cache_root.is_dir():
+        raise RuntimeError(
+            f"Score-map cache directory missing: {cache_root}. "
+            "Run dinomaly_two_threshold_predict.py first."
+        )
+    matches = sorted(
+        path
+        for path in cache_root.rglob(f"{input_path.stem}.npy")
+        if path.is_file()
+    )
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"Expected exactly one cached score map for {input_path} under "
+            f"{cache_root}; found {len(matches)}. "
+            "Run dinomaly_two_threshold_predict.py first."
+        )
+    score_map = np.asarray(np.load(matches[0]), dtype=np.float32)
+    score_map = np.squeeze(score_map)
+    if score_map.ndim != 2:
+        raise ValueError(
+            f"Cached score map must be 2D: {matches[0]}; got {score_map.shape}"
+        )
+    return np.nan_to_num(
+        score_map,
+        nan=0.0,
+        posinf=np.finfo(np.float32).max,
+    )
+
+
 def resolve_library_paths(args) -> List[Path]:
     paths = [Path(path).expanduser() for path in args.library]
     paths.extend(
@@ -144,6 +180,14 @@ def validate_query_libraries(libraries, args) -> None:
                     f"Library {key} differs: {reference.index_path} {stored!r} "
                     f"vs {library.index_path} {other!r}"
                 )
+    mode = str(reference.metadata.get("library_mode", "roi"))
+    for library in libraries[1:]:
+        if str(library.metadata.get("library_mode", "roi")) != mode:
+            raise ValueError(
+                f"Library library_mode differs: {reference.index_path} {mode!r} "
+                f"vs {library.index_path} "
+                f"{library.metadata.get('library_mode', 'roi')!r}"
+            )
 
 
 def query_feature_library(args) -> int:
@@ -197,6 +241,62 @@ def query_feature_library(args) -> int:
     image_size = int(libraries[0].metadata.get("image_size", 672))
     crop_size = int(libraries[0].metadata.get("crop_size", 672))
     roi_size = int(libraries[0].metadata.get("roi_size", 7))
+    library_mode = str(libraries[0].metadata.get("library_mode", "roi"))
+    patch_ratio = (
+        args.patch_top_ratio
+        if args.patch_top_ratio is not None
+        else float(libraries[0].metadata.get("patch_top_ratio", 0.5))
+    )
+    score_map = None
+    if library_mode == "patch":
+        score_map = load_cached_score_map(args, input_path, libraries)
+
+    def add_result(
+        library,
+        distance: float,
+        vector_id: int,
+        rank: int,
+        patch_info: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        record = record_for_vector_id(library.metadata, vector_id)
+        if not record.get("image_id") or not record.get("roi_id"):
+            raise RuntimeError(
+                f"{library.index_path} does not contain image_id/roi_id mapping. "
+                "Rebuild it with the current dinomaly_two_stage.py."
+            )
+        result = {
+            "query_image_id": query_image_id,
+            "query_image_name": input_path.name,
+            "query_image_path": str(input_path.resolve()),
+            "query_region_id": int(component["component_id"]),
+            "query_region_area": int(component["area"]),
+            "query_region_bbox": [
+                float(value) for value in component["bbox"]
+            ],
+            "region_source": region_source,
+            "library_type": library_type,
+            "library_path": str(library.index_path.parent),
+            "rank": int(rank),
+            "distance": float(distance),
+            "vector_id": int(vector_id),
+            "image_id": str(record["image_id"]),
+            "roi_id": str(record["roi_id"]),
+            "image_name": str(record.get("image_name", "")),
+            "image_path": str(record.get("image_path", "")),
+            "image_relative": str(record.get("image_relative", "")),
+            "mask_path": str(record.get("mask_path", "")),
+            "component_id": int(record.get("component_id", -1)),
+            "area": int(record.get("area", 0)),
+            "bbox_original": [
+                float(value) for value in record.get("bbox_original", [])
+            ],
+            "bbox_feature": [
+                float(value) for value in record.get("bbox_feature", [])
+            ],
+        }
+        if patch_info is not None:
+            result.update(patch_info)
+        results.append(result)
 
     for component in components:
         mask_feature = resize_mask_to_feature(
@@ -216,6 +316,49 @@ def query_feature_library(args) -> int:
                 component["component_id"],
             )
             continue
+        if library_mode == "patch":
+            positions = select_patch_positions(
+                score_map,
+                mask_feature,
+                patch_ratio,
+            )
+            if positions.shape[0] == 0:
+                vanished_count += 1
+                continue
+            for patch_index, (row, col) in enumerate(positions):
+                patch_vector = feature[:, int(row), int(col)]
+                patch_info = {
+                    "query_patch_index": int(patch_index),
+                    "patch_row": int(row),
+                    "patch_col": int(col),
+                }
+                for library in libraries:
+                    if bool(library.metadata.get("normalize", True)):
+                        query_vector = l2_normalize(patch_vector)
+                    else:
+                        query_vector = patch_vector
+                    neighbours = search_library_topk(
+                        library,
+                        query_vector,
+                        args.top_k,
+                    )
+                    library_type = str(
+                        library.metadata.get(
+                            "library_type",
+                            library.index_path.parent.name,
+                        )
+                    )
+                    for rank, (distance, vector_id) in enumerate(
+                        neighbours, start=1
+                    ):
+                        add_result(
+                            library,
+                            distance,
+                            vector_id,
+                            rank,
+                            patch_info=patch_info,
+                        )
+            continue
         vector = roi_align_masked(
             feature,
             mask_feature,
@@ -233,47 +376,13 @@ def query_feature_library(args) -> int:
                 args.top_k,
             )
             library_type = str(
-                library.metadata.get("library_type", library.index_path.parent.name)
+                library.metadata.get(
+                    "library_type",
+                    library.index_path.parent.name,
+                )
             )
             for rank, (distance, vector_id) in enumerate(neighbours, start=1):
-                record = record_for_vector_id(library.metadata, vector_id)
-                if not record.get("image_id") or not record.get("roi_id"):
-                    raise RuntimeError(
-                        f"{library.index_path} does not contain image_id/roi_id mapping. "
-                        "Rebuild it with the current dinomaly_two_stage.py."
-                    )
-                results.append(
-                    {
-                        "query_image_id": query_image_id,
-                        "query_image_name": input_path.name,
-                        "query_image_path": str(input_path.resolve()),
-                        "query_region_id": int(component["component_id"]),
-                        "query_region_area": int(component["area"]),
-                        "query_region_bbox": [
-                            float(value) for value in component["bbox"]
-                        ],
-                        "region_source": region_source,
-                        "library_type": library_type,
-                        "library_path": str(library.index_path.parent),
-                        "rank": int(rank),
-                        "distance": float(distance),
-                        "vector_id": int(vector_id),
-                        "image_id": str(record["image_id"]),
-                        "roi_id": str(record["roi_id"]),
-                        "image_name": str(record.get("image_name", "")),
-                        "image_path": str(record.get("image_path", "")),
-                        "image_relative": str(record.get("image_relative", "")),
-                        "mask_path": str(record.get("mask_path", "")),
-                        "component_id": int(record.get("component_id", -1)),
-                        "area": int(record.get("area", 0)),
-                        "bbox_original": [
-                            float(value) for value in record.get("bbox_original", [])
-                        ],
-                        "bbox_feature": [
-                            float(value) for value in record.get("bbox_feature", [])
-                        ],
-                    }
-                )
+                add_result(library, distance, vector_id, rank)
 
     if not results:
         if vanished_count:
@@ -309,6 +418,9 @@ def query_feature_library(args) -> int:
         "query_region_id",
         "query_region_area",
         "query_region_bbox",
+        "query_patch_index",
+        "patch_row",
+        "patch_col",
         "region_source",
         "library_type",
         "library_path",
@@ -369,6 +481,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min_area", type=int, default=1)
     parser.add_argument("--max_regions", type=int, default=0)
     parser.add_argument("--top_k", type=int, default=1)
+    parser.add_argument(
+        "--patch_top_ratio",
+        type=float,
+        default=None,
+        help=(
+            "Fraction of highest-score patches queried per ROI in patch "
+            "library mode; defaults to the library's metadata value"
+        ),
+    )
     parser.add_argument("--library", nargs="+", default=[])
     parser.add_argument("--good_library", default=None)
     parser.add_argument("--anomaly_library", default=None)
@@ -386,6 +507,8 @@ def validate_args(args) -> None:
         raise ValueError("top_k must be at least 1")
     if args.score_map and args.score_threshold is None:
         raise ValueError("--score_threshold is required with --score_map")
+    if args.patch_top_ratio is not None and not 0.0 < args.patch_top_ratio <= 1.0:
+        raise ValueError("patch_top_ratio must be in (0, 1]")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

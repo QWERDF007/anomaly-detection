@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -654,6 +655,19 @@ class MainWindow(QMainWindow):
         self.region_top_spin.setToolTip(
             "区域分数 top x% 均值；初始值来自 run.json 元数据，可在此调整"
         )
+        self.patch_top_spin = QDoubleSpinBox()
+        self.patch_top_spin.setRange(0.1, 100.0)
+        self.patch_top_spin.setDecimals(1)
+        self.patch_top_spin.setSingleStep(1.0)
+        self.patch_top_spin.setSuffix("%")
+        self.patch_top_spin.setValue(
+            float(self._library_patch_top_ratio()) * 100.0
+        )
+        self.patch_top_spin.setToolTip(
+            "patch 模式库：区域内按异常分数排序取前 x% 的 patch 特征"
+            "（每个 patch 独立入库/查询，不做 ROI 池化）；"
+            "初始值来自库 metadata，可在此调整"
+        )
         self.threshold_label = QLabel()
         self.threshold_label.setStyleSheet("color: #ff9800; font-weight: bold;")
         self._update_threshold_label()
@@ -720,6 +734,8 @@ class MainWindow(QMainWindow):
         controls.addStretch(1)
         controls.addWidget(QLabel("区域 top%："))
         controls.addWidget(self.region_top_spin)
+        controls.addWidget(QLabel("patch%："))
+        controls.addWidget(self.patch_top_spin)
         controls.addWidget(self.fit_button)
         controls.addWidget(self.threshold_label)
         controls.addWidget(self.query_button)
@@ -740,6 +756,10 @@ class MainWindow(QMainWindow):
         self.file_tree_scroll.setFrameShape(QFrame.Shape.NoFrame)
         file_layout.addWidget(self.file_tree_scroll, 1)
         file_panel.setMaximumWidth(560)
+        self.file_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.file_tree.customContextMenuRequested.connect(
+            self._file_tree_context_menu
+        )
 
         raw_panel = QWidget()
         raw_layout = QVBoxLayout(raw_panel)
@@ -935,6 +955,18 @@ class MainWindow(QMainWindow):
             f"max_offset={max_offset_text}   "
             f"({source})"
         )
+
+    def _library_patch_top_ratio(self) -> float:
+        root = self._preds_dir().parent
+        metadata_path = root / "good" / "metadata.json"
+        try:
+            with metadata_path.open("r", encoding="utf-8") as file:
+                metadata = json.load(file)
+            if str(metadata.get("library_mode", "roi")) == "patch":
+                return float(metadata.get("patch_top_ratio", 0.5))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+        return 0.5
 
     def _region_top_ratio_changed(self, value: float) -> None:
         ratio = float(value) / 100.0
@@ -1926,6 +1958,20 @@ class MainWindow(QMainWindow):
             return
         self._apply_search(text)
 
+    def _file_tree_context_menu(self, position) -> None:
+        item = self.file_tree.itemAt(position)
+        if item is None:
+            return
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+        menu = QMenu(self.file_tree)
+        copy_action = menu.addAction("复制路径")
+        chosen = menu.exec(self.file_tree.viewport().mapToGlobal(position))
+        if chosen == copy_action:
+            QApplication.clipboard().setText(str(path))
+            self.status_label.setText(f"已复制：{path}")
+
     def file_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
         path_text = item.data(0, Qt.ItemDataRole.UserRole)
         if not path_text:
@@ -1973,6 +2019,12 @@ class MainWindow(QMainWindow):
             "--gpu",
             str(self.args.gpu),
         ]
+        arguments.extend(
+            [
+                "--patch_top_ratio",
+                f"{float(self.patch_top_spin.value()) / 100.0:.4f}",
+            ]
+        )
         if self.args.faiss_on_gpu:
             arguments.append("--faiss_on_gpu")
         return arguments
