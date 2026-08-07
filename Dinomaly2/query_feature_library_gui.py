@@ -1765,7 +1765,7 @@ class MainWindow(QMainWindow):
         components = [
             component
             for component in components
-            if int(component.get("area", 0)) <= 0.5 * image_area
+            if int(component.get("area", 0)) <= 0.9 * image_area
         ]
         self.raw_canvas.set_candidate_regions(components, emit=False)
         return mask_path
@@ -1830,8 +1830,8 @@ class MainWindow(QMainWindow):
                 component.setdefault("color", "#ff1744")
                 filtered.append(component)
                 continue
-            # 背景高分连片会把整图变成一个连通域；不作为候选区域显示。
-            if int(component.get("area", 0)) > 0.5 * image_area:
+            # 背景高分连片会把整图变成一个连通域；仅过滤接近整图的区域。
+            if int(component.get("area", 0)) > 0.9 * image_area:
                 continue
             component["label"] = None
             region_score = self._predictor_region_score(
