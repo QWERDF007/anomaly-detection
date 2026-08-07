@@ -350,6 +350,9 @@ def query_feature_library(args) -> int:
             if positions.shape[0] == 0:
                 vanished_count += 1
                 continue
+            # 与预测一致：只用区域内分数最高的单个 patch 查询
+            # （select_patch_positions 按分数降序，首行即最大）。
+            positions = positions[:1]
             patch_vectors = []
             for row, col in positions:
                 patch_vector = feature[:, int(row), int(col)]

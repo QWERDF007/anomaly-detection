@@ -353,6 +353,9 @@ def _build_region_result(
         )
         if positions.shape[0] == 0:
             return None
+        # 建库用区域内前 x% 的 patch 全量入库；查询只用区域内
+        # 分数最高的单个 patch（select_patch_positions 降序，首行即最大）。
+        positions = positions[:1]
         good_matches = []
         anomaly_matches = []
         for row, col in positions:
