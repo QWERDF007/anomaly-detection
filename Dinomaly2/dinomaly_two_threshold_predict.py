@@ -8,9 +8,11 @@ Images are classified in three initial bands:
   libraries, apply the distance-based offset, and make a final binary
   good/anomaly decision.
 
-If the adjusted score remains between the two thresholds, the nearest feature
-library decides the final label.  If there is no valid ROI match, the midpoint
-of the two thresholds is used as the deterministic fallback.
+The offset magnitude is the distance to the nearer library
+(``min(d_good, d_anomaly)``), signed negative when the good library is
+nearer and positive when the anomaly library is nearer.  After the offset
+is applied, scores at or above the good threshold (including the middle
+band) are final anomaly.
 """
 
 from __future__ import annotations
@@ -271,19 +273,17 @@ def final_score_label(
     anomaly_threshold: float,
     similar_library: str = "",
 ) -> tuple[str, str]:
-    """Make a binary final decision and return ``(label, reason)``."""
+    """Make a binary final decision and return ``(label, reason)``.
+
+    Scores strictly below the good threshold are normal; anything at or
+    above it, including the middle band, is anomaly.
+    """
 
     if float(adjusted_score) < float(good_threshold):
         return "good", "adjusted_below_good_threshold"
     if float(adjusted_score) > float(anomaly_threshold):
         return "anomaly", "adjusted_above_anomaly_threshold"
-    if similar_library in {"good", "anomaly"}:
-        return similar_library, f"feature_library_{similar_library}"
-    midpoint = (float(good_threshold) + float(anomaly_threshold)) / 2.0
-    return (
-        ("good" if float(adjusted_score) < midpoint else "anomaly"),
-        "threshold_midpoint_fallback",
-    )
+    return "anomaly", "adjusted_in_middle_band"
 
 
 def _match_metadata(

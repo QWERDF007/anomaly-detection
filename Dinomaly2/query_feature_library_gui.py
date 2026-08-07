@@ -55,17 +55,15 @@ TWO_STAGE_FORMULA_HTML = """<h4 style="margin:2px;">两阶段分数调整公式<
 <pre style="font-family:Consolas,'Courier New',monospace; font-size:9pt; white-space:pre-wrap;">
 d_good      = ‖v − p_good‖₂            良品库最近邻 L2 距离
 d_anomaly   = ‖v − p_anomaly‖₂         异常库最近邻 L2 距离
-confidence  = |d_good − d_anomaly| / (d_good + d_anomaly + ε)
-offset      = min(confidence × offset_scale, max_offset)
+offset      = min(d_good, d_anomaly) × offset_scale（上限 max_offset）
 signed_offset = −offset（近良品库） / +offset（近异常库）
 adjusted_score = region_score + signed_offset
-region_score = score_map 在 ROI 内的最大值
+region_score = score_map 在 ROI 内 top x% 均值
 </pre>
 <b>双阈值判定</b>（good_threshold &lt; anomaly_threshold）：
 <ul style="margin:2px; padding-left:20px;">
 <li>adjusted_score &lt; good_threshold → <span style="color:#00c853;"><b>正常</b></span></li>
-<li>adjusted_score &gt; anomaly_threshold → <span style="color:#ff1744;"><b>异常</b></span></li>
-<li>介于两阈值之间 → 取更近库类型；平局取阈值中点</li>
+<li>adjusted_score ≥ good_threshold（含中间带与超过 anomaly_threshold）→ <span style="color:#ff1744;"><b>异常</b></span></li>
 </ul>"""
 
 

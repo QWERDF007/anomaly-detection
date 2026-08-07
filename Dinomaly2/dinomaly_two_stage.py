@@ -100,16 +100,15 @@ def calculate_distance_offset(
 ) -> Dict[str, Any]:
     """Turn two nearest-neighbour distances into a signed score adjustment.
 
-    FAISS returns smaller distances for more similar features.  The
-    confidence is the relative distance margin::
+    FAISS returns smaller distances for more similar features.  The offset
+    magnitude is the smaller of the two distances (the distance to the
+    nearer library)::
 
-        confidence = (farther - nearer) / (farther + nearer + eps)
+        offset = min(d_good, d_anomaly) * offset_scale   (capped by max_offset)
 
-    Thus the offset is dimensionless, bounded by ``offset_scale`` (and also
-    by ``max_offset`` when supplied), and does not depend on the absolute
-    FAISS distance scale.  A good match has a negative signed offset; an
-    anomaly match has a positive signed offset.  Equal or invalid distances
-    produce no correction and are reported as ``tie``/``invalid``.
+    A good match has a negative signed offset; an anomaly match has a
+    positive signed offset.  Equal or invalid distances produce no
+    correction and are reported as ``tie``/``invalid``.
     """
 
     good = float(good_distance)
@@ -133,10 +132,7 @@ def calculate_distance_offset(
         }
 
     nearer = min(good, anomaly)
-    farther = max(good, anomaly)
-    confidence = (farther - nearer) / (farther + nearer + max(float(eps), 0.0))
-    confidence = float(np.clip(confidence, 0.0, 1.0))
-    offset = confidence * max(float(offset_scale), 0.0)
+    offset = nearer * max(float(offset_scale), 0.0)
     if max_offset is not None:
         offset = min(offset, max(float(max_offset), 0.0))
 
@@ -144,7 +140,7 @@ def calculate_distance_offset(
     signed_offset = -offset if similar_library == "good" else offset
     return {
         "similar_library": similar_library,
-        "confidence": confidence,
+        "confidence": float(nearer),
         "offset": float(offset),
         "signed_offset": float(signed_offset),
     }
