@@ -1756,10 +1756,18 @@ class MainWindow(QMainWindow):
         mask_path = self._artifact_path(root, image_path, ".png")
         if mask_path is None:
             return None
-        self.raw_canvas.set_candidate_regions(
-            self._mask_components(mask_path, score_map),
-            emit=False,
+        components = self._mask_components(mask_path, score_map)
+        image_area = (
+            self.left_canvas.image.width() * self.left_canvas.image.height()
+            if self.left_canvas.image is not None
+            else 1
         )
+        components = [
+            component
+            for component in components
+            if int(component.get("area", 0)) <= 0.5 * image_area
+        ]
+        self.raw_canvas.set_candidate_regions(components, emit=False)
         return mask_path
 
     def _load_detail_for(self, image_path: Path) -> Optional[Dict[str, Any]]:
