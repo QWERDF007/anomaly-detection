@@ -1809,18 +1809,34 @@ class MainWindow(QMainWindow):
                         components = raw_components
                         result_path = raw_mask_path
                         fallback_used = True
-        default_color = {
-            "good": "#00c853",
-            "anomaly": "#ff1744",
-        }.get(band, "#00bcd4")
-        default_label = {
-            "good": "GOOD",
-            "anomaly": "Anomaly",
-        }.get(band)
+        good_threshold = float(self.args.good_threshold)
+        anomaly_threshold = float(self.args.anomaly_threshold)
+        image_area = (
+            self.left_canvas.image.width() * self.left_canvas.image.height()
+            if self.left_canvas.image is not None
+            else 1
+        )
+        filtered: List[Dict[str, Any]] = []
         for component in components:
-            component.setdefault("color", default_color)
-            if default_label is not None:
-                component.setdefault("label", default_label)
+            if component.get("is_annotation"):
+                component.setdefault("color", "#ff1744")
+                filtered.append(component)
+                continue
+            # 背景高分连片会把整图变成一个连通域；不作为候选区域显示。
+            if int(component.get("area", 0)) > 0.5 * image_area:
+                continue
+            component["label"] = None
+            region_score = self._predictor_region_score(
+                np.asarray(component["mask"], dtype=bool)
+            )
+            if region_score < good_threshold:
+                component["color"] = "#00c853"
+            elif region_score > anomaly_threshold:
+                component["color"] = "#ff1744"
+            else:
+                component["color"] = "#00bcd4"
+            filtered.append(component)
+        components = filtered
 
         # Reuse the annotation regions already loaded on the raw canvas.
         # Do not read --mask_dir again here or create a second annotation
