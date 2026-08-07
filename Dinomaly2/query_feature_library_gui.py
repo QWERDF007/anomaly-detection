@@ -182,6 +182,8 @@ class ImageCanvas(QWidget):
             label = region.get("label")
             if label is not None:
                 stored_region["label"] = str(label)
+            if bool(region.get("is_annotation", False)):
+                stored_region["is_annotation"] = True
             self.candidate_regions.append(stored_region)
         self.selected_candidate_index = None
         if emit:
@@ -455,7 +457,7 @@ class ImageCanvas(QWidget):
                     20.0,
                 )
                 painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
-                painter.setPen(QColor("#ff1744"))
+                painter.setPen(QColor(candidate.get("color", "#ff1744")))
                 painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft, text)
         for shape in self.shapes:
             self._draw_shape(painter, shape, QColor("#00e676"))
@@ -632,7 +634,10 @@ class MainWindow(QMainWindow):
         )
         self.open_button = QPushButton("选择文件")
         self.mode_combo = QComboBox()
-        if self._artifact_root("candidate_regions") is not None:
+        if (
+            self._artifact_root("candidate_regions") is not None
+            or getattr(args, "mask_dir", None)
+        ):
             self.mode_combo.addItem("候选区域", "candidate")
         self.mode_combo.addItem("矩形", "rectangle")
         self.mode_combo.addItem("多边形", "polygon")
@@ -904,7 +909,7 @@ class MainWindow(QMainWindow):
             self._update_raw_score_label(image_path)
             self._update_two_stage_panel()
             self._update_selected_region_calculation()
-            if candidate_path is not None:
+            if candidate_path is not None or self.left_canvas.candidate_regions:
                 candidate_index = self.mode_combo.findData("candidate")
                 if candidate_index >= 0:
                     self.mode_combo.setCurrentIndex(candidate_index)
@@ -1106,23 +1111,26 @@ class MainWindow(QMainWindow):
 
         self.adjust_canvas.set_image(image_path)
         regions = detail.get("regions", [])
-        judged = []
+        candidate_judged = []
+        final_judged = []
         unmatched_count = 0
         for region_data in self.left_canvas.candidate_regions:
             candidate = dict(region_data)
-            candidate["color"] = "#00bcd4"
-            candidate["label"] = None
+            candidate["color"] = candidate.get("color", "#00bcd4")
+            candidate["label"] = candidate.get("label")
             candidate["is_judged"] = False
-            match = self._find_detail_region(
-                regions,
-                candidate.get("bbox"),
-                candidate.get("area"),
-                process_size=int(detail.get("process_size") or 0),
-                image_shape=(
-                    self.left_canvas.image.height(),
-                    self.left_canvas.image.width(),
-                ),
-            )
+            match = None
+            if not candidate.get("is_annotation"):
+                match = self._find_detail_region(
+                    regions,
+                    candidate.get("bbox"),
+                    candidate.get("area"),
+                    process_size=int(detail.get("process_size") or 0),
+                    image_shape=(
+                        self.left_canvas.image.height(),
+                        self.left_canvas.image.width(),
+                    ),
+                )
             if match is not None:
                 region_score = float(match.get("region_score", 0.0))
                 signed_offset = float(match.get("signed_offset", 0.0))
@@ -1136,21 +1144,27 @@ class MainWindow(QMainWindow):
                 candidate["color"] = (
                     "#00c853" if label == "good" else "#ff1744"
                 )
+                candidate["label"] = "GOOD" if label == "good" else "Anomaly"
                 candidate["score"] = adjusted
                 candidate["is_judged"] = True
-                # The adjustment canvas is the final visualization.  A
-                # middle-band ROI corrected to good must disappear from this
-                # canvas rather than remain as a green candidate polygon.
-                if label == "good":
-                    continue
             else:
-                unmatched_count += 1
-            judged.append(candidate)
+                if not candidate.get("is_annotation"):
+                    unmatched_count += 1
+            candidate_judged.append(candidate)
+            # The adjustment canvas remains an anomaly-only final view;
+            # the candidate canvas above intentionally retains GOOD ROIs for
+            # manual GOOD/Anomaly library retrieval.
+            if (
+                not candidate.get("is_annotation")
+                and candidate.get("label") != "GOOD"
+            ):
+                final_judged.append(candidate)
         self.unmatched_region_count = unmatched_count
-        self.adjust_canvas.set_candidate_regions(judged, emit=False)
+        self.left_canvas.set_candidate_regions(candidate_judged, emit=False)
+        self.adjust_canvas.set_candidate_regions(final_judged, emit=False)
         judged_with_score = [
             candidate
-            for candidate in judged
+            for candidate in final_judged
             if candidate.get("is_judged") and candidate.get("score") is not None
         ]
         if judged_with_score:
@@ -1581,6 +1595,8 @@ class MainWindow(QMainWindow):
             return
         for region in mask_regions:
             region["color"] = "#ff1744"
+            region["label"] = "Anomaly"
+            region["is_annotation"] = True
             if score_map is not None and np.any(region["mask"]):
                 region_values = np.asarray(score_map)[region["mask"]]
                 if region_values.size:
@@ -1697,27 +1713,19 @@ class MainWindow(QMainWindow):
         self.left_canvas.clear_candidate_regions(emit=False)
         detail = self._load_detail_for(image_path) or {}
         band = str(detail.get("initial_label", ""))
-        stage2_applied = bool(detail.get("stage2_applied", False))
         fallback_used = False
         result_path = None
         components = []
-        # Prefer the post-adjustment mask.  It contains only regions that
-        # remain anomalous after the feature-library correction, so middle-band
-        # regions corrected to good are not drawn in the candidate panel.
-        adjusted_root = self._artifact_root("adjusted_candidate_regions")
-        if stage2_applied and adjusted_root is not None:
-            result_path = self._artifact_path(adjusted_root, image_path, ".png")
+        # The candidate panel is the ROI retrieval panel.  Keep middle-band
+        # candidates and also expose first-stage regions that never entered
+        # stage two, so every useful GOOD/Anomaly ROI can be queried.
+        artifact = "candidate_regions" if band == "middle" else "raw_regions"
+        root = self._artifact_root(artifact)
+        if root is not None:
+            result_path = self._artifact_path(root, image_path, ".png")
         if result_path is not None:
             components = self._mask_components(result_path, score_map)
-        # Keep compatibility with prediction runs created before the adjusted
-        # visualization mask was introduced.
-        if result_path is None or not Path(result_path).is_file():
-            root = self._artifact_root("candidate_regions")
-            if root is not None:
-                result_path = self._artifact_path(root, image_path, ".png")
-            if result_path is not None:
-                components = self._mask_components(result_path, score_map)
-        if not components and band == "anomaly":
+        if not components and band == "middle":
             raw_root = self._artifact_root("raw_regions")
             if raw_root is not None:
                 raw_mask_path = self._artifact_path(raw_root, image_path, ".png")
@@ -1727,20 +1735,40 @@ class MainWindow(QMainWindow):
                         components = raw_components
                         result_path = raw_mask_path
                         fallback_used = True
+        default_color = {
+            "good": "#00c853",
+            "anomaly": "#ff1744",
+        }.get(band, "#00bcd4")
+        default_label = {
+            "good": "GOOD",
+            "anomaly": "Anomaly",
+        }.get(band)
+        for component in components:
+            component.setdefault("color", default_color)
+            if default_label is not None:
+                component.setdefault("label", default_label)
+
+        # Reuse the annotation regions already loaded on the raw canvas.
+        # Do not read --mask_dir again here or create a second annotation
+        # loading path for the candidate panel.
+        for region in self.raw_canvas.candidate_regions:
+            if region.get("is_annotation"):
+                components.append(dict(region))
+
         self.left_canvas.set_candidate_regions(components, emit=False)
         self._update_candidate_band_label(band, fallback_used)
         return result_path
 
     def _update_candidate_band_label(self, band: str, fallback_used: bool) -> None:
         if band == "middle":
-            text = "候选区域 / 手动画 ROI（中间带图：二阶段后异常候选，单选后查询）"
+            text = "候选区域 / 手动画 ROI（候选、GOOD绿色、Anomaly红色、标注异常红色；单选后查询）"
         elif band == "anomaly":
             if fallback_used:
-                text = "候选区域 / 手动画 ROI（异常图：显示原始阈值区域）"
+                text = "候选区域 / 手动画 ROI（GOOD绿色、Anomaly红色、标注异常红色；单选后查询）"
             else:
-                text = "候选区域 / 手动画 ROI（异常图：无候选区域）"
+                text = "候选区域 / 手动画 ROI（Anomaly红色、标注异常红色；单选后查询）"
         elif band == "good":
-            text = "候选区域 / 手动画 ROI（良品图：无候选区域）"
+            text = "候选区域 / 手动画 ROI（GOOD绿色、标注异常红色；单选后查询）"
         else:
             text = "候选区域 / 手动画 ROI（单选后查询）"
         self.candidate_panel_label.setText(text)

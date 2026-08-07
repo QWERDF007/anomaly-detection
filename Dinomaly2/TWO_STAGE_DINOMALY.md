@@ -217,7 +217,7 @@ python query_feature_library.py \
 ## 6. PySide6 图形界面反查
 
 安装依赖后可以启动 GUI。界面从左到右显示：原始 Dinomaly2 按
-`good_threshold` 判定的区域、中间的二阶段后异常候选区域或手动画 ROI、以及
+`good_threshold` 判定的区域、用于检索的全量候选/标注 ROI 或手动画 ROI、以及
 检索得到的原始图像和对应 ROI。中间候选区域只支持单选；选中后点击“查询特征库”。
 没有候选区域时，可选择矩形或多边形手动画 ROI；多边形左键依次点击顶点后，点击右键即可
 完成多边形（也可以双击或点击“完成多边形”按钮）。下方结果表只显示原始图像路径和距离，
@@ -237,9 +237,9 @@ python .\query_feature_library_gui.py `
 ROI bbox 打印到启动 GUI 的命令行窗口；完整 CSV/JSON 结果保存在每次查询的输出子目录中。
 
 如果使用双阈值预测生成的候选区域 Mask，可以按输入图像在 `data_root` 下的相对路径
-自动加载对应的 `raw_regions/<relative>.png` 和二阶段后的
-`adjusted_candidate_regions/<relative>.png`。左侧显示原始阈值区域，中间只会把二阶段后仍为
-异常的候选 Mask 连通域绘制为多边形；被调整为良品的区域不会显示。单击一个候选多边形后再点击
+自动加载对应的 `raw_regions/<relative>.png` 和 `candidate_regions/<relative>.png`。中间候选图会保留
+中间带候选 ROI、第一阶段直接判定的 GOOD/Anomaly ROI，以及从第一幅原始图复用的人工标注 Anomaly ROI；
+GOOD 用绿色，Anomaly 和标注区域用红色。单击一个候选多边形后再点击
 查询；候选区域模式仍可切换回矩形或多边形手动画 ROI。
 
 ```powershell
