@@ -62,9 +62,12 @@ PER_IMAGE_METRIC_FIELDS = (
     "gt_region_count",
     "detected_region_count",
     "missed_region_count",
+    "tp_region_count",
+    "fp_region_count",
     *PIXEL_METRIC_NAMES,
     "R-MissRate",
     "R-PixelCoverage",
+    "R-FPR",
 )
 
 

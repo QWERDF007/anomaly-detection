@@ -960,7 +960,16 @@ def predict_images(args) -> int:
     )
     if pixel_raw and pixel_adjusted:
         print("\n像素级/区域级评估对比（原始 vs 二次调整后）：", flush=True)
-        for name in ("P-AUROC", "P-AP", "P-F1", "P-AUPRO", "R-MissRate", "R-PixelCoverage"):
+        for name in (
+            "P-AUROC",
+            "P-AP",
+            "P-F1",
+            "P-AUPRO",
+            "R-MissRate",
+            "R-PixelCoverage",
+            "R-FPR",
+            "R-FP-RegionCount",
+        ):
             raw_value = float(pixel_raw.get(name, float("nan")))
             adjusted_value = float(pixel_adjusted.get(name, float("nan")))
             print(

@@ -45,6 +45,8 @@ REGION_METRIC_NAMES = (
     "P-F1-Threshold",
     "R-MissRate",
     "R-PixelCoverage",
+    "R-FPR",
+    "R-FP-RegionCount",
     "R-GT-ImageCount",
     "R-GT-RegionCount",
 )
@@ -322,13 +324,16 @@ def region_detection_metrics(
     per_image_records: Optional[Sequence[Dict[str, object]]] = None,
     p_f1_threshold: Optional[float] = None,
 ) -> Dict[str, float]:
-    """Measure GT-region misses and pixel coverage at the P-F1 threshold.
+    """Measure GT-region misses, pixel coverage and false-positive regions.
 
     A GT connected component is detected when *any* predicted positive pixel
     overlaps it.  A component contributes at most one detection even if it is
     touched by many disconnected predicted regions.  Every GT component also
     contributes its intersected-pixel ratio; missed components have coverage
-    zero. Images without GT regions are excluded from the image-wise mean.
+    zero.  A predicted connected component is a false positive when it does
+    not overlap any GT component.  Images without GT regions are excluded from
+    the image-wise means of miss rate and coverage; the false-positive rate
+    averages every image (no prediction counts as zero).
     """
 
     masks = np.asarray(masks, dtype=np.uint8)
@@ -342,11 +347,15 @@ def region_detection_metrics(
 
     image_miss_rates = []
     image_pixel_coverages = []
+    image_fp_rates = []
     total_regions = 0
+    total_fp_regions = 0
     for index, (mask, score_map) in enumerate(zip(masks, score_maps)):
         gt_labels = measure.label(mask.astype(bool))
         region_count = int(gt_labels.max())
         prediction = score_map >= threshold
+        pred_labels = measure.label(prediction.astype(np.uint8))
+        pred_count = int(pred_labels.max())
         detected = 0
         region_coverages = []
         for region_id in range(1, region_count + 1):
@@ -359,6 +368,21 @@ def region_detection_metrics(
             # are accumulated without double-counting pixels.
             region_coverages.append(covered_pixels / int(region_mask.sum()))
         missed = region_count - detected
+        true_positive = 0
+        for pred_id in range(1, pred_count + 1):
+            pred_mask = pred_labels == pred_id
+            hit_gt = any(
+                bool(np.any(pred_mask & (gt_labels == region_id)))
+                for region_id in range(1, region_count + 1)
+            )
+            if hit_gt:
+                true_positive += 1
+        false_positive = pred_count - true_positive
+        total_fp_regions += false_positive
+        if pred_count:
+            image_fp_rates.append(false_positive / pred_count)
+        else:
+            image_fp_rates.append(0.0)
         if region_count:
             miss_rate = missed / region_count
             image_miss_rates.append(miss_rate)
@@ -374,8 +398,13 @@ def region_detection_metrics(
                     "gt_region_count": region_count,
                     "detected_region_count": detected,
                     "missed_region_count": missed,
+                    "tp_region_count": true_positive,
+                    "fp_region_count": false_positive,
                     "R-MissRate": miss_rate,
                     "R-PixelCoverage": pixel_coverage,
+                    "R-FPR": (
+                        false_positive / pred_count if pred_count else 0.0
+                    ),
                 }
             )
 
@@ -392,6 +421,10 @@ def region_detection_metrics(
             if image_pixel_coverages
             else float("nan")
         ),
+        "R-FPR": (
+            float(np.mean(image_fp_rates)) if image_fp_rates else float("nan")
+        ),
+        "R-FP-RegionCount": float(total_fp_regions),
         "R-GT-ImageCount": float(len(image_miss_rates)),
         "R-GT-RegionCount": float(total_regions),
     }
