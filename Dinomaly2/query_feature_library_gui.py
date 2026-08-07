@@ -104,15 +104,6 @@ class ImageCanvas(QWidget):
         )
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.show_scores = True
-        self.markers: List[Tuple[QPointF, QColor]] = []
-
-    def set_markers(self, markers: Sequence[Tuple[QPointF, QColor]]) -> None:
-        self.markers = [(QPointF(point), QColor(color)) for point, color in markers]
-        self.update()
-
-    def clear_markers(self) -> None:
-        self.markers.clear()
-        self.update()
 
     def sizeHint(self):
         return self.minimumSizeHint()
@@ -130,7 +121,6 @@ class ImageCanvas(QWidget):
         self.clear_shapes(emit=False)
         self.clear_candidate_regions(emit=False)
         self.clear_overlay()
-        self.clear_markers()
         self.update()
 
     def clear_image(self) -> None:
@@ -143,7 +133,6 @@ class ImageCanvas(QWidget):
         self.clear_shapes(emit=False)
         self.clear_candidate_regions(emit=False)
         self.clear_overlay()
-        self.clear_markers()
         self.update()
 
     def set_mode(self, mode: str) -> None:
@@ -518,12 +507,6 @@ class ImageCanvas(QWidget):
                 text_rect = QRectF(top_left.x(), top_left.y() - 24, 420, 22)
                 painter.setPen(QColor("#ff1744"))
                 painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft, self.overlay_text)
-        for point, color in self.markers:
-            widget_point = self.image_to_widget(point)
-            painter.setPen(QPen(QColor("#ffffff"), 2.0))
-            painter.setBrush(QColor(color))
-            painter.drawEllipse(widget_point, 6.0, 6.0)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.end()
 
     def mousePressEvent(self, event) -> None:
@@ -957,43 +940,6 @@ class MainWindow(QMainWindow):
         top_count = max(1, int(values.size * region_ratio))
         return float(np.sort(values)[-top_count:].mean())
 
-    def _update_patch_markers(self) -> None:
-        """Mark the nearest good/anomaly patch of the query ROI on the canvas.
-
-        Uses the per-patch nearest distances returned by the query process:
-        the good-library best patch is drawn green and the anomaly-library
-        best patch red, at their original-image coordinates.
-        """
-
-        markers: List[Tuple[QPointF, QColor]] = []
-        good_best = None
-        anomaly_best = None
-        for result in self.results:
-            if not result.get("patch_x_original") or not result.get("patch_y_original"):
-                continue
-            distance = float(result.get("distance", float("inf")))
-            library_type = self._result_library_type(result)
-            if library_type == "good":
-                if good_best is None or distance < good_best[0]:
-                    good_best = (distance, result)
-            elif library_type == "anomaly":
-                if anomaly_best is None or distance < anomaly_best[0]:
-                    anomaly_best = (distance, result)
-        for best, color in ((good_best, "#00c853"), (anomaly_best, "#ff1744")):
-            if best is None:
-                continue
-            result = best[1]
-            markers.append(
-                (
-                    QPointF(
-                        float(result["patch_x_original"]),
-                        float(result["patch_y_original"]),
-                    ),
-                    QColor(color),
-                )
-            )
-        self.left_canvas.set_markers(markers)
-
     def _update_raw_score_label(self, image_path: Path) -> None:
         raw_text = "—"
         details_path = self._prediction_details_path(image_path)
@@ -1024,7 +970,6 @@ class MainWindow(QMainWindow):
             self.right_canvas.clear_image()
             self.result_table.setRowCount(0)
             self.results.clear()
-            self.left_canvas.clear_markers()
             self._update_raw_score_label(image_path)
             self._update_two_stage_panel()
             self._update_selected_region_calculation()
@@ -2327,7 +2272,6 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"查询完成：{len(self.results)} 个匹配结果")
         else:
             self.status_label.setText("查询完成，但没有匹配结果")
-        self._update_patch_markers()
         self._update_selected_region_calculation()
         self._fit_image_splitter()
 
