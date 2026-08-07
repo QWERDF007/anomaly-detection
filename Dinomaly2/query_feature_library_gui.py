@@ -913,11 +913,13 @@ class MainWindow(QMainWindow):
         else:
             max_offset_text = f"{float(self.args.max_offset):.4f}"
         source = getattr(self.args, "config_source", "CLI")
+        region_ratio = float(getattr(self.args, "region_top_ratio", 0.10))
         self.threshold_label.setText(
             f"good_threshold={good_threshold:.4f}   "
             f"anomaly_threshold={anomaly_threshold:.4f}   "
             f"offset_scale={offset_scale:.4f}   "
             f"max_offset={max_offset_text}   "
+            f"region_top_ratio={region_ratio:.4f}   "
             f"({source})"
         )
 
@@ -1223,8 +1225,16 @@ class MainWindow(QMainWindow):
             roi_area = int(np.count_nonzero(roi_mask))
 
         if self.score_map is not None and np.any(roi_mask):
-            region_score = float(np.nanmax(self.score_map[roi_mask]))
-            lines.append(f"region_score（ROI 内 max） = <b>{region_score:.4f}</b>")
+            region_ratio = float(getattr(self.args, "region_top_ratio", 0.10))
+            roi_values = np.sort(
+                np.asarray(self.score_map[roi_mask], dtype=np.float32).reshape(-1)
+            )
+            top_count = max(1, int(roi_values.size * region_ratio))
+            region_score = float(roi_values[-top_count:].mean())
+            lines.append(
+                f"region_score（ROI 内 top {region_ratio * 100.0:g}% 均值） = "
+                f"<b>{region_score:.4f}</b>"
+            )
         else:
             region_score = None
             lines.append("region_score = 未提供 score_map")
@@ -2192,6 +2202,7 @@ def load_prediction_config(args) -> Dict[str, Any]:
         ("offset_scale", 1.0),
         ("max_offset", None),
         ("offset_eps", 1e-8),
+        ("region_top_ratio", 0.10),
     ):
         setattr(args, key, default)
     run_path = Path(args.preds).expanduser() / "run.json"
@@ -2210,6 +2221,7 @@ def load_prediction_config(args) -> Dict[str, Any]:
         "offset_scale",
         "max_offset",
         "offset_eps",
+        "region_top_ratio",
     ):
         value = config.get(key)
         if value is None or isinstance(value, bool):

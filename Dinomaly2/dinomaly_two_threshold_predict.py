@@ -35,9 +35,11 @@ if str(_UTILS_DIR) not in sys.path:
 from anomaly_evaluation import (  # noqa: E402
     max_f1,
     pixel_f1_score_and_threshold,
+    region_detection_metrics,
     safe_ap,
     safe_auroc,
     safe_aupro,
+    training_image_score,
     write_metrics,
 )
 
@@ -308,6 +310,18 @@ def _match_metadata(
     return fields
 
 
+def top_ratio_mean(values: np.ndarray, ratio: float) -> float:
+    """Mean of the highest ``ratio`` fraction of an array (anti-noise)."""
+
+    values = np.asarray(values, dtype=np.float32).reshape(-1)
+    if values.size == 0:
+        return 0.0
+    if not 0.0 < float(ratio) <= 1.0:
+        raise ValueError("ratio must be in (0, 1].")
+    top_count = max(1, int(values.size * float(ratio)))
+    return float(np.sort(values)[-top_count:].mean())
+
+
 def _build_region_result(
     component: Mapping[str, Any],
     score_map: np.ndarray,
@@ -347,7 +361,10 @@ def _build_region_result(
     )
     region = {
         "region_id": int(component["component_id"]),
-        "region_score": float(score_map[component["mask"]].max()),
+        "region_score": top_ratio_mean(
+            score_map[component["mask"]],
+            args.region_top_ratio,
+        ),
         "area": int(component["area"]),
         "bbox_original": [float(value) for value in component["bbox"]],
         "bbox_feature": [float(value) for value in bbox_feature],
@@ -405,17 +422,89 @@ def evaluate_image_level(
     return evaluations
 
 
+def _apply_two_stage_overlay(
+    score_map: np.ndarray,
+    output_dir: Path,
+    image_relative: Path,
+) -> np.ndarray:
+    """Return a copy of ``score_map`` with the two-stage results overwritten.
+
+    Every middle-band ROI pixel is replaced by its adjusted score when the
+    region is finally judged anomaly, or by zero when judged good.  This lets
+    pixel-level and region-level evaluation reflect the second stage instead
+    of the raw Dinomaly2 map.  Regions are re-derived from the saved
+    ``candidate_regions`` mask, whose connected-component labels match the
+    ``region_id`` values written to ``details``.
+    """
+
+    detail_path = output_dir / "details" / image_relative.with_suffix(".json")
+    if not detail_path.is_file():
+        return score_map
+    try:
+        with detail_path.open("r", encoding="utf-8") as file:
+            detail = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return score_map
+    regions = detail.get("regions", [])
+    if not regions:
+        return score_map
+    candidate_path = (
+        output_dir / "candidate_regions" / image_relative.with_suffix(".png")
+    )
+    if not candidate_path.is_file():
+        return score_map
+    candidate_mask = cv2.imread(str(candidate_path), cv2.IMREAD_GRAYSCALE)
+    if (
+        candidate_mask is None
+        or candidate_mask.shape != score_map.shape[:2]
+    ):
+        return score_map
+    count, labels, _stats, _ = cv2.connectedComponentsWithStats(
+        (candidate_mask > 0).astype(np.uint8),
+        8,
+    )
+    if count <= 1:
+        return score_map
+    good_threshold = float(detail.get("good_threshold", 0.0))
+    anomaly_threshold = float(detail.get("anomaly_threshold", 0.0))
+    overlay = score_map.copy()
+    for region in regions:
+        region_id = int(region.get("region_id", -1))
+        if not 0 < region_id < count:
+            continue
+        region_mask = labels == region_id
+        region_score = float(region.get("region_score", 0.0))
+        signed_offset = float(region.get("signed_offset", 0.0))
+        adjusted_score = region_score + signed_offset
+        label, _reason = final_score_label(
+            adjusted_score,
+            good_threshold,
+            anomaly_threshold,
+            str(region.get("similar_library", "")),
+        )
+        if label == "good":
+            overlay[region_mask] = 0.0
+        else:
+            overlay[region_mask] = adjusted_score
+    return overlay
+
+
 def evaluate_pixel_level(
     rows: Sequence[Mapping[str, Any]],
     output_dir: Path,
     ground_truth_dir: Optional[Path],
     metric_size: int,
+    good_threshold: float = 0.0,
+    adjusted: bool = False,
 ) -> Dict[str, float]:
     """Evaluate pixel-level metrics on the saved score maps.
 
-    The two-stage adjustment only changes image-level scores, so the pixel
-    metrics are computed once on the raw score maps and reused by both
-    evaluations.  Only anomaly images with a ground-truth mask contribute.
+    With ``adjusted=False`` the raw saved score maps are evaluated.  With
+    ``adjusted=True`` each score map is copied and the two-stage region
+    results are overwritten on the copy (:func:`_apply_two_stage_overlay`),
+    then pixel metrics and GT-region detection metrics (R-MissRate /
+    R-PixelCoverage at the good threshold) are computed on it.  Only anomaly
+    images with a ground-truth mask contribute.
     """
 
     if ground_truth_dir is None:
@@ -434,6 +523,12 @@ def evaluate_pixel_level(
         if not score_path.is_file():
             continue
         score_map = np.asarray(np.load(score_path), dtype=np.float32)
+        if adjusted:
+            score_map = _apply_two_stage_overlay(
+                score_map,
+                output_dir,
+                image_relative,
+            )
         gt_path = None
         for suffix in (".png", ".jpg", ".jpeg", ".npy", ".tif", ".json"):
             candidate = ground_truth_dir / image_relative.with_suffix(suffix)
@@ -477,8 +572,17 @@ def evaluate_pixel_level(
         "P-F1": pixel_f1,
         "P-AUPRO": safe_aupro(masks, maps, show_progress=False),
     }
+    if adjusted:
+        metrics.update(
+            region_detection_metrics(
+                masks,
+                maps,
+                float(good_threshold),
+            )
+        )
+    label_text = "调整后" if adjusted else "原始"
     print(
-        "\n像素级评估（score maps，两阶段共用）："
+        f"\n像素级评估（{label_text} score maps）："
         + "  ".join(f"{k}={v:.4f}" for k, v in metrics.items()),
         flush=True,
     )
@@ -576,7 +680,9 @@ def predict_images(args) -> int:
                 (process_size, process_size),
                 interpolation=cv2.INTER_LINEAR,
             )
-        raw_score = float(np.max(score_map)) if score_map.size else 0.0
+        raw_score = (
+            float(training_image_score(score_map)) if score_map.size else 0.0
+        )
         initial_label = initial_score_label(
             raw_score,
             args.good_threshold,
@@ -808,6 +914,7 @@ def predict_images(args) -> int:
                     "max_offset": args.max_offset,
                     "offset_eps": args.offset_eps,
                     "roi_dilation": args.roi_dilation,
+                    "region_top_ratio": args.region_top_ratio,
                     "min_area_pct": args.min_area_pct,
                     "max_regions": args.max_regions,
                     "process_size": process_size,
@@ -838,13 +945,22 @@ def predict_images(args) -> int:
             ground_truth_dir = data_root / "ground_truth"
         if not ground_truth_dir.is_dir():
             ground_truth_dir = None
-        pixel_metrics = evaluate_pixel_level(
+        pixel_raw = evaluate_pixel_level(
             rows, output_dir, ground_truth_dir, args.metric_size
         )
-        if pixel_metrics:
-            for stage_metrics in evaluations.values():
-                stage_metrics.update(pixel_metrics)
-            write_metrics(evaluations, output_dir)
+        pixel_adjusted = evaluate_pixel_level(
+            rows,
+            output_dir,
+            ground_truth_dir,
+            args.metric_size,
+            good_threshold=args.good_threshold,
+            adjusted=True,
+        )
+        if pixel_raw:
+            evaluations["raw"].update(pixel_raw)
+        if pixel_adjusted:
+            evaluations["adjusted"].update(pixel_adjusted)
+        write_metrics(evaluations, output_dir)
     return 0
 
 
@@ -915,6 +1031,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Dilate each middle-band score-map component before ROIAlign",
     )
     parser.add_argument(
+        "--region_top_ratio",
+        type=float,
+        default=0.10,
+        help=(
+            "Fraction of highest-pixel scores averaged into each ROI's "
+            "region_score for anti-noise robustness (default: 0.10 = 10%)"
+        ),
+    )
+    parser.add_argument(
         "--offset_scale",
         type=float,
         default=1.0,
@@ -983,6 +1108,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise ValueError("density_points must be at least 100")
     if args.min_area_pct < 0:
         raise ValueError("min_area_pct cannot be negative")
+    if not 0.0 < args.region_top_ratio <= 1.0:
+        raise ValueError("region_top_ratio must be in (0, 1]")
     return predict_images(args)
 
 
