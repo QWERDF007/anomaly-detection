@@ -1834,9 +1834,11 @@ class MainWindow(QMainWindow):
             if int(component.get("area", 0)) > 0.9 * image_area:
                 continue
             component["label"] = None
-            region_score = self._predictor_region_score(
-                np.asarray(component["mask"], dtype=bool)
-            )
+            region_score = float(component.get("score", float("nan")))
+            if not np.isfinite(region_score):
+                region_score = self._predictor_region_score(
+                    np.asarray(component["mask"], dtype=bool)
+                )
             if region_score < good_threshold:
                 component["color"] = "#00c853"
             elif region_score > anomaly_threshold:
