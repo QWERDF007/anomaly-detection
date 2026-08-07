@@ -720,7 +720,11 @@ class MainWindow(QMainWindow):
         self.file_tree.setColumnWidth(0, 300)
         self.file_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.file_tree.setTextElideMode(Qt.TextElideMode.ElideRight)
-        file_layout.addWidget(self.file_tree, 1)
+        self.file_tree_scroll = QScrollArea()
+        self.file_tree_scroll.setWidgetResizable(True)
+        self.file_tree_scroll.setWidget(self.file_tree)
+        self.file_tree_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        file_layout.addWidget(self.file_tree_scroll, 1)
         file_panel.setMaximumWidth(560)
 
         raw_panel = QWidget()
