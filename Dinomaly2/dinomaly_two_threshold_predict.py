@@ -826,8 +826,9 @@ def predict_images(args) -> int:
 
         selected = select_strongest_region(regions)
         signed_offset = float(selected["signed_offset"]) if selected else 0.0
+        adjusted_anomaly_mask = np.zeros(score_map.shape, dtype=np.uint8)
+        overlay = score_map.copy()
         if regions:
-            overlay = score_map.copy()
             count, labels, _stats, _ = cv2.connectedComponentsWithStats(
                 (candidate_mask > 0).astype(np.uint8),
                 8,
@@ -850,6 +851,7 @@ def predict_images(args) -> int:
                     overlay[region_mask] = 0.0
                 else:
                     overlay[region_mask] = region_adjusted
+                    adjusted_anomaly_mask[region_mask] = 1
             adjusted_score = (
                 float(training_image_score(overlay)) if overlay.size else 0.0
             )
@@ -887,6 +889,12 @@ def predict_images(args) -> int:
             image_relative,
             ".png",
         )
+        adjusted_region_path = output_artifact_path(
+            output_dir,
+            "adjusted_candidate_regions",
+            image_relative,
+            ".png",
+        )
         detail_path = output_artifact_path(
             output_dir,
             "details",
@@ -897,6 +905,18 @@ def predict_images(args) -> int:
             raise OSError(f"Cannot write raw threshold region mask: {raw_region_path}")
         if not cv2.imwrite(str(region_path), candidate_mask * 255):
             raise OSError(f"Cannot write candidate region mask: {region_path}")
+        # This is the mask used by the GUI/final visualization.  A region
+        # judged good by stage two is intentionally absent here.  Keep the
+        # original candidate mask above because pixel-level adjusted metrics
+        # still need to know which regions must be overwritten with zero.
+        if not cv2.imwrite(
+            str(adjusted_region_path),
+            adjusted_anomaly_mask * 255,
+        ):
+            raise OSError(
+                "Cannot write adjusted candidate region mask: "
+                f"{adjusted_region_path}"
+            )
 
         row = {
             "image_path": str(image_path),
@@ -925,6 +945,7 @@ def predict_images(args) -> int:
             "score_map_path": str(score_path),
             "raw_region_path": str(raw_region_path),
             "candidate_region_path": str(region_path),
+            "adjusted_candidate_region_path": str(adjusted_region_path),
             "regions": regions,
         }
         with detail_path.open("w", encoding="utf-8") as file:
@@ -1126,7 +1147,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Root directory containing good/ and anomaly/ feature libraries; "
             "all prediction output is written under --root/preds/ "
             "(score_maps/, raw_regions/, candidate_regions/, details/, "
-            "results.csv, roi_results.csv, score_density.png, run.json)"
+            "adjusted_candidate_regions/, results.csv, roi_results.csv, "
+            "score_density.png, run.json)"
         ),
     )
     parser.add_argument(

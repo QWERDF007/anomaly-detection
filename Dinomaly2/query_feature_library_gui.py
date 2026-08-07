@@ -1138,6 +1138,11 @@ class MainWindow(QMainWindow):
                 )
                 candidate["score"] = adjusted
                 candidate["is_judged"] = True
+                # The adjustment canvas is the final visualization.  A
+                # middle-band ROI corrected to good must disappear from this
+                # canvas rather than remain as a green candidate polygon.
+                if label == "good":
+                    continue
             else:
                 unmatched_count += 1
             judged.append(candidate)
@@ -1690,15 +1695,28 @@ class MainWindow(QMainWindow):
         """
 
         self.left_canvas.clear_candidate_regions(emit=False)
-        root = self._artifact_root("candidate_regions")
-        band = str((self._load_detail_for(image_path) or {}).get("initial_label", ""))
+        detail = self._load_detail_for(image_path) or {}
+        band = str(detail.get("initial_label", ""))
+        stage2_applied = bool(detail.get("stage2_applied", False))
         fallback_used = False
         result_path = None
-        if root is not None:
-            result_path = self._artifact_path(root, image_path, ".png")
         components = []
+        # Prefer the post-adjustment mask.  It contains only regions that
+        # remain anomalous after the feature-library correction, so middle-band
+        # regions corrected to good are not drawn in the candidate panel.
+        adjusted_root = self._artifact_root("adjusted_candidate_regions")
+        if stage2_applied and adjusted_root is not None:
+            result_path = self._artifact_path(adjusted_root, image_path, ".png")
         if result_path is not None:
             components = self._mask_components(result_path, score_map)
+        # Keep compatibility with prediction runs created before the adjusted
+        # visualization mask was introduced.
+        if result_path is None or not Path(result_path).is_file():
+            root = self._artifact_root("candidate_regions")
+            if root is not None:
+                result_path = self._artifact_path(root, image_path, ".png")
+            if result_path is not None:
+                components = self._mask_components(result_path, score_map)
         if not components and band == "anomaly":
             raw_root = self._artifact_root("raw_regions")
             if raw_root is not None:
@@ -1715,7 +1733,7 @@ class MainWindow(QMainWindow):
 
     def _update_candidate_band_label(self, band: str, fallback_used: bool) -> None:
         if band == "middle":
-            text = "候选区域 / 手动画 ROI（中间带图：预测候选，单选后查询）"
+            text = "候选区域 / 手动画 ROI（中间带图：二阶段后异常候选，单选后查询）"
         elif band == "anomaly":
             if fallback_used:
                 text = "候选区域 / 手动画 ROI（异常图：显示原始阈值区域）"
@@ -2222,7 +2240,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Output directory of dinomaly_two_threshold_predict.py "
             "(<root>/preds/); the good/ anomaly/ libraries are read from its "
             "parent and all artifacts (score_maps/, raw_regions/, "
-            "candidate_regions/, details/, run.json) from this directory"
+            "candidate_regions/, adjusted_candidate_regions/, details/, "
+            "run.json) from this directory"
         ),
     )
     parser.add_argument(
