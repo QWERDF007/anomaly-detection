@@ -2600,6 +2600,12 @@ class LibraryPatchTab(QWidget):
         self.library_tree.setColumnWidth(0, 300)
         self.library_tree.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.library_tree.itemClicked.connect(self._tree_item_clicked)
+        self.library_tree.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.library_tree.customContextMenuRequested.connect(
+            self._library_tree_context_menu
+        )
         tree_scroll = QScrollArea()
         tree_scroll.setWidgetResizable(True)
         tree_scroll.setWidget(self.library_tree)
@@ -2695,6 +2701,39 @@ class LibraryPatchTab(QWidget):
         )
         if entry is not None:
             self._show_entry(entry)
+
+    def _library_tree_context_menu(self, position) -> None:
+        item = self.library_tree.itemAt(position)
+        if item is None:
+            return
+        key = item.data(0, Qt.ItemDataRole.UserRole)
+        if not key:
+            return
+        entry = next(
+            (entry for entry in self.entries if entry["key"] == key),
+            None,
+        )
+        if entry is None:
+            return
+        menu = QMenu(self.library_tree)
+        copy_image = menu.addAction("复制图像路径")
+        copy_mask = menu.addAction("复制 Mask 路径")
+        chosen = menu.exec(self.library_tree.viewport().mapToGlobal(position))
+        if chosen == copy_image:
+            QApplication.clipboard().setText(str(entry["path"]))
+            self.info_label.setText(f"已复制图像路径：{entry['path']}")
+        elif chosen == copy_mask:
+            mask_path = next(
+                (
+                    str(record["mask_path"])
+                    for _library_type, record in entry["records"]
+                    if record.get("mask_path")
+                ),
+                None,
+            )
+            if mask_path:
+                QApplication.clipboard().setText(mask_path)
+                self.info_label.setText(f"已复制 Mask 路径：{mask_path}")
 
     @staticmethod
     def _draw_mask_outline(
