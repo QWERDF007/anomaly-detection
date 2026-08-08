@@ -2653,16 +2653,13 @@ class LibraryPatchTab(QWidget):
                     entry = {
                         "key": key,
                         "path": Path(str(image_path)),
-                        "mask_path": None,
                         "libraries": [],
                         "records": [],
                     }
                     self.entries.append(entry)
                 if library_type not in entry["libraries"]:
                     entry["libraries"].append(library_type)
-                entry["records"].append(record)
-                if entry["mask_path"] is None and record.get("mask_path"):
-                    entry["mask_path"] = Path(str(record["mask_path"]))
+                entry["records"].append((library_type, record))
         for entry in sorted(
             self.entries,
             key=lambda item: str(item["path"]).casefold(),
@@ -2700,26 +2697,42 @@ class LibraryPatchTab(QWidget):
             self._show_entry(entry)
 
     @staticmethod
-    def _blend_image(
-        original_bgr: np.ndarray,
+    def _draw_mask_outline(
+        blend_bgr: np.ndarray,
         mask: np.ndarray,
-        libraries: Sequence[str],
+        color_bgr: Tuple[int, int, int],
     ) -> np.ndarray:
-        """Draw the mask's foreground polygon outlines (green good / red anomaly)."""
+        """Draw one mask's foreground polygon outlines onto an image copy."""
 
-        blend = original_bgr.copy()
         contours, _ = cv2.findContours(
             (np.asarray(mask) > 0).astype(np.uint8),
             cv2.RETR_EXTERNAL,
             cv2.CHAIN_APPROX_SIMPLE,
         )
-        if not contours:
-            return blend
-        colors = {"good": (83, 200, 0), "anomaly": (68, 23, 255)}
-        for library_type in ("good", "anomaly"):
-            if library_type in libraries:
-                cv2.drawContours(blend, contours, -1, colors[library_type], 2)
-        return blend
+        if contours:
+            cv2.drawContours(blend_bgr, contours, -1, color_bgr, 2)
+        return blend_bgr
+
+    def _load_record_mask(
+        self,
+        mask_path: Any,
+        image_shape: Tuple[int, int],
+        library_type: str,
+    ) -> Optional[np.ndarray]:
+        """Load one library's mask; Labelme JSONs are routed by label."""
+
+        if not mask_path or not Path(str(mask_path)).is_file():
+            return None
+        mask_path = Path(str(mask_path))
+        if mask_path.suffix.lower() == ".json":
+            return load_labelme_library_mask(
+                mask_path,
+                image_shape,
+                library_type,
+                good_labels=("good",),
+                ignore_labels=("ignore",),
+            )
+        return load_mask(mask_path, image_shape)
 
     def _show_entry(self, entry: Mapping[str, Any]) -> None:
         try:
@@ -2737,14 +2750,30 @@ class LibraryPatchTab(QWidget):
             )
             feature_size = max(1, int(crop_size) // patch_size)
 
-            mask = None
-            mask_path = entry.get("mask_path")
-            if mask_path is not None and Path(mask_path).is_file():
-                mask = load_mask(mask_path, image_shape)
+            good_mask_path = None
+            anomaly_mask_path = None
+            for library_type, record in entry["records"]:
+                mask_path = record.get("mask_path")
+                if not mask_path:
+                    continue
+                if library_type == "good" and good_mask_path is None:
+                    good_mask_path = mask_path
+                elif library_type == "anomaly" and anomaly_mask_path is None:
+                    anomaly_mask_path = mask_path
+            good_mask = self._load_record_mask(
+                good_mask_path,
+                image_shape,
+                "good",
+            )
+            anomaly_mask = self._load_record_mask(
+                anomaly_mask_path,
+                image_shape,
+                "anomaly",
+            )
 
             boxes: List[Tuple[QPointF, float]] = []
             if library_mode == "patch":
-                for record in entry["records"]:
+                for _library_type, record in entry["records"]:
                     row = record.get("patch_row")
                     col = record.get("patch_col")
                     if row is None or col is None:
@@ -2766,22 +2795,37 @@ class LibraryPatchTab(QWidget):
                     )
                     boxes.append((QPointF(x, y), half))
 
+            combined = None
+            if good_mask is not None or anomaly_mask is not None:
+                combined = np.zeros(image_shape, dtype=bool)
+                if good_mask is not None:
+                    combined |= good_mask
+                if anomaly_mask is not None:
+                    combined |= anomaly_mask
+
+            outlined = original.copy()
+            if good_mask is not None:
+                outlined = self._draw_mask_outline(
+                    outlined,
+                    good_mask,
+                    (83, 200, 0),
+                )
+            if anomaly_mask is not None:
+                outlined = self._draw_mask_outline(
+                    outlined,
+                    anomaly_mask,
+                    (68, 23, 255),
+                )
+
             self.raw_canvas.clear_image()
             self.mask_canvas.clear_image()
             self.blend_canvas.clear_image()
-            if mask is not None:
-                outlined = cv2.cvtColor(
-                    self._blend_image(
-                        original,
-                        mask,
-                        entry["libraries"],
-                    ),
-                    cv2.COLOR_BGR2RGB,
-                )
-                mask_image = np.asarray(mask, dtype=np.uint8) * 255
-                self.raw_canvas.set_numpy_image(outlined)
+            if combined is not None:
+                outlined_rgb = cv2.cvtColor(outlined, cv2.COLOR_BGR2RGB)
+                mask_image = np.asarray(combined, dtype=np.uint8) * 255
+                self.raw_canvas.set_numpy_image(outlined_rgb)
                 self.mask_canvas.set_numpy_image(mask_image)
-                self.blend_canvas.set_numpy_image(outlined)
+                self.blend_canvas.set_numpy_image(outlined_rgb)
                 if boxes:
                     self.mask_canvas.set_patch_boxes(boxes)
                     self.blend_canvas.set_patch_boxes(boxes)
