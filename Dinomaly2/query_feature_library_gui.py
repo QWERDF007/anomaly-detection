@@ -1,9 +1,12 @@
 """PySide6 GUI for querying Dinomaly2 ROI feature libraries.
 
-The three canvases display the direct good-threshold Mask, selectable
+The query tab displays the direct good-threshold Mask, selectable
 candidate/manual query ROIs, and the matched source image with its stored ROI.
 A query runs in a separate Python process so the UI stays responsive while
-Dinomaly2 and FAISS are loading/searching.
+Dinomaly2 and FAISS are loading/searching.  The library-patch tab inspects
+the images used to build the good/anomaly libraries (from their metadata):
+original image, mask (background 0 / foreground 255) and the stored
+top-ratio patches drawn as blue dashed boxes.
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -133,6 +137,53 @@ class ImageCanvas(QWidget):
             raise OSError(f"无法读取图像：{image_path}")
         self.image = image.convertToFormat(QImage.Format.Format_RGB32)
         self.image_path = Path(image_path)
+        self.zoom = 1.0
+        self.pan = QPointF(0.0, 0.0)
+        self.panning = False
+        self.pan_last = None
+        self.clear_shapes(emit=False)
+        self.clear_candidate_regions(emit=False)
+        self.clear_overlay()
+        self.clear_patch_boxes()
+        self.update()
+
+    def set_numpy_image(self, array: np.ndarray) -> None:
+        """Display a numpy image: 2D uint8 grayscale or HxWx3 uint8 RGB."""
+
+        array = np.asarray(array)
+        if array.ndim == 2:
+            if array.dtype != np.uint8:
+                array = np.clip(array, 0, 255).astype(np.uint8)
+            array = np.ascontiguousarray(array)
+            height, width = array.shape
+            image = QImage(
+                array.data,
+                width,
+                height,
+                width,
+                QImage.Format.Format_Grayscale8,
+            ).copy()
+            image = image.convertToFormat(QImage.Format.Format_RGB32)
+        elif array.ndim == 3 and array.shape[2] == 3:
+            if array.dtype != np.uint8:
+                array = np.clip(array, 0, 255).astype(np.uint8)
+            array = np.ascontiguousarray(array)
+            height, width, _channels = array.shape
+            image = QImage(
+                array.data,
+                width,
+                height,
+                array.strides[0],
+                QImage.Format.Format_RGB888,
+            ).copy()
+            image = image.convertToFormat(QImage.Format.Format_RGB32)
+        else:
+            raise ValueError(
+                "无法显示该图像形状；需要 2D 灰度或 HxWx3 RGB："
+                f"{array.shape}"
+            )
+        self.image = image
+        self.image_path = None
         self.zoom = 1.0
         self.pan = QPointF(0.0, 0.0)
         self.panning = False
@@ -711,19 +762,6 @@ class MainWindow(QMainWindow):
         self.region_top_spin.setToolTip(
             "区域分数 top x% 均值；初始值来自 run.json 元数据，可在此调整"
         )
-        self.patch_top_spin = QDoubleSpinBox()
-        self.patch_top_spin.setRange(0.1, 100.0)
-        self.patch_top_spin.setDecimals(1)
-        self.patch_top_spin.setSingleStep(1.0)
-        self.patch_top_spin.setSuffix("%")
-        self.patch_top_spin.setValue(
-            float(self._library_patch_top_ratio()) * 100.0
-        )
-        self.patch_top_spin.setToolTip(
-            "patch 模式库：区域内按异常分数排序取前 x% 的 patch 特征"
-            "（每个 patch 独立入库/查询，不做 ROI 池化）；"
-            "初始值来自库 metadata，可在此调整"
-        )
         self.threshold_label = QLabel()
         self.threshold_label.setStyleSheet("color: #ff9800; font-weight: bold;")
         self._update_threshold_label()
@@ -793,8 +831,6 @@ class MainWindow(QMainWindow):
         controls.addStretch(1)
         controls.addWidget(QLabel("区域 top%："))
         controls.addWidget(self.region_top_spin)
-        controls.addWidget(QLabel("patch%："))
-        controls.addWidget(self.patch_top_spin)
         controls.addWidget(self.fit_button)
         controls.addWidget(self.threshold_label)
         controls.addWidget(self.query_button)
@@ -883,11 +919,18 @@ class MainWindow(QMainWindow):
         bottom_splitter.setStretchFactor(1, 1)
         bottom_splitter.setSizes([600, 220])
 
+        self.library_view_tab = LibraryPatchTab(args)
+        self.tabs = QTabWidget()
+        query_tab = QWidget()
+        query_layout = QVBoxLayout(query_tab)
+        query_layout.addLayout(controls)
+        query_layout.addWidget(bottom_splitter, 1)
+        query_layout.addWidget(self.status_label)
+        self.tabs.addTab(query_tab, "ROI 反查")
+        self.tabs.addTab(self.library_view_tab, "建库 Patch 查看")
         central = QWidget()
         layout = QVBoxLayout(central)
-        layout.addLayout(controls)
-        layout.addWidget(bottom_splitter, 1)
-        layout.addWidget(self.status_label)
+        layout.addWidget(self.tabs)
         self.setCentralWidget(central)
 
         self.open_button.clicked.connect(self.open_image)
@@ -914,9 +957,6 @@ class MainWindow(QMainWindow):
             self._set_images_root(Path(data_root).expanduser())
         else:
             self._rebuild_file_list()
-
-        if args.input:
-            self.load_input_image(Path(args.input).expanduser())
 
     def change_mode(self, _index: int) -> None:
         self.left_canvas.set_mode(self.mode_combo.currentData())
@@ -1173,6 +1213,7 @@ class MainWindow(QMainWindow):
             self.adjust_canvas,
         ):
             canvas.fit_to_window()
+        self.library_view_tab.fit_all()
 
     def _fit_image_splitter(self) -> None:
         """Redistribute the file list and four image panels to the window."""
@@ -1223,18 +1264,6 @@ class MainWindow(QMainWindow):
             f"max_offset={max_offset_text}   "
             f"({source})"
         )
-
-    def _library_patch_top_ratio(self) -> float:
-        root = self._preds_dir().parent
-        metadata_path = root / "good" / "metadata.json"
-        try:
-            with metadata_path.open("r", encoding="utf-8") as file:
-                metadata = json.load(file)
-            if str(metadata.get("library_mode", "roi")) == "patch":
-                return float(metadata.get("patch_top_ratio", 0.5))
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            pass
-        return 0.5
 
     def _region_top_ratio_changed(self, value: float) -> None:
         ratio = float(value) / 100.0
@@ -1690,7 +1719,7 @@ class MainWindow(QMainWindow):
             )
 
         candidates: List[Path] = []
-        data_root_text = self.args.data_root
+        data_root_text = getattr(self.args, "data_root", None)
         if data_root_text:
             data_root = Path(data_root_text).expanduser().resolve()
             try:
@@ -1793,7 +1822,9 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Overlay annotation-mask anomaly regions on the raw-region canvas.
 
-        ``--mask_dir`` mirrors the ``--data_root`` layout, so an image maps to
+        The mask root is derived from the prediction products: it defaults to
+        ``<data_root>/ground_truth`` (auto-reconstructed from the details),
+        mirroring the ``--data_root`` layout, so an image maps to
         ``mask_dir/<relative>.json`` (LabelMe, label 'good'/'ignore' are
         skipped) or to a binary mask with another extension.  Anomaly regions
         are drawn as red polygons on the first canvas, labelled with the
@@ -2313,14 +2344,6 @@ class MainWindow(QMainWindow):
             "--gpu",
             str(self.args.gpu),
         ]
-        arguments.extend(
-            [
-                "--patch_top_ratio",
-                f"{float(self.patch_top_spin.value()) / 100.0:.4f}",
-            ]
-        )
-        if self.args.faiss_on_gpu:
-            arguments.append("--faiss_on_gpu")
         return arguments
 
     def start_query(self) -> None:
@@ -2517,11 +2540,311 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
+class LibraryPatchTab(QWidget):
+    """Inspect library build images and the patches stored in the libraries.
+
+    The good/ and anomaly/ libraries written by dinomaly_two_stage.py record,
+    for every stored vector, the source image, the annotation mask and (in
+    patch mode) the feature-grid patch position.  For each build image this
+    tab renders three views: the original image, the mask (background 0 /
+    foreground 255) with the stored patches drawn as blue dashed boxes, and
+    the original image with the mask's foreground polygons and the same
+    patch boxes.
+    """
+
+    def __init__(self, args, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.args = args
+        self.entries: List[Dict[str, Any]] = []
+        self._build_ui()
+        self._reload_entries()
+
+    def _library_root(self) -> Path:
+        return Path(self.args.preds).expanduser().parent
+
+    @staticmethod
+    def _read_library_records(library_dir: Path) -> List[Dict[str, Any]]:
+        """Read build records from ``metadata.json`` (fallback: id_mapping)."""
+
+        metadata_path = library_dir / "metadata.json"
+        try:
+            with metadata_path.open("r", encoding="utf-8") as file:
+                records = json.load(file).get("records", [])
+            if records:
+                return records
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+        mapping_path = library_dir / "id_mapping.json"
+        try:
+            with mapping_path.open("r", encoding="utf-8") as file:
+                return json.load(file).get("records", [])
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return []
+
+    @staticmethod
+    def _entry_key(image_path: Any) -> str:
+        return str(Path(str(image_path)).expanduser())
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        self.info_label = QLabel("正在读取建库记录……")
+        self.info_label.setWordWrap(True)
+        fit_button = QPushButton("适应窗口")
+        fit_button.clicked.connect(self.fit_all)
+        toolbar = QHBoxLayout()
+        toolbar.addWidget(self.info_label, 1)
+        toolbar.addWidget(fit_button)
+
+        self.library_tree = QTreeWidget()
+        self.library_tree.setHeaderHidden(True)
+        self.library_tree.setColumnWidth(0, 300)
+        self.library_tree.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.library_tree.itemClicked.connect(self._tree_item_clicked)
+        tree_scroll = QScrollArea()
+        tree_scroll.setWidgetResizable(True)
+        tree_scroll.setWidget(self.library_tree)
+        tree_scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        self.raw_canvas = ImageCanvas(editable=False)
+        self.mask_canvas = ImageCanvas(editable=False)
+        self.blend_canvas = ImageCanvas(editable=False)
+
+        def panel(title: str, canvas: ImageCanvas) -> QWidget:
+            panel_widget = QWidget()
+            panel_layout = QVBoxLayout(panel_widget)
+            panel_layout.addWidget(QLabel(title))
+            panel_layout.addWidget(canvas, 1)
+            return panel_widget
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(tree_scroll)
+        splitter.addWidget(panel("原始图像", self.raw_canvas))
+        splitter.addWidget(
+            panel(
+                "Mask 图（背景 0 / 前景 255；蓝色虚线框 = 建库 patch）",
+                self.mask_canvas,
+            )
+        )
+        splitter.addWidget(
+            panel(
+                "混合图（Mask 前景多边形 + 建库 patch 蓝色虚线框）",
+                self.blend_canvas,
+            )
+        )
+        splitter.setChildrenCollapsible(False)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 1)
+        splitter.setStretchFactor(3, 1)
+        splitter.setSizes([300, 460, 460, 460])
+        layout.addLayout(toolbar)
+        layout.addWidget(splitter, 1)
+
+    def _reload_entries(self) -> None:
+        self.entries = []
+        self.library_tree.clear()
+        for library_type in ("good", "anomaly"):
+            for record in self._read_library_records(
+                self._library_root() / library_type
+            ):
+                image_path = record.get("image_path")
+                if not image_path:
+                    continue
+                key = self._entry_key(image_path)
+                entry = next(
+                    (entry for entry in self.entries if entry["key"] == key),
+                    None,
+                )
+                if entry is None:
+                    entry = {
+                        "key": key,
+                        "path": Path(str(image_path)),
+                        "mask_path": None,
+                        "libraries": [],
+                        "records": [],
+                    }
+                    self.entries.append(entry)
+                if library_type not in entry["libraries"]:
+                    entry["libraries"].append(library_type)
+                entry["records"].append(record)
+                if entry["mask_path"] is None and record.get("mask_path"):
+                    entry["mask_path"] = Path(str(record["mask_path"]))
+        library_names = {"good": "良品库", "anomaly": "异常库"}
+        for entry in sorted(
+            self.entries,
+            key=lambda item: str(item["path"]).casefold(),
+        ):
+            patch_count = sum(
+                1
+                for record in entry["records"]
+                if record.get("patch_row") is not None
+            )
+            library_text = " + ".join(
+                library_names[library_type]
+                for library_type in entry["libraries"]
+            )
+            item = QTreeWidgetItem(
+                [
+                    f"{entry['path'].name}  [{library_text}]  "
+                    f"{patch_count} patches"
+                ]
+            )
+            item.setData(0, Qt.ItemDataRole.UserRole, entry["key"])
+            item.setToolTip(0, str(entry["path"]))
+            self.library_tree.addTopLevelItem(item)
+        if self.entries:
+            self.info_label.setText(
+                f"共 {len(self.entries)} 张建库图像（来自 good/anomaly 库 metadata）"
+            )
+        else:
+            self.info_label.setText(
+                "未找到建库记录：请检查 --preds 上级目录的 good/anomaly/metadata.json"
+            )
+
+    def _library_metadata(self) -> Dict[str, Any]:
+        metadata_path = self._library_root() / "good" / "metadata.json"
+        try:
+            with metadata_path.open("r", encoding="utf-8") as file:
+                return json.load(file)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return {}
+
+    def _tree_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
+        key = item.data(0, Qt.ItemDataRole.UserRole)
+        if not key:
+            return
+        entry = next(
+            (entry for entry in self.entries if entry["key"] == key),
+            None,
+        )
+        if entry is not None:
+            self._show_entry(entry)
+
+    @staticmethod
+    def _blend_image(
+        original_bgr: np.ndarray,
+        mask: np.ndarray,
+        libraries: Sequence[str],
+    ) -> np.ndarray:
+        """Overlay the mask's foreground polygons (colored by library)."""
+
+        blend = original_bgr.copy()
+        contours, _ = cv2.findContours(
+            (np.asarray(mask) > 0).astype(np.uint8),
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+        if not contours:
+            return blend
+        colors = {"good": (83, 200, 0), "anomaly": (68, 23, 255)}
+        overlay = np.zeros_like(blend)
+        for library_type in ("good", "anomaly"):
+            if library_type in libraries:
+                cv2.drawContours(overlay, contours, -1, colors[library_type], -1)
+        blend = cv2.addWeighted(blend, 1.0, overlay, 0.35, 0)
+        for library_type in ("good", "anomaly"):
+            if library_type in libraries:
+                cv2.drawContours(blend, contours, -1, colors[library_type], 2)
+        return blend
+
+    def _show_entry(self, entry: Mapping[str, Any]) -> None:
+        try:
+            original = cv2.imread(str(entry["path"]))
+            if original is None:
+                raise OSError(f"无法读取图像：{entry['path']}")
+            height, width = original.shape[:2]
+            image_shape = (height, width)
+            metadata = self._library_metadata()
+            library_mode = str(metadata.get("library_mode", "roi"))
+            image_size = int(metadata.get("image_size", 672))
+            crop_size = int(metadata.get("crop_size", 672))
+            patch_size = MainWindow._backbone_patch_size(
+                str(metadata.get("backbone", ""))
+            )
+            feature_size = max(1, int(crop_size) // patch_size)
+
+            mask = None
+            mask_path = entry.get("mask_path")
+            if mask_path is not None and Path(mask_path).is_file():
+                mask = load_mask(mask_path, image_shape)
+
+            boxes: List[Tuple[QPointF, float]] = []
+            if library_mode == "patch":
+                for record in entry["records"]:
+                    row = record.get("patch_row")
+                    col = record.get("patch_col")
+                    if row is None or col is None:
+                        continue
+                    x, y = patch_to_image_coords(
+                        int(row),
+                        int(col),
+                        (feature_size, feature_size),
+                        image_shape,
+                        image_size,
+                        crop_size,
+                    )
+                    half = (
+                        float(crop_size)
+                        / feature_size
+                        * float(width)
+                        / float(image_size)
+                        / 2.0
+                    )
+                    boxes.append((QPointF(x, y), half))
+
+            self.raw_canvas.set_image(entry["path"])
+            self.mask_canvas.clear_image()
+            self.blend_canvas.clear_image()
+            if mask is not None:
+                mask_image = np.asarray(mask, dtype=np.uint8) * 255
+                self.mask_canvas.set_numpy_image(mask_image)
+                self.blend_canvas.set_numpy_image(
+                    cv2.cvtColor(
+                        self._blend_image(
+                            original,
+                            mask,
+                            entry["libraries"],
+                        ),
+                        cv2.COLOR_BGR2RGB,
+                    )
+                )
+                if boxes:
+                    self.mask_canvas.set_patch_boxes(boxes)
+                    self.blend_canvas.set_patch_boxes(boxes)
+            else:
+                self.mask_canvas.set_numpy_image(
+                    np.zeros(image_shape, dtype=np.uint8)
+                )
+                self.blend_canvas.set_numpy_image(
+                    cv2.cvtColor(original, cv2.COLOR_BGR2RGB)
+                )
+            patch_total = len(boxes)
+            mode_text = "patch" if library_mode == "patch" else "roi"
+            if patch_total:
+                patch_hint = f"；蓝色虚线框 = 建库前 {patch_total} 个 patch"
+            else:
+                patch_hint = "（roi 模式或无 patch 记录，无 patch 框）"
+            self.info_label.setText(
+                f"{entry['path']}　库模式={mode_text}　"
+                f"patch_top_ratio="
+                f"{float(metadata.get('patch_top_ratio', 0.5)) * 100.0:.0f}%　"
+                f"image_size={image_size}　crop_size={crop_size}　"
+                f"backbone={metadata.get('backbone', '')}{patch_hint}"
+            )
+        except (OSError, ValueError, TypeError) as error:
+            QMessageBox.warning(self, "查看失败", str(error))
+
+    def fit_all(self) -> None:
+        for canvas in (self.raw_canvas, self.mask_canvas, self.blend_canvas):
+            canvas.fit_to_window()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "PySide6 GUI for viewing Dinomaly2 threshold/candidate regions and "
-            "querying ROI feature libraries"
+            "PySide6 GUI for viewing Dinomaly2 threshold/candidate regions, "
+            "querying ROI feature libraries, and inspecting library build "
+            "patches"
         )
     )
     parser.add_argument(
@@ -2532,33 +2855,47 @@ def build_parser() -> argparse.ArgumentParser:
             "(<root>/preds/); the good/ anomaly/ libraries are read from its "
             "parent and all artifacts (score_maps/, raw_regions/, "
             "candidate_regions/, adjusted_candidate_regions/, details/, "
-            "run.json) from this directory"
+            "run.json) from this directory. The image root is derived from "
+            "preds/details/*.json; ground-truth masks default to "
+            "<data_root>/ground_truth."
         ),
     )
-    parser.add_argument(
-        "--data_root",
-        default=None,
-        help=(
-            "Optional image root containing good/ and bad/ subdirectories; "
-            "drives the left file list (grouped, sorted by adjusted score)"
-        ),
-    )
-    parser.add_argument(
-        "--mask_dir",
-        default=None,
-        help=(
-            "Optional annotation-mask directory mirroring --data_root's "
-            "layout; LabelMe JSON (label 'good'/'ignore' skipped) or binary "
-            "masks. Anomaly regions are drawn as red polygons on the first "
-            "canvas."
-        ),
-    )
-    parser.add_argument("--input", default=None, help="Optional initial input image")
     parser.add_argument("--top_k", type=int, default=1)
     parser.add_argument("--gpu", "--cuda", dest="gpu", type=int, default=0)
-    parser.add_argument("--faiss_on_gpu", action="store_true")
     parser.add_argument("--output_dir", default="./gui_lookup_results")
     return parser
+
+
+def derive_data_root(preds: Path) -> Optional[Path]:
+    """Reconstruct the image root used by dinomaly_two_threshold_predict.py.
+
+    Every ``preds/details/*.json`` stores the absolute ``image_path`` and its
+    path relative to the data root; subtracting the relative parts yields the
+    root again, so the GUI needs no separate ``--data_root`` argument.
+    """
+
+    details_root = Path(preds).expanduser() / "details"
+    if not details_root.is_dir():
+        return None
+    first_candidate: Optional[Path] = None
+    for detail_path in details_root.rglob("*.json"):
+        try:
+            with detail_path.open("r", encoding="utf-8") as file:
+                detail = json.load(file)
+        except (OSError, json.JSONDecodeError):
+            continue
+        image_path = detail.get("image_path")
+        image_relative = detail.get("image_relative")
+        if not image_path or not image_relative:
+            continue
+        candidate = Path(str(image_path)).expanduser()
+        for _part in Path(str(image_relative)).parts:
+            candidate = candidate.parent
+        if first_candidate is None:
+            first_candidate = candidate
+        if candidate.is_dir():
+            return candidate
+    return first_candidate
 
 
 def load_prediction_config(args) -> Dict[str, Any]:
@@ -2624,6 +2961,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 f"--preds parent must contain a {subdir}/ directory: {root}"
             )
     load_prediction_config(args)
+    data_root = derive_data_root(preds)
+    if data_root is not None:
+        args.data_root = str(data_root)
+        ground_truth = data_root / "ground_truth"
+        if ground_truth.is_dir():
+            args.mask_dir = str(ground_truth)
     if args.good_threshold >= args.anomaly_threshold:
         raise SystemExit(
             f"good_threshold ({args.good_threshold}) must be smaller than "
