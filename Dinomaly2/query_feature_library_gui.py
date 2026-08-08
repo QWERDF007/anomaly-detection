@@ -2620,16 +2620,10 @@ class LibraryPatchTab(QWidget):
         splitter.addWidget(tree_scroll)
         splitter.addWidget(panel("原始图像", self.raw_canvas))
         splitter.addWidget(
-            panel(
-                "Mask 图（背景 0 / 前景 255；蓝色虚线框 = 建库 patch）",
-                self.mask_canvas,
-            )
+            panel("Mask图", self.mask_canvas)
         )
         splitter.addWidget(
-            panel(
-                "混合图（Mask 前景多边形 + 建库 patch 蓝色虚线框）",
-                self.blend_canvas,
-            )
+            panel("混合图", self.blend_canvas)
         )
         splitter.setChildrenCollapsible(False)
         splitter.setStretchFactor(0, 0)
@@ -2669,26 +2663,11 @@ class LibraryPatchTab(QWidget):
                 entry["records"].append(record)
                 if entry["mask_path"] is None and record.get("mask_path"):
                     entry["mask_path"] = Path(str(record["mask_path"]))
-        library_names = {"good": "良品库", "anomaly": "异常库"}
         for entry in sorted(
             self.entries,
             key=lambda item: str(item["path"]).casefold(),
         ):
-            patch_count = sum(
-                1
-                for record in entry["records"]
-                if record.get("patch_row") is not None
-            )
-            library_text = " + ".join(
-                library_names[library_type]
-                for library_type in entry["libraries"]
-            )
-            item = QTreeWidgetItem(
-                [
-                    f"{entry['path'].name}  [{library_text}]  "
-                    f"{patch_count} patches"
-                ]
-            )
+            item = QTreeWidgetItem([entry["path"].name])
             item.setData(0, Qt.ItemDataRole.UserRole, entry["key"])
             item.setToolTip(0, str(entry["path"]))
             self.library_tree.addTopLevelItem(item)
@@ -2726,7 +2705,7 @@ class LibraryPatchTab(QWidget):
         mask: np.ndarray,
         libraries: Sequence[str],
     ) -> np.ndarray:
-        """Overlay the mask's foreground polygons (colored by library)."""
+        """Draw the mask's foreground polygon outlines (green good / red anomaly)."""
 
         blend = original_bgr.copy()
         contours, _ = cv2.findContours(
@@ -2737,11 +2716,6 @@ class LibraryPatchTab(QWidget):
         if not contours:
             return blend
         colors = {"good": (83, 200, 0), "anomaly": (68, 23, 255)}
-        overlay = np.zeros_like(blend)
-        for library_type in ("good", "anomaly"):
-            if library_type in libraries:
-                cv2.drawContours(overlay, contours, -1, colors[library_type], -1)
-        blend = cv2.addWeighted(blend, 1.0, overlay, 0.35, 0)
         for library_type in ("good", "anomaly"):
             if library_type in libraries:
                 cv2.drawContours(blend, contours, -1, colors[library_type], 2)
@@ -2792,26 +2766,27 @@ class LibraryPatchTab(QWidget):
                     )
                     boxes.append((QPointF(x, y), half))
 
-            self.raw_canvas.set_image(entry["path"])
+            self.raw_canvas.clear_image()
             self.mask_canvas.clear_image()
             self.blend_canvas.clear_image()
             if mask is not None:
-                mask_image = np.asarray(mask, dtype=np.uint8) * 255
-                self.mask_canvas.set_numpy_image(mask_image)
-                self.blend_canvas.set_numpy_image(
-                    cv2.cvtColor(
-                        self._blend_image(
-                            original,
-                            mask,
-                            entry["libraries"],
-                        ),
-                        cv2.COLOR_BGR2RGB,
-                    )
+                outlined = cv2.cvtColor(
+                    self._blend_image(
+                        original,
+                        mask,
+                        entry["libraries"],
+                    ),
+                    cv2.COLOR_BGR2RGB,
                 )
+                mask_image = np.asarray(mask, dtype=np.uint8) * 255
+                self.raw_canvas.set_numpy_image(outlined)
+                self.mask_canvas.set_numpy_image(mask_image)
+                self.blend_canvas.set_numpy_image(outlined)
                 if boxes:
                     self.mask_canvas.set_patch_boxes(boxes)
                     self.blend_canvas.set_patch_boxes(boxes)
             else:
+                self.raw_canvas.set_image(entry["path"])
                 self.mask_canvas.set_numpy_image(
                     np.zeros(image_shape, dtype=np.uint8)
                 )
