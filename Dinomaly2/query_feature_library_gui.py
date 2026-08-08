@@ -2772,12 +2772,18 @@ class LibraryPatchTab(QWidget):
             )
 
             boxes: List[Tuple[QPointF, float]] = []
+            good_patch_count = 0
+            anomaly_patch_count = 0
             if library_mode == "patch":
-                for _library_type, record in entry["records"]:
+                for library_type, record in entry["records"]:
                     row = record.get("patch_row")
                     col = record.get("patch_col")
                     if row is None or col is None:
                         continue
+                    if library_type == "good":
+                        good_patch_count += 1
+                    else:
+                        anomaly_patch_count += 1
                     x, y = patch_to_image_coords(
                         int(row),
                         int(col),
@@ -2837,10 +2843,12 @@ class LibraryPatchTab(QWidget):
                 self.blend_canvas.set_numpy_image(
                     cv2.cvtColor(original, cv2.COLOR_BGR2RGB)
                 )
-            patch_total = len(boxes)
             mode_text = "patch" if library_mode == "patch" else "roi"
-            if patch_total:
-                patch_hint = f"；蓝色虚线框 = 建库前 {patch_total} 个 patch"
+            if good_patch_count or anomaly_patch_count:
+                patch_hint = (
+                    f"；正常 patch {good_patch_count} 个，"
+                    f"异常 patch {anomaly_patch_count} 个"
+                )
             else:
                 patch_hint = "（roi 模式或无 patch 记录，无 patch 框）"
             self.info_label.setText(
