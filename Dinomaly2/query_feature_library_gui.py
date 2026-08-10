@@ -23,14 +23,12 @@ import numpy as np
 from PySide6.QtCore import QPointF, QProcess, QRectF, Qt, Signal
 from dinomaly_two_stage import (
     calculate_distance_offset,
+    feature_patch_geometry,
     load_labelme_library_mask,
     load_mask,
     mask_bbox,
-    preprocess_mask,
-    resize_mask_to_feature,
 )
 from dinomaly_two_threshold_predict import final_score_label
-from query_feature_library import patch_to_image_coords
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -112,6 +110,7 @@ class ImageCanvas(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.show_scores = True
         self.patch_boxes: List[Tuple[QPointF, float]] = []
+        self.patch_rects: List[QRectF] = []
 
     def set_patch_boxes(self, boxes: Sequence[Tuple[QPointF, float]]) -> None:
         """Show blue dashed boxes for the queried patch positions.
@@ -122,10 +121,37 @@ class ImageCanvas(QWidget):
         self.patch_boxes = [
             (QPointF(center), float(half_size)) for center, half_size in boxes
         ]
+        self.patch_rects = [
+            QRectF(
+                center.x() - float(half_size),
+                center.y() - float(half_size),
+                float(half_size) * 2.0,
+                float(half_size) * 2.0,
+            )
+            for center, half_size in self.patch_boxes
+        ]
+        self.update()
+
+    def set_patch_rects(
+        self,
+        rects: Sequence[Sequence[float]],
+    ) -> None:
+        """Show blue dashed Patch rectangles in image coordinates."""
+
+        self.patch_rects = []
+        for rect in rects:
+            if len(rect) != 4:
+                continue
+            x1, y1, x2, y2 = [float(value) for value in rect]
+            if not all(np.isfinite(value) for value in (x1, y1, x2, y2)):
+                continue
+            self.patch_rects.append(QRectF(x1, y1, x2 - x1, y2 - y1).normalized())
+        self.patch_boxes = []
         self.update()
 
     def clear_patch_boxes(self) -> None:
         self.patch_boxes.clear()
+        self.patch_rects.clear()
         self.update()
 
     def sizeHint(self):
@@ -579,22 +605,13 @@ class ImageCanvas(QWidget):
                 text_rect = QRectF(top_left.x(), top_left.y() - 24, 420, 22)
                 painter.setPen(QColor("#ff1744"))
                 painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft, self.overlay_text)
-        for center, half_size in self.patch_boxes:
-            widget_center = self.image_to_widget(center)
-            widget_half = (
-                half_size * self.image_rect().width() / float(self.image.width())
-            )
+        for image_rect_patch in self.patch_rects:
+            top_left = self.image_to_widget(image_rect_patch.topLeft())
+            bottom_right = self.image_to_widget(image_rect_patch.bottomRight())
             pen = QPen(QColor("#2196f3"), 2.0)
             pen.setStyle(Qt.PenStyle.DashLine)
             painter.setPen(pen)
-            painter.drawRect(
-                QRectF(
-                    widget_center.x() - widget_half,
-                    widget_center.y() - widget_half,
-                    widget_half * 2.0,
-                    widget_half * 2.0,
-                )
-            )
+            painter.drawRect(QRectF(top_left, bottom_right).normalized())
         painter.end()
 
     def mousePressEvent(self, event) -> None:
@@ -1035,18 +1052,18 @@ class MainWindow(QMainWindow):
                 return size
         return 14
 
-    def _max_patch_boxes(self) -> List[Tuple[QPointF, float]]:
-        """Blue dashed box marking the queried ROI's highest-score patch.
+    def _max_patch_boxes(self) -> List[List[float]]:
+        """Return the query Patch bbox recorded by ``query_feature_library``.
 
-        Only shown for patch-mode libraries after a query has been executed
-        for the currently selected candidate region: the box marks the exact
-        patch (highest score inside the ROI) that the predictor queries.
+        The query process is the source of truth for the selected feature
+        cell.  Re-selecting a cell in the GUI can use a different score-map
+        geometry and was the reason for visibly misplaced blue boxes.
         """
 
         metadata = self._library_metadata()
         if str(metadata.get("library_mode", "roi")) != "patch":
             return []
-        if self.score_map is None or self.left_canvas.image is None:
+        if self.left_canvas.image is None:
             return []
         if not self.results:
             return []
@@ -1055,49 +1072,26 @@ class MainWindow(QMainWindow):
             return []
         if not 0 <= index < len(self.left_canvas.candidate_regions):
             return []
-        image_size = int(metadata.get("image_size", 672))
-        crop_size = int(metadata.get("crop_size", 672))
-        patch_size = self._backbone_patch_size(str(metadata.get("backbone", "")))
-        feature_size = max(1, int(crop_size) // patch_size)
-        image_height = self.left_canvas.image.height()
-        image_width = self.left_canvas.image.width()
-        score_feature = cv2.resize(
-            self.score_map,
-            (feature_size, feature_size),
-            interpolation=cv2.INTER_LINEAR,
-        )
-        region = self.left_canvas.candidate_regions[index]
-        mask_feature = resize_mask_to_feature(
-            preprocess_mask(
-                np.asarray(region["mask"], dtype=bool),
-                image_size,
-                crop_size,
+        result = next(
+            (
+                item
+                for item in self.results
+                if isinstance(
+                    item.get("query_patch_bbox_original"),
+                    (list, tuple),
+                )
+                and len(item.get("query_patch_bbox_original")) == 4
             ),
-            (feature_size, feature_size),
+            None,
         )
-        if not mask_feature.any():
+        if result is None:
             return []
-        coords = np.argwhere(mask_feature)
-        scores = score_feature[coords[:, 0], coords[:, 1]]
-        row, col = coords[int(np.argmax(scores))]
-        x, y = patch_to_image_coords(
-            int(row),
-            int(col),
-            (feature_size, feature_size),
-            (image_height, image_width),
-            image_size,
-            crop_size,
-        )
-        patch_px = (
-            float(crop_size)
-            / feature_size
-            * float(image_width)
-            / float(image_size)
-        )
-        return [(QPointF(x, y), patch_px / 2.0)]
+        return [
+            [float(value) for value in result["query_patch_bbox_original"]]
+        ]
 
     def _update_patch_boxes(self) -> None:
-        self.left_canvas.set_patch_boxes(self._max_patch_boxes())
+        self.left_canvas.set_patch_rects(self._max_patch_boxes())
 
     def _update_right_patch_box(self, result: Mapping[str, Any]) -> None:
         """Mark the matched library patch on the nearest-neighbour canvas.
@@ -1113,32 +1107,12 @@ class MainWindow(QMainWindow):
             return
         if self.right_canvas.image is None:
             return
-        bbox_feature = result.get("bbox_feature")
-        if not isinstance(bbox_feature, (list, tuple)) or len(bbox_feature) != 4:
+        bbox_original = result.get("patch_bbox_original")
+        if not isinstance(bbox_original, (list, tuple)) or len(bbox_original) != 4:
             return
-        image_size = int(metadata.get("image_size", 672))
-        crop_size = int(metadata.get("crop_size", 672))
-        patch_size = self._backbone_patch_size(str(metadata.get("backbone", "")))
-        feature_size = max(1, int(crop_size) // patch_size)
-        image_height = self.right_canvas.image.height()
-        image_width = self.right_canvas.image.width()
-        row = (float(bbox_feature[1]) + float(bbox_feature[3])) / 2.0
-        col = (float(bbox_feature[0]) + float(bbox_feature[2])) / 2.0
-        x, y = patch_to_image_coords(
-            row,
-            col,
-            (feature_size, feature_size),
-            (image_height, image_width),
-            image_size,
-            crop_size,
+        self.right_canvas.set_patch_rects(
+            [[float(value) for value in bbox_original]]
         )
-        patch_px = (
-            float(crop_size)
-            / feature_size
-            * float(image_width)
-            / float(image_size)
-        )
-        self.right_canvas.set_patch_boxes([(QPointF(x, y), patch_px / 2.0)])
 
     def _update_raw_score_label(self, image_path: Path) -> None:
         raw_text = "—"
@@ -2784,10 +2758,16 @@ class LibraryPatchTab(QWidget):
             library_mode = str(metadata.get("library_mode", "roi"))
             image_size = int(metadata.get("image_size", 672))
             crop_size = int(metadata.get("crop_size", 672))
-            patch_size = MainWindow._backbone_patch_size(
-                str(metadata.get("backbone", ""))
-            )
-            feature_size = max(1, int(crop_size) // patch_size)
+            metadata_feature_shape = metadata.get("feature_shape")
+            if (
+                isinstance(metadata_feature_shape, (list, tuple))
+                and len(metadata_feature_shape) == 2
+            ):
+                metadata_feature_shape = tuple(
+                    int(value) for value in metadata_feature_shape
+                )
+            else:
+                metadata_feature_shape = None
 
             good_mask_path = None
             anomaly_mask_path = None
@@ -2810,7 +2790,7 @@ class LibraryPatchTab(QWidget):
                 "anomaly",
             )
 
-            boxes: List[Tuple[QPointF, float]] = []
+            patch_rects: List[List[float]] = []
             good_patch_count = 0
             anomaly_patch_count = 0
             if library_mode == "patch":
@@ -2823,22 +2803,31 @@ class LibraryPatchTab(QWidget):
                         good_patch_count += 1
                     else:
                         anomaly_patch_count += 1
-                    x, y = patch_to_image_coords(
-                        int(row),
-                        int(col),
-                        (feature_size, feature_size),
-                        image_shape,
-                        image_size,
-                        crop_size,
-                    )
-                    half = (
-                        float(crop_size)
-                        / feature_size
-                        * float(width)
-                        / float(image_size)
-                        / 2.0
-                    )
-                    boxes.append((QPointF(x, y), half))
+                    patch_bbox = record.get("patch_bbox_original")
+                    if not (
+                        isinstance(patch_bbox, (list, tuple))
+                        and len(patch_bbox) == 4
+                    ):
+                        record_shape = record.get(
+                            "feature_shape",
+                            metadata_feature_shape,
+                        )
+                        if (
+                            metadata_feature_shape is None
+                            or not isinstance(record_shape, (list, tuple))
+                            or len(record_shape) != 2
+                        ):
+                            continue
+                        geometry = feature_patch_geometry(
+                            int(row),
+                            int(col),
+                            tuple(int(value) for value in record_shape),
+                            image_shape,
+                            image_size,
+                            crop_size,
+                        )
+                        patch_bbox = geometry["bbox_original"]
+                    patch_rects.append([float(value) for value in patch_bbox])
 
             combined = None
             if good_mask is not None or anomaly_mask is not None:
@@ -2871,9 +2860,9 @@ class LibraryPatchTab(QWidget):
                 self.raw_canvas.set_numpy_image(outlined_rgb)
                 self.mask_canvas.set_numpy_image(mask_image)
                 self.blend_canvas.set_numpy_image(outlined_rgb)
-                if boxes:
-                    self.mask_canvas.set_patch_boxes(boxes)
-                    self.blend_canvas.set_patch_boxes(boxes)
+                if patch_rects:
+                    self.mask_canvas.set_patch_rects(patch_rects)
+                    self.blend_canvas.set_patch_rects(patch_rects)
             else:
                 self.raw_canvas.set_image(entry["path"])
                 self.mask_canvas.set_numpy_image(

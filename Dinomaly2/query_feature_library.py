@@ -23,14 +23,17 @@ from PIL import Image
 from dinomaly_two_stage import (
     connected_components,
     dilate_mask,
+    feature_patch_geometry,
     l2_normalize,
     load_feature_library,
     load_mask,
     make_image_id,
     mask_bbox,
+    patch_center_mask,
     preprocess_mask,
     record_for_vector_id,
     resize_mask_to_feature,
+    resize_score_map_to_feature,
     roi_align_masked,
     search_library_topk,
     select_device,
@@ -207,7 +210,15 @@ def validate_query_libraries(libraries, args) -> None:
     """
 
     reference = libraries[0]
-    for key in ("feature_dim", "feature_source", "roi_size", "normalize", "backbone"):
+    for key in (
+        "feature_dim",
+        "feature_source",
+        "roi_size",
+        "normalize",
+        "backbone",
+        "feature_shape",
+        "patch_selection_rule",
+    ):
         stored = reference.metadata.get(key)
         for library in libraries[1:]:
             other = library.metadata.get(key)
@@ -278,6 +289,17 @@ def query_feature_library(args) -> int:
     crop_size = int(libraries[0].metadata.get("crop_size", 672))
     roi_size = int(libraries[0].metadata.get("roi_size", 7))
     library_mode = str(libraries[0].metadata.get("library_mode", "roi"))
+    stored_feature_shape = libraries[0].metadata.get("feature_shape")
+    if library_mode == "patch" and isinstance(
+        stored_feature_shape,
+        (list, tuple),
+    ):
+        expected_feature_shape = [int(value) for value in feature_shape]
+        if [int(value) for value in stored_feature_shape] != expected_feature_shape:
+            raise ValueError(
+                "Cached feature shape does not match patch-library metadata: "
+                f"{expected_feature_shape} vs {stored_feature_shape}"
+            )
     patch_ratio = (
         args.patch_top_ratio
         if args.patch_top_ratio is not None
@@ -337,21 +359,44 @@ def query_feature_library(args) -> int:
             "bbox_feature": [
                 float(value) for value in record.get("bbox_feature", [])
             ],
+            "patch_bbox_original": [
+                float(value) for value in record.get("patch_bbox_original", [])
+            ],
+            "patch_center_original": [
+                float(value) for value in record.get("patch_center_original", [])
+            ],
+            "patch_center_inside_mask": bool(
+                record.get("patch_center_inside_mask", False)
+            ),
+            "patch_bbox_resized": [
+                float(value) for value in record.get("patch_bbox_resized", [])
+            ],
+            "patch_center_resized": [
+                float(value) for value in record.get("patch_center_resized", [])
+            ],
+            "feature_shape": [
+                int(value)
+                for value in record.get("feature_shape", feature_shape)
+            ],
         }
         if patch_info is not None:
             result.update(patch_info)
         results.append(result)
 
     for component in components:
-        mask_feature = resize_mask_to_feature(
-            preprocess_mask(
-                component["mask"],
-                image_size,
-                crop_size,
-            ),
-            feature_shape,
+        model_mask = preprocess_mask(
+            component["mask"],
+            image_size,
+            crop_size,
         )
-        if mask_bbox(mask_feature) is None:
+        if library_mode == "patch":
+            # Keep query patch selection identical to library construction:
+            # the feature-cell centre, not OpenCV's nearest-neighbour sample,
+            # must be inside the preprocessed ROI mask.
+            mask_feature = patch_center_mask(model_mask, feature_shape)
+        else:
+            mask_feature = resize_mask_to_feature(model_mask, feature_shape)
+        if mask_bbox(mask_feature) is None and library_mode != "patch":
             mask_feature = dilate_mask(mask_feature, 1)
         if mask_bbox(mask_feature) is None:
             vanished_count += 1
@@ -361,8 +406,14 @@ def query_feature_library(args) -> int:
             )
             continue
         if library_mode == "patch":
-            positions = select_patch_positions(
+            score_feature = resize_score_map_to_feature(
                 score_map,
+                feature_shape,
+                image_size,
+                crop_size,
+            )
+            positions = select_patch_positions(
+                score_feature,
                 mask_feature,
                 patch_ratio,
             )
@@ -372,6 +423,14 @@ def query_feature_library(args) -> int:
             # 与预测一致：只用区域内分数最高的单个 patch 查询
             # （select_patch_positions 按分数降序，首行即最大）。
             positions = positions[:1]
+            query_patch_geometry = feature_patch_geometry(
+                int(positions[0, 0]),
+                int(positions[0, 1]),
+                feature_shape,
+                image_shape,
+                image_size,
+                crop_size,
+            )
             patch_vectors = []
             for row, col in positions:
                 patch_vector = feature[:, int(row), int(col)]
@@ -409,6 +468,27 @@ def query_feature_library(args) -> int:
                                     "query_patch_index": int(patch_index),
                                     "patch_row": int(row),
                                     "patch_col": int(col),
+                                    "query_feature_shape": query_patch_geometry[
+                                        "feature_shape"
+                                    ],
+                                    "query_patch_bbox_feature": (
+                                        query_patch_geometry["bbox_feature"]
+                                    ),
+                                    "query_patch_center_feature": (
+                                        query_patch_geometry["center_feature"]
+                                    ),
+                                    "query_patch_bbox_resized": (
+                                        query_patch_geometry["bbox_resized"]
+                                    ),
+                                    "query_patch_center_resized": (
+                                        query_patch_geometry["center_resized"]
+                                    ),
+                                    "query_patch_bbox_original": (
+                                        query_patch_geometry["bbox_original"]
+                                    ),
+                                    "query_patch_center_original": (
+                                        query_patch_geometry["center_original"]
+                                    ),
                                 },
                             }
                 if best_match is not None:
@@ -464,6 +544,16 @@ def query_feature_library(args) -> int:
                 "query_image": str(input_path.resolve()),
                 "region_source": region_source,
                 "top_k": int(args.top_k),
+                "library_mode": library_mode,
+                "feature_shape": [int(value) for value in feature_shape],
+                "image_size": image_size,
+                "crop_size": crop_size,
+                "patch_selection_rule": str(
+                    libraries[0].metadata.get(
+                        "patch_selection_rule",
+                        "top_ratio_by_score_among_feature_cells_whose_center_is_inside_mask",
+                    )
+                ),
                 "results": results,
             },
             file,
@@ -482,6 +572,13 @@ def query_feature_library(args) -> int:
         "query_patch_index",
         "patch_row",
         "patch_col",
+        "query_feature_shape",
+        "query_patch_bbox_feature",
+        "query_patch_center_feature",
+        "query_patch_bbox_resized",
+        "query_patch_center_resized",
+        "query_patch_bbox_original",
+        "query_patch_center_original",
         "region_source",
         "library_type",
         "library_path",
@@ -498,6 +595,12 @@ def query_feature_library(args) -> int:
         "area",
         "bbox_original",
         "bbox_feature",
+        "patch_bbox_original",
+        "patch_center_original",
+        "patch_center_inside_mask",
+        "patch_bbox_resized",
+        "patch_center_resized",
+        "feature_shape",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)

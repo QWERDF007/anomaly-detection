@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
+from PIL import Image
 from tqdm import tqdm
 
 _UTILS_DIR = Path(__file__).resolve().parent.parent / "utils"
@@ -53,6 +54,7 @@ from dinomaly_two_stage import (
     calculate_distance_offset,
     connected_components,
     dilate_mask,
+    feature_patch_geometry,
     infer_image,
     iter_image_paths,
     l2_normalize,
@@ -61,8 +63,11 @@ from dinomaly_two_stage import (
     load_mask,
     load_patch_backbone,
     mask_bbox,
+    patch_center_mask,
+    preprocess_mask,
     record_for_vector_id,
     roi_align_masked,
+    resize_score_map_to_feature,
     search_library,
     select_device,
     select_patch_positions,
@@ -305,6 +310,9 @@ def _match_metadata(
         "image_path",
         "mask_path",
         "bbox_original",
+        "patch_bbox_original",
+        "patch_center_original",
+        "feature_shape",
     ):
         value = record.get(key, "")
         fields[f"{prefix}_{key}"] = value
@@ -331,23 +339,40 @@ def _build_region_result(
     anomaly_library,
     args,
     device,
+    image_shape: Tuple[int, int],
 ) -> Optional[Dict[str, Any]]:
     """Search both libraries for one score-map connected component."""
 
     query_mask = dilate_mask(component["mask"], args.roi_dilation)
-    mask_feature = _model_feature_mask(query_mask, feature.shape[-2:], args)
+    library_mode = str(good_library.metadata.get("library_mode", "roi"))
+    model_mask = preprocess_mask(
+        query_mask,
+        args.image_size,
+        args.crop_size,
+    )
+    if library_mode == "patch":
+        # Patch mode has an explicit geometric rule: only feature cells whose
+        # centre is inside the transformed query mask may be searched.
+        mask_feature = patch_center_mask(model_mask, feature.shape[-2:])
+    else:
+        mask_feature = _model_feature_mask(query_mask, feature.shape[-2:], args)
     bbox_feature = mask_bbox(mask_feature)
-    if bbox_feature is None:
+    if bbox_feature is None and library_mode != "patch":
         mask_feature = dilate_mask(mask_feature, 1)
         bbox_feature = mask_bbox(mask_feature)
     if bbox_feature is None:
         return None
 
-    library_mode = str(good_library.metadata.get("library_mode", "roi"))
     if library_mode == "patch":
         patch_ratio = float(good_library.metadata.get("patch_top_ratio", 0.5))
-        positions = select_patch_positions(
+        score_feature = resize_score_map_to_feature(
             score_map,
+            feature.shape[-2:],
+            args.image_size,
+            args.crop_size,
+        )
+        positions = select_patch_positions(
+            score_feature,
             mask_feature,
             patch_ratio,
         )
@@ -383,6 +408,14 @@ def _build_region_result(
         best_row, best_col = positions[
             min(range(len(good_matches)), key=lambda i: good_matches[i][0])
         ]
+        patch_geometry = feature_patch_geometry(
+            int(best_row),
+            int(best_col),
+            feature.shape[-2:],
+            image_shape,
+            args.image_size,
+            args.crop_size,
+        )
         decision = calculate_distance_offset(
             good_distance,
             anomaly_distance,
@@ -401,6 +434,16 @@ def _build_region_result(
             "patch_top_ratio": patch_ratio,
             "best_patch_row": int(best_row),
             "best_patch_col": int(best_col),
+            "feature_shape": [
+                int(feature.shape[-2]),
+                int(feature.shape[-1]),
+            ],
+            "best_patch_bbox_feature": patch_geometry["bbox_feature"],
+            "best_patch_center_feature": patch_geometry["center_feature"],
+            "best_patch_bbox_resized": patch_geometry["bbox_resized"],
+            "best_patch_center_resized": patch_geometry["center_resized"],
+            "best_patch_bbox_original": patch_geometry["bbox_original"],
+            "best_patch_center_original": patch_geometry["center_original"],
             "area": int(component["area"]),
             "bbox_original": [float(value) for value in component["bbox"]],
             "bbox_feature": [float(value) for value in bbox_feature],
@@ -737,6 +780,8 @@ def predict_images(args) -> int:
         unit="image",
         dynamic_ncols=True,
     ):
+        with Image.open(image_path) as image:
+            original_image_shape = (int(image.height), int(image.width))
         score_path = output_artifact_path(
             output_dir,
             "score_maps",
@@ -826,6 +871,7 @@ def predict_images(args) -> int:
                         anomaly_library,
                         args,
                         device,
+                        original_image_shape,
                     )
                 except (RuntimeError, TypeError, ValueError) as error:
                     LOGGER.warning(
@@ -1008,6 +1054,18 @@ def predict_images(args) -> int:
         "raw_score",
         "region_id",
         "region_score",
+        "library_mode",
+        "patch_count",
+        "patch_top_ratio",
+        "best_patch_row",
+        "best_patch_col",
+        "feature_shape",
+        "best_patch_bbox_feature",
+        "best_patch_center_feature",
+        "best_patch_bbox_resized",
+        "best_patch_center_resized",
+        "best_patch_bbox_original",
+        "best_patch_center_original",
         "area",
         "bbox_original",
         "bbox_feature",
@@ -1048,6 +1106,13 @@ def predict_images(args) -> int:
             for key in (
                 "good_bbox_original",
                 "anomaly_bbox_original",
+                "feature_shape",
+                "best_patch_bbox_feature",
+                "best_patch_center_feature",
+                "best_patch_bbox_resized",
+                "best_patch_center_resized",
+                "best_patch_bbox_original",
+                "best_patch_center_original",
             ):
                 if key in row_for_csv:
                     row_for_csv[key] = json.dumps(row_for_csv[key], ensure_ascii=False)
@@ -1069,6 +1134,16 @@ def predict_images(args) -> int:
                     ),
                     "patch_top_ratio": float(
                         good_library.metadata.get("patch_top_ratio", 0.5)
+                    ),
+                    "patch_selection_rule": str(
+                        good_library.metadata.get(
+                            "patch_selection_rule",
+                            "top_ratio_by_score_among_feature_cells_whose_center_is_inside_mask",
+                        )
+                    ),
+                    "feature_shape": good_library.metadata.get(
+                        "feature_shape",
+                        [],
                     ),
                     "min_area_pct": args.min_area_pct,
                     "max_regions": args.max_regions,
