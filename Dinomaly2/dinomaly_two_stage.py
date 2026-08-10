@@ -515,6 +515,133 @@ def preprocess_mask(mask: np.ndarray, image_size: int, crop_size: int) -> np.nda
     return np.asarray(cropped > 0, dtype=bool)
 
 
+def resize_score_map_to_feature(
+    score_map: np.ndarray,
+    feature_shape: Tuple[int, int],
+    image_size: int,
+    crop_size: int,
+) -> np.ndarray:
+    """Apply the image transform before sampling a score map on the feature grid.
+
+    Score maps produced by inference are usually at the original image
+    resolution (or at ``process_size``).  Resizing such a non-square map
+    directly to the feature grid skips Dinomaly's Resize + CenterCrop geometry
+    and can select a patch from the wrong vertical location.
+    """
+
+    score = np.asarray(score_map, dtype=np.float32)
+    if score.ndim != 2:
+        raise ValueError(f"Score map must be 2D: {score.shape}")
+    resized = cv2.resize(
+        score,
+        (int(image_size), int(image_size)),
+        interpolation=cv2.INTER_LINEAR,
+    )
+    top = (int(image_size) - int(crop_size)) // 2
+    left = (int(image_size) - int(crop_size)) // 2
+    cropped = resized[
+        top:top + int(crop_size),
+        left:left + int(crop_size),
+    ]
+    feature_height, feature_width = [int(value) for value in feature_shape]
+    return cv2.resize(
+        cropped,
+        (feature_width, feature_height),
+        interpolation=cv2.INTER_LINEAR,
+    )
+
+
+def patch_center_mask(
+    mask: np.ndarray,
+    feature_shape: Tuple[int, int],
+) -> np.ndarray:
+    """Return feature cells whose geometric centre is inside ``mask``.
+
+    ``resize_mask_to_feature(..., INTER_NEAREST)`` answers which source pixel
+    OpenCV samples for a cell.  That is not the same as testing the cell centre
+    and is especially visible for thin annotations at a feature-grid
+    boundary.  Patch-library selection uses this explicit centre rule.
+    """
+
+    mask = np.asarray(mask, dtype=bool)
+    if mask.ndim != 2:
+        raise ValueError(f"Mask must be 2D: {mask.shape}")
+    feature_height, feature_width = [int(value) for value in feature_shape]
+    if feature_height < 1 or feature_width < 1:
+        raise ValueError(f"Invalid feature shape: {feature_shape}")
+    height, width = mask.shape
+    rows = np.floor(
+        (np.arange(feature_height, dtype=np.float64) + 0.5)
+        * float(height)
+        / float(feature_height)
+    ).astype(np.int64)
+    cols = np.floor(
+        (np.arange(feature_width, dtype=np.float64) + 0.5)
+        * float(width)
+        / float(feature_width)
+    ).astype(np.int64)
+    rows = np.clip(rows, 0, height - 1)
+    cols = np.clip(cols, 0, width - 1)
+    return mask[rows[:, None], cols[None, :]]
+
+
+def feature_patch_geometry(
+    row: int,
+    col: int,
+    feature_shape: Tuple[int, int],
+    image_shape: Tuple[int, int],
+    image_size: int,
+    crop_size: int,
+) -> Dict[str, Any]:
+    """Return the exact feature-cell geometry in resized and original space."""
+
+    feature_height, feature_width = [int(value) for value in feature_shape]
+    image_height, image_width = [int(value) for value in image_shape]
+    crop_offset = (int(image_size) - int(crop_size)) / 2.0
+    x1_resized = float(col) / float(feature_width) * float(crop_size) + crop_offset
+    x2_resized = (
+        float(col + 1) / float(feature_width) * float(crop_size) + crop_offset
+    )
+    y1_resized = float(row) / float(feature_height) * float(crop_size) + crop_offset
+    y2_resized = (
+        float(row + 1) / float(feature_height) * float(crop_size) + crop_offset
+    )
+    scale_x = float(image_width) / float(image_size)
+    scale_y = float(image_height) / float(image_size)
+    bbox_resized = [x1_resized, y1_resized, x2_resized, y2_resized]
+    bbox_original = [
+        x1_resized * scale_x,
+        y1_resized * scale_y,
+        x2_resized * scale_x,
+        y2_resized * scale_y,
+    ]
+    center_feature = [float(col) + 0.5, float(row) + 0.5]
+    center_resized = [
+        (float(col) + 0.5) / float(feature_width) * float(crop_size)
+        + crop_offset,
+        (float(row) + 0.5) / float(feature_height) * float(crop_size)
+        + crop_offset,
+    ]
+    center_original = [
+        center_resized[0] * scale_x,
+        center_resized[1] * scale_y,
+    ]
+    return {
+        "feature_shape": [feature_height, feature_width],
+        "bbox_feature": [
+            float(col),
+            float(row),
+            float(col + 1),
+            float(row + 1),
+        ],
+        "center_feature": center_feature,
+        "bbox_resized": bbox_resized,
+        "center_resized": center_resized,
+        "bbox_original": bbox_original,
+        "center_original": center_original,
+    }
+
+
 def resize_mask_to_feature(mask: np.ndarray, feature_shape: Tuple[int, int]) -> np.ndarray:
     height, width = [int(value) for value in feature_shape]
     mask = np.asarray(mask, dtype=np.uint8)
@@ -995,6 +1122,35 @@ def write_id_mapping(output_dir: Path, metadata: Mapping[str, Any]) -> None:
                 "area": int(record.get("area", 0)),
                 "bbox_original": [float(value) for value in record.get("bbox_original", [])],
                 "bbox_feature": [float(value) for value in record.get("bbox_feature", [])],
+                "patch_index": int(record.get("patch_index", -1)),
+                "patch_row": int(record.get("patch_row", -1)),
+                "patch_col": int(record.get("patch_col", -1)),
+                "patch_center_inside_mask": bool(
+                    record.get("patch_center_inside_mask", False)
+                ),
+                "feature_shape": [
+                    int(value) for value in record.get("feature_shape", [])
+                ],
+                "patch_center_feature": [
+                    float(value)
+                    for value in record.get("patch_center_feature", [])
+                ],
+                "patch_bbox_resized": [
+                    float(value)
+                    for value in record.get("patch_bbox_resized", [])
+                ],
+                "patch_center_resized": [
+                    float(value)
+                    for value in record.get("patch_center_resized", [])
+                ],
+                "patch_bbox_original": [
+                    float(value)
+                    for value in record.get("patch_bbox_original", [])
+                ],
+                "patch_center_original": [
+                    float(value)
+                    for value in record.get("patch_center_original", [])
+                ],
             }
         )
     mapping_records.sort(key=lambda record: record["vector_id"])
@@ -1019,6 +1175,16 @@ def write_id_mapping(output_dir: Path, metadata: Mapping[str, Any]) -> None:
         "area",
         "bbox_original",
         "bbox_feature",
+        "patch_index",
+        "patch_row",
+        "patch_col",
+        "patch_center_inside_mask",
+        "feature_shape",
+        "patch_center_feature",
+        "patch_bbox_resized",
+        "patch_center_resized",
+        "patch_bbox_original",
+        "patch_center_original",
     ]
     with (output_dir / "id_mapping.csv").open(
         "w",
@@ -1031,6 +1197,15 @@ def write_id_mapping(output_dir: Path, metadata: Mapping[str, Any]) -> None:
             row = dict(record)
             row["bbox_original"] = json.dumps(row["bbox_original"], ensure_ascii=False)
             row["bbox_feature"] = json.dumps(row["bbox_feature"], ensure_ascii=False)
+            for key in (
+                "feature_shape",
+                "patch_center_feature",
+                "patch_bbox_resized",
+                "patch_center_resized",
+                "patch_bbox_original",
+                "patch_center_original",
+            ):
+                row[key] = json.dumps(row[key], ensure_ascii=False)
             writer.writerow(row)
 
 
@@ -1133,6 +1308,8 @@ def validate_library_compatibility(
         "normalize",
         "backbone",
         "library_mode",
+        "feature_shape",
+        "patch_selection_rule",
     ):
         good_value = good.get(key)
         anomaly_value = anomaly.get(key)
@@ -1182,6 +1359,17 @@ def _model_feature_mask(
 ) -> np.ndarray:
     model_mask = preprocess_mask(original_mask, args.image_size, args.crop_size)
     return resize_mask_to_feature(model_mask, feature_shape)
+
+
+def _model_patch_center_mask(
+    original_mask: np.ndarray,
+    feature_shape: Tuple[int, int],
+    args,
+) -> np.ndarray:
+    """Map an original mask to feature cells by the explicit centre rule."""
+
+    model_mask = preprocess_mask(original_mask, args.image_size, args.crop_size)
+    return patch_center_mask(model_mask, feature_shape)
 
 
 def select_patch_positions(
@@ -1272,7 +1460,6 @@ def _build_feature_library(
                 max_regions=args.max_regions,
             )
             if not components:
-                LOGGER.warning("Mask has no valid region: %s", mask_path)
                 continue
             if library_mode == "patch":
                 score_map, feature = infer_image(
@@ -1307,19 +1494,36 @@ def _build_feature_library(
         image_relative = _relative_image_path(image_path, images_root).as_posix()
         image_id = make_image_id(image_relative)
         for component in components:
-            mask_feature = _model_feature_mask(component["mask"], feature_shape, args)
+            if library_mode == "patch":
+                mask_feature = _model_patch_center_mask(
+                    component["mask"],
+                    feature_shape,
+                    args,
+                )
+            else:
+                mask_feature = _model_feature_mask(
+                    component["mask"],
+                    feature_shape,
+                    args,
+                )
             bbox_feature = mask_bbox(mask_feature)
             if bbox_feature is None:
                 LOGGER.warning(
-                    "Mask component vanished after preprocessing: %s component %s",
+                    "Mask component has no feature-cell centre inside it: %s component %s",
                     image_path,
                     component["component_id"],
                 )
                 continue
             if library_mode == "patch":
                 patch_ratio = float(getattr(args, "patch_top_ratio", 0.5))
-                positions = select_patch_positions(
+                score_feature = resize_score_map_to_feature(
                     score_map,
+                    feature_shape,
+                    args.image_size,
+                    args.crop_size,
+                )
+                positions = select_patch_positions(
+                    score_feature,
                     mask_feature,
                     patch_ratio,
                 )
@@ -1333,6 +1537,14 @@ def _build_feature_library(
                     vector = feature[:, int(row), int(col)]
                     if args.normalize:
                         vector = l2_normalize(vector)
+                    patch_geometry = feature_patch_geometry(
+                        int(row),
+                        int(col),
+                        feature_shape,
+                        image_shape,
+                        args.image_size,
+                        args.crop_size,
+                    )
                     vector_id = len(vectors)
                     vectors.append(vector)
                     records.append(
@@ -1349,6 +1561,13 @@ def _build_feature_library(
                             "patch_index": int(patch_index),
                             "patch_row": int(row),
                             "patch_col": int(col),
+                            "patch_center_inside_mask": True,
+                            "feature_shape": patch_geometry["feature_shape"],
+                            "patch_center_feature": patch_geometry["center_feature"],
+                            "patch_bbox_resized": patch_geometry["bbox_resized"],
+                            "patch_center_resized": patch_geometry["center_resized"],
+                            "patch_bbox_original": patch_geometry["bbox_original"],
+                            "patch_center_original": patch_geometry["center_original"],
                             "area": 1,
                             "bbox_original": [
                                 float(value) for value in component["bbox"]
@@ -1404,6 +1623,12 @@ def _build_feature_library(
             "library_type": library_type,
             "library_mode": "patch",
             "patch_top_ratio": float(getattr(args, "patch_top_ratio", 0.5)),
+            "patch_selection_rule": (
+                "top_ratio_by_score_among_feature_cells_whose_center_is_inside_mask"
+            ),
+            "patch_center_coordinate_system": (
+                "preprocessed_mask_crop_feature_cell_center"
+            ),
             "feature_source": (
                 "raw_patch"
                 if args.feature_source == "raw_patch"
@@ -1418,6 +1643,7 @@ def _build_feature_library(
             "crop_size": int(args.crop_size),
             "backbone": args.backbone,
             "model": str(Path(args.model).expanduser()),
+            "feature_shape": [int(feature_shape[0]), int(feature_shape[1])],
             "records": records,
         }
     elif args.feature_source == "raw_patch":
