@@ -2586,7 +2586,6 @@ class LibraryPatchTab(QWidget):
         tree_scroll.setFrameShape(QFrame.Shape.NoFrame)
 
         self.raw_canvas = ImageCanvas(editable=False)
-        self.mask_canvas = ImageCanvas(editable=False)
         self.blend_canvas = ImageCanvas(editable=False)
 
         def panel(title: str, canvas: ImageCanvas) -> QWidget:
@@ -2600,17 +2599,13 @@ class LibraryPatchTab(QWidget):
         splitter.addWidget(tree_scroll)
         splitter.addWidget(panel("原始图像", self.raw_canvas))
         splitter.addWidget(
-            panel("Mask图", self.mask_canvas)
-        )
-        splitter.addWidget(
             panel("混合图", self.blend_canvas)
         )
         splitter.setChildrenCollapsible(False)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 1)
-        splitter.setStretchFactor(3, 1)
-        splitter.setSizes([300, 460, 460, 460])
+        splitter.setSizes([300, 700, 700])
         layout.addLayout(toolbar)
         layout.addWidget(splitter, 1)
 
@@ -2852,22 +2847,15 @@ class LibraryPatchTab(QWidget):
                 )
 
             self.raw_canvas.clear_image()
-            self.mask_canvas.clear_image()
             self.blend_canvas.clear_image()
             if combined is not None:
                 outlined_rgb = cv2.cvtColor(outlined, cv2.COLOR_BGR2RGB)
-                mask_image = np.asarray(combined, dtype=np.uint8) * 255
                 self.raw_canvas.set_numpy_image(outlined_rgb)
-                self.mask_canvas.set_numpy_image(mask_image)
                 self.blend_canvas.set_numpy_image(outlined_rgb)
                 if patch_rects:
-                    self.mask_canvas.set_patch_rects(patch_rects)
                     self.blend_canvas.set_patch_rects(patch_rects)
             else:
                 self.raw_canvas.set_image(entry["path"])
-                self.mask_canvas.set_numpy_image(
-                    np.zeros(image_shape, dtype=np.uint8)
-                )
                 self.blend_canvas.set_numpy_image(
                     cv2.cvtColor(original, cv2.COLOR_BGR2RGB)
                 )
@@ -2890,7 +2878,7 @@ class LibraryPatchTab(QWidget):
             QMessageBox.warning(self, "查看失败", str(error))
 
     def fit_all(self) -> None:
-        for canvas in (self.raw_canvas, self.mask_canvas, self.blend_canvas):
+        for canvas in (self.raw_canvas, self.blend_canvas):
             canvas.fit_to_window()
 
 
