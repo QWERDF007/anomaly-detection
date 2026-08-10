@@ -21,14 +21,19 @@ import numpy as np
 from PIL import Image
 
 from dinomaly_two_stage import (
+    _uses_inner_product,
     connected_components,
     dilate_mask,
     feature_patch_geometry,
+    linear_mask_to_feature,
+    linear_patch_geometry,
+    linear_score_to_feature,
     l2_normalize,
     load_feature_library,
     load_mask,
     make_image_id,
     mask_bbox,
+    nearest_feature_cell,
     patch_center_mask_with_fallback,
     preprocess_mask,
     record_for_vector_id,
@@ -389,19 +394,34 @@ def query_feature_library(args) -> int:
             image_size,
             crop_size,
         )
+        use_inner_product = _uses_inner_product(libraries[0])
         if library_mode == "patch":
-            # Keep query patch selection identical to library construction:
-            # the feature-cell centre, not OpenCV's nearest-neighbour sample,
-            # must be inside the preprocessed ROI mask.  Tiny regions or
-            # regions outside the CenterCrop fall back to the nearest feature
-            # cell (in original image space when needed) so the ROI is still
-            # queried instead of being dropped.
-            if not model_mask.any():
-                model_mask = np.asarray(component["mask"], dtype=bool)
-            mask_feature = patch_center_mask_with_fallback(
-                model_mask,
-                feature_shape,
-            )
+            if use_inner_product:
+                # ip 模式：与建库一致的旧脚本流程（区域线性缩放到特征网格）。
+                mask_feature = linear_mask_to_feature(
+                    component["mask"],
+                    feature_shape,
+                )
+                if not mask_feature.any():
+                    row, col = nearest_feature_cell(
+                        component["mask"],
+                        feature_shape,
+                    )
+                    mask_feature = np.zeros(feature_shape, dtype=bool)
+                    mask_feature[row, col] = True
+            else:
+                # Keep query patch selection identical to library construction:
+                # the feature-cell centre, not OpenCV's nearest-neighbour sample,
+                # must be inside the preprocessed ROI mask.  Tiny regions or
+                # regions outside the CenterCrop fall back to the nearest feature
+                # cell (in original image space when needed) so the ROI is still
+                # queried instead of being dropped.
+                if not model_mask.any():
+                    model_mask = np.asarray(component["mask"], dtype=bool)
+                mask_feature = patch_center_mask_with_fallback(
+                    model_mask,
+                    feature_shape,
+                )
         else:
             mask_feature = resize_mask_to_feature(model_mask, feature_shape)
         if mask_bbox(mask_feature) is None and library_mode != "patch":
@@ -414,12 +434,18 @@ def query_feature_library(args) -> int:
             )
             continue
         if library_mode == "patch":
-            score_feature = resize_score_map_to_feature(
-                score_map,
-                feature_shape,
-                image_size,
-                crop_size,
-            )
+            if use_inner_product:
+                score_feature = linear_score_to_feature(
+                    score_map,
+                    feature_shape,
+                )
+            else:
+                score_feature = resize_score_map_to_feature(
+                    score_map,
+                    feature_shape,
+                    image_size,
+                    crop_size,
+                )
             positions = select_patch_positions(
                 score_feature,
                 mask_feature,
@@ -431,14 +457,22 @@ def query_feature_library(args) -> int:
             # 与预测一致：只用区域内分数最高的单个 patch 查询
             # （select_patch_positions 按分数降序，首行即最大）。
             positions = positions[:1]
-            query_patch_geometry = feature_patch_geometry(
-                int(positions[0, 0]),
-                int(positions[0, 1]),
-                feature_shape,
-                image_shape,
-                image_size,
-                crop_size,
-            )
+            if use_inner_product:
+                query_patch_geometry = linear_patch_geometry(
+                    int(positions[0, 0]),
+                    int(positions[0, 1]),
+                    feature_shape,
+                    image_shape,
+                )
+            else:
+                query_patch_geometry = feature_patch_geometry(
+                    int(positions[0, 0]),
+                    int(positions[0, 1]),
+                    feature_shape,
+                    image_shape,
+                    image_size,
+                    crop_size,
+                )
             patch_vectors = []
             for row, col in positions:
                 patch_vector = feature[:, int(row), int(col)]

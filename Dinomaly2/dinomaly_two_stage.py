@@ -642,6 +642,78 @@ def patch_center_mask_with_fallback(
     return cells
 
 
+def linear_mask_to_feature(
+    mask: np.ndarray,
+    feature_shape: Tuple[int, int],
+) -> np.ndarray:
+    """Legacy linear mapping: region mask resized straight onto the feature grid.
+
+    Mirrors dinomaly2_feature_bank_labelme_0807_add0.7ad.py (no Resize +
+    CenterCrop geometry, just ``scale = feature / original``).
+    """
+
+    feature_height, feature_width = [int(value) for value in feature_shape]
+    return cv2.resize(
+        np.asarray(mask, dtype=np.uint8),
+        (feature_width, feature_height),
+        interpolation=cv2.INTER_NEAREST,
+    ).astype(bool, copy=False)
+
+
+def linear_score_to_feature(
+    score_map: np.ndarray,
+    feature_shape: Tuple[int, int],
+) -> np.ndarray:
+    """Legacy linear mapping: score map resized straight onto the feature grid."""
+
+    feature_height, feature_width = [int(value) for value in feature_shape]
+    return cv2.resize(
+        np.asarray(score_map, dtype=np.float32),
+        (feature_width, feature_height),
+        interpolation=cv2.INTER_LINEAR,
+    )
+
+
+def linear_patch_geometry(
+    row: int,
+    col: int,
+    feature_shape: Tuple[int, int],
+    image_shape: Tuple[int, int],
+) -> Dict[str, Any]:
+    """Legacy linear geometry for one feature cell (no crop offset)."""
+
+    feature_height, feature_width = [int(value) for value in feature_shape]
+    image_height, image_width = [int(value) for value in image_shape]
+    scale_x = float(image_width) / float(feature_width)
+    scale_y = float(image_height) / float(feature_height)
+    bbox_original = [
+        float(col) * scale_x,
+        float(row) * scale_y,
+        float(col + 1) * scale_x,
+        float(row + 1) * scale_y,
+    ]
+    center_original = [
+        (float(col) + 0.5) * scale_x,
+        (float(row) + 0.5) * scale_y,
+    ]
+    return {
+        "feature_shape": [feature_height, feature_width],
+        "bbox_feature": [
+            float(col),
+            float(row),
+            float(col + 1),
+            float(row + 1),
+        ],
+        "center_feature": [float(col) + 0.5, float(row) + 0.5],
+        # 线性映射无 Resize+CenterCrop 空间，resized 字段与原始空间一致，
+        # 保持下游记录字段完整。
+        "bbox_resized": bbox_original,
+        "center_resized": center_original,
+        "bbox_original": bbox_original,
+        "center_original": center_original,
+    }
+
+
 def feature_patch_geometry(
     row: int,
     col: int,
@@ -1588,11 +1660,28 @@ def _build_feature_library(
                 region_mask = component["mask"]
                 if dilation > 0:
                     region_mask = dilate_mask(region_mask, dilation)
-                mask_feature = _model_patch_center_mask(
-                    region_mask,
-                    feature_shape,
-                    args,
-                )
+                if not _build_index_is_l2(args):
+                    # ip 模式：完全照旧脚本流程（dinomaly2_feature_bank_
+                    # labelme_0807_add0.7ad.py）——区域 mask 线性缩放到
+                    # 特征网格，不做 Resize+CenterCrop 几何。
+                    mask_feature = linear_mask_to_feature(
+                        region_mask,
+                        feature_shape,
+                    )
+                    if not mask_feature.any():
+                        # 旧脚本：区域太小无特征像素时取质心所在 cell。
+                        row, col = nearest_feature_cell(
+                            region_mask,
+                            feature_shape,
+                        )
+                        mask_feature = np.zeros(feature_shape, dtype=bool)
+                        mask_feature[row, col] = True
+                else:
+                    mask_feature = _model_patch_center_mask(
+                        region_mask,
+                        feature_shape,
+                        args,
+                    )
             else:
                 mask_feature = _model_feature_mask(
                     component["mask"],
@@ -1610,12 +1699,19 @@ def _build_feature_library(
                     if library_type == "good"
                     else getattr(args, "anomaly_patch_ratio", 0.5)
                 )
-                score_feature = resize_score_map_to_feature(
-                    score_map,
-                    feature_shape,
-                    args.image_size,
-                    args.crop_size,
-                )
+                if not _build_index_is_l2(args):
+                    # ip 模式：score map 直接线性缩放到特征网格（旧脚本式）。
+                    score_feature = linear_score_to_feature(
+                        score_map,
+                        feature_shape,
+                    )
+                else:
+                    score_feature = resize_score_map_to_feature(
+                        score_map,
+                        feature_shape,
+                        args.image_size,
+                        args.crop_size,
+                    )
                 positions = select_patch_positions(
                     score_feature,
                     mask_feature,
@@ -1628,18 +1724,35 @@ def _build_feature_library(
                     component["component_id"],
                 )
                 for patch_index, (row, col) in enumerate(positions):
-                    # 特征来源 en[-1]；l2 模式先归一化再用 IndexFlatL2
-                    # 欧氏距离，ip 模式不归一化用 IndexFlatIP（距离=1-内积）。
+                    # 特征来源 en[-1]；两种模式均 L2 归一化：
+                    # l2 用 IndexFlatL2 欧氏距离，ip 用 IndexFlatIP
+                    # （归一化后内积=余弦，距离=1-内积 ∈ [0,2]，照旧脚本）。
                     vector = feature[:, int(row), int(col)]
-                    if _build_index_is_l2(args):
-                        vector = l2_normalize(vector)
-                    patch_geometry = feature_patch_geometry(
-                        int(row),
-                        int(col),
-                        feature_shape,
-                        image_shape,
-                        args.image_size,
-                        args.crop_size,
+                    vector = l2_normalize(vector)
+                    if not _build_index_is_l2(args):
+                        # ip 模式记录旧脚本式线性几何（无 crop 偏移）。
+                        patch_geometry = linear_patch_geometry(
+                            int(row),
+                            int(col),
+                            feature_shape,
+                            image_shape,
+                        )
+                    else:
+                        patch_geometry = feature_patch_geometry(
+                            int(row),
+                            int(col),
+                            feature_shape,
+                            image_shape,
+                            args.image_size,
+                            args.crop_size,
+                        )
+                    patch_bbox_resized = patch_geometry.get(
+                        "bbox_resized",
+                        patch_geometry["bbox_original"],
+                    )
+                    patch_center_resized = patch_geometry.get(
+                        "center_resized",
+                        patch_geometry["center_original"],
                     )
                     vector_id = len(vectors)
                     vectors.append(vector)
@@ -1660,8 +1773,8 @@ def _build_feature_library(
                             "patch_center_inside_mask": True,
                             "feature_shape": patch_geometry["feature_shape"],
                             "patch_center_feature": patch_geometry["center_feature"],
-                            "patch_bbox_resized": patch_geometry["bbox_resized"],
-                            "patch_center_resized": patch_geometry["center_resized"],
+                            "patch_bbox_resized": patch_bbox_resized,
+                            "patch_center_resized": patch_center_resized,
                             "patch_bbox_original": patch_geometry["bbox_original"],
                             "patch_center_original": patch_geometry["center_original"],
                             "area": 1,
@@ -1683,8 +1796,7 @@ def _build_feature_library(
                 args.roi_size,
                 device,
             )
-            if _build_index_is_l2(args):
-                vector = l2_normalize(vector)
+            vector = l2_normalize(vector)
             vector_id = len(vectors)
             vectors.append(vector)
             records.append(
@@ -1745,7 +1857,7 @@ def _build_feature_library(
             "index_type": (
                 "IndexFlatL2" if _build_index_is_l2(args) else "IndexFlatIP"
             ),
-            "normalize": _build_index_is_l2(args),
+            "normalize": True,
             "distance_metric": (
                 "L2 (Euclidean) on L2-normalised vectors"
                 if _build_index_is_l2(args)
@@ -1773,7 +1885,7 @@ def _build_feature_library(
             "index_type": (
                 "IndexFlatL2" if _build_index_is_l2(args) else "IndexFlatIP"
             ),
-            "normalize": _build_index_is_l2(args),
+            "normalize": True,
             "distance_metric": (
                 "L2 (Euclidean) on L2-normalised vectors"
                 if _build_index_is_l2(args)
@@ -1795,7 +1907,7 @@ def _build_feature_library(
             "index_type": (
                 "IndexFlatL2" if _build_index_is_l2(args) else "IndexFlatIP"
             ),
-            "normalize": _build_index_is_l2(args),
+            "normalize": True,
             "distance_metric": (
                 "L2 (Euclidean) on L2-normalised vectors"
                 if _build_index_is_l2(args)

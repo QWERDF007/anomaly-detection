@@ -51,6 +51,7 @@ from anomaly_evaluation import (  # noqa: E402
 from dinomaly_two_stage import (
     _json_safe,
     _model_feature_mask,
+    _uses_inner_product,
     add_model_arguments,
     build_transform,
     calculate_distance_offset,
@@ -59,12 +60,16 @@ from dinomaly_two_stage import (
     feature_patch_geometry,
     infer_image,
     iter_image_paths,
+    linear_mask_to_feature,
+    linear_patch_geometry,
+    linear_score_to_feature,
     l2_normalize,
     load_dinomaly_model,
     load_feature_library,
     load_mask,
     load_patch_backbone,
     mask_bbox,
+    nearest_feature_cell,
     patch_center_mask_with_fallback,
     preprocess_mask,
     record_for_vector_id,
@@ -76,7 +81,6 @@ from dinomaly_two_stage import (
     select_strongest_region,
     validate_args,
     validate_library_compatibility,
-    _uses_inner_product,
 )
 from utils import get_gaussian_kernel
 
@@ -384,17 +388,31 @@ def _build_region_result(
         args.crop_size,
     )
     if library_mode == "patch":
-        # Patch mode has an explicit geometric rule: only feature cells whose
-        # centre is inside the transformed query mask may be searched.  Tiny
-        # regions or regions outside the CenterCrop fall back to the nearest
-        # feature cell (in original image space when needed) so the ROI is
-        # still queried instead of being dropped.
-        if not model_mask.any():
-            model_mask = np.asarray(query_mask, dtype=bool)
-        mask_feature = patch_center_mask_with_fallback(
-            model_mask,
-            feature.shape[-2:],
-        )
+        if _uses_inner_product(good_library):
+            # ip 模式：与建库一致的旧脚本流程（区域线性缩放到特征网格）。
+            mask_feature = linear_mask_to_feature(
+                query_mask,
+                feature.shape[-2:],
+            )
+            if not mask_feature.any():
+                row, col = nearest_feature_cell(
+                    query_mask,
+                    feature.shape[-2:],
+                )
+                mask_feature = np.zeros(feature.shape[-2:], dtype=bool)
+                mask_feature[row, col] = True
+        else:
+            # Patch mode has an explicit geometric rule: only feature cells whose
+            # centre is inside the transformed query mask may be searched.  Tiny
+            # regions or regions outside the CenterCrop fall back to the nearest
+            # feature cell (in original image space when needed) so the ROI is
+            # still queried instead of being dropped.
+            if not model_mask.any():
+                model_mask = np.asarray(query_mask, dtype=bool)
+            mask_feature = patch_center_mask_with_fallback(
+                model_mask,
+                feature.shape[-2:],
+            )
     else:
         mask_feature = _model_feature_mask(query_mask, feature.shape[-2:], args)
     bbox_feature = mask_bbox(mask_feature)
@@ -406,12 +424,18 @@ def _build_region_result(
 
     if library_mode == "patch":
         patch_ratio = float(good_library.metadata.get("patch_top_ratio", 0.5))
-        score_feature = resize_score_map_to_feature(
-            score_map,
-            feature.shape[-2:],
-            args.image_size,
-            args.crop_size,
-        )
+        if _uses_inner_product(good_library):
+            score_feature = linear_score_to_feature(
+                score_map,
+                feature.shape[-2:],
+            )
+        else:
+            score_feature = resize_score_map_to_feature(
+                score_map,
+                feature.shape[-2:],
+                args.image_size,
+                args.crop_size,
+            )
         positions = select_patch_positions(
             score_feature,
             mask_feature,
@@ -449,14 +473,22 @@ def _build_region_result(
         best_row, best_col = positions[
             min(range(len(good_matches)), key=lambda i: good_matches[i][0])
         ]
-        patch_geometry = feature_patch_geometry(
-            int(best_row),
-            int(best_col),
-            feature.shape[-2:],
-            image_shape,
-            args.image_size,
-            args.crop_size,
-        )
+        if _uses_inner_product(good_library):
+            patch_geometry = linear_patch_geometry(
+                int(best_row),
+                int(best_col),
+                feature.shape[-2:],
+                image_shape,
+            )
+        else:
+            patch_geometry = feature_patch_geometry(
+                int(best_row),
+                int(best_col),
+                feature.shape[-2:],
+                image_shape,
+                args.image_size,
+                args.crop_size,
+            )
         decision = calculate_distance_offset(
             good_distance,
             anomaly_distance,
