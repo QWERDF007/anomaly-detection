@@ -585,6 +585,63 @@ def patch_center_mask(
     return mask[rows[:, None], cols[None, :]]
 
 
+def nearest_feature_cell(
+    mask: np.ndarray,
+    feature_shape: Tuple[int, int],
+) -> Tuple[int, int]:
+    """Return the ``(row, col)`` feature cell whose centre is nearest the mask.
+
+    Used when no feature-cell centre lies inside a tiny region or a region
+    that fell outside the CenterCrop: the mask centroid is matched against
+    every feature-cell centre, and the closest cell is returned.
+    """
+
+    mask = np.asarray(mask, dtype=bool)
+    if mask.ndim != 2:
+        raise ValueError(f"Mask must be 2D: {mask.shape}")
+    feature_height, feature_width = [int(value) for value in feature_shape]
+    height, width = mask.shape
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        raise ValueError("Cannot find a nearest feature cell for an empty mask")
+    center_y = float(np.mean(ys))
+    center_x = float(np.mean(xs))
+    grid_y = (np.arange(feature_height, dtype=np.float64) + 0.5) * float(height) / float(feature_height)
+    grid_x = (np.arange(feature_width, dtype=np.float64) + 0.5) * float(width) / float(feature_width)
+    best_row, best_col = 0, 0
+    best_distance = float("inf")
+    for row in range(feature_height):
+        delta_y = grid_y[row] - center_y
+        for col in range(feature_width):
+            delta_x = grid_x[col] - center_x
+            distance = delta_y * delta_y + delta_x * delta_x
+            if distance < best_distance:
+                best_distance = distance
+                best_row, best_col = row, col
+    return int(best_row), int(best_col)
+
+
+def patch_center_mask_with_fallback(
+    mask: np.ndarray,
+    feature_shape: Tuple[int, int],
+) -> np.ndarray:
+    """Feature cells with centre inside ``mask``; nearest cell as fallback.
+
+    Tiny regions or regions outside the CenterCrop may have no feature-cell
+    centre inside them.  Instead of dropping the ROI, the single feature cell
+    nearest to the mask is used so the region still contributes a patch.
+    """
+
+    mask = np.asarray(mask, dtype=bool)
+    cells = patch_center_mask(mask, feature_shape)
+    if cells.any():
+        return cells
+    row, col = nearest_feature_cell(mask, feature_shape)
+    cells = np.zeros(cells.shape, dtype=bool)
+    cells[row, col] = True
+    return cells
+
+
 def feature_patch_geometry(
     row: int,
     col: int,
@@ -1366,10 +1423,17 @@ def _model_patch_center_mask(
     feature_shape: Tuple[int, int],
     args,
 ) -> np.ndarray:
-    """Map an original mask to feature cells by the explicit centre rule."""
+    """Map an original mask to feature cells by the explicit centre rule.
+
+    When the whole region falls outside the CenterCrop, the nearest feature
+    cell is resolved in the original image space so the region still
+    contributes a patch.
+    """
 
     model_mask = preprocess_mask(original_mask, args.image_size, args.crop_size)
-    return patch_center_mask(model_mask, feature_shape)
+    if not model_mask.any():
+        model_mask = np.asarray(original_mask, dtype=bool)
+    return patch_center_mask_with_fallback(model_mask, feature_shape)
 
 
 def select_patch_positions(
@@ -1508,11 +1572,6 @@ def _build_feature_library(
                 )
             bbox_feature = mask_bbox(mask_feature)
             if bbox_feature is None:
-                LOGGER.warning(
-                    "Mask component has no feature-cell centre inside it: %s component %s",
-                    image_path,
-                    component["component_id"],
-                )
                 continue
             if library_mode == "patch":
                 patch_ratio = float(getattr(args, "patch_top_ratio", 0.5))

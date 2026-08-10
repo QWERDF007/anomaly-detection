@@ -65,7 +65,7 @@ from dinomaly_two_stage import (
     load_mask,
     load_patch_backbone,
     mask_bbox,
-    patch_center_mask,
+    patch_center_mask_with_fallback,
     preprocess_mask,
     record_for_vector_id,
     roi_align_masked,
@@ -354,8 +354,16 @@ def _build_region_result(
     )
     if library_mode == "patch":
         # Patch mode has an explicit geometric rule: only feature cells whose
-        # centre is inside the transformed query mask may be searched.
-        mask_feature = patch_center_mask(model_mask, feature.shape[-2:])
+        # centre is inside the transformed query mask may be searched.  Tiny
+        # regions or regions outside the CenterCrop fall back to the nearest
+        # feature cell (in original image space when needed) so the ROI is
+        # still queried instead of being dropped.
+        if not model_mask.any():
+            model_mask = np.asarray(query_mask, dtype=bool)
+        mask_feature = patch_center_mask_with_fallback(
+            model_mask,
+            feature.shape[-2:],
+        )
     else:
         mask_feature = _model_feature_mask(query_mask, feature.shape[-2:], args)
     bbox_feature = mask_bbox(mask_feature)

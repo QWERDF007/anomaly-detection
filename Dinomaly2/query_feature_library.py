@@ -29,7 +29,7 @@ from dinomaly_two_stage import (
     load_mask,
     make_image_id,
     mask_bbox,
-    patch_center_mask,
+    patch_center_mask_with_fallback,
     preprocess_mask,
     record_for_vector_id,
     resize_mask_to_feature,
@@ -392,8 +392,16 @@ def query_feature_library(args) -> int:
         if library_mode == "patch":
             # Keep query patch selection identical to library construction:
             # the feature-cell centre, not OpenCV's nearest-neighbour sample,
-            # must be inside the preprocessed ROI mask.
-            mask_feature = patch_center_mask(model_mask, feature_shape)
+            # must be inside the preprocessed ROI mask.  Tiny regions or
+            # regions outside the CenterCrop fall back to the nearest feature
+            # cell (in original image space when needed) so the ROI is still
+            # queried instead of being dropped.
+            if not model_mask.any():
+                model_mask = np.asarray(component["mask"], dtype=bool)
+            mask_feature = patch_center_mask_with_fallback(
+                model_mask,
+                feature_shape,
+            )
         else:
             mask_feature = resize_mask_to_feature(model_mask, feature_shape)
         if mask_bbox(mask_feature) is None and library_mode != "patch":
