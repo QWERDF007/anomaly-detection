@@ -23,6 +23,7 @@ import functools
 import json
 import logging
 import multiprocessing
+import os
 import sys
 import time
 from pathlib import Path
@@ -750,11 +751,15 @@ def _worker_init(args, output_dir: Path, gpu_index: int) -> None:
     Every worker process (and the single-process path) owns its own Dinomaly2
     model and FAISS indexes; nothing is shared across processes.  Spawn is
     used for multiprocessing so each worker initialises its CUDA context
-    cleanly.
+    cleanly.  ``CUDA_VISIBLE_DEVICES`` is restricted to the worker's own
+    physical GPU before any CUDA call: otherwise torch/FAISS also create a
+    context on the default device (card 0) of every visible GPU, wasting
+    memory and making the cards contend with each other.
     """
 
     global _WORKER
-    device = select_device(int(gpu_index))
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(int(gpu_index))
+    device = select_device(0)
     faiss_on_gpu = device.type == "cuda"
     root = Path(output_dir).parent
     good_library = load_feature_library(root / "good", device, faiss_on_gpu)
