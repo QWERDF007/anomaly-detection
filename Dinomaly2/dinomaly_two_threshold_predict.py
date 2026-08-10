@@ -856,7 +856,6 @@ def _process_one_entry(
             image_path,
             transform,
             device,
-            args.feature_merge,
             gaussian_filter,
             patch_backbone=patch_backbone,
             feature_source=args.feature_source,

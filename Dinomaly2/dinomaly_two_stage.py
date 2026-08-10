@@ -779,35 +779,6 @@ def dilate_mask(mask: np.ndarray, iterations: int) -> np.ndarray:
     ).astype(bool, copy=False)
 
 
-def encoder_feature_map(encoder_outputs: Sequence[torch.Tensor], merge: str) -> torch.Tensor:
-    """Fuse Dinomaly2's returned encoder feature maps into one NCHW map."""
-
-    if isinstance(encoder_outputs, torch.Tensor):
-        encoder_outputs = [encoder_outputs]
-    features = []
-    for feature in encoder_outputs:
-        if not isinstance(feature, torch.Tensor):
-            raise TypeError("Dinomaly encoder outputs must be torch tensors")
-        if feature.ndim != 4:
-            raise ValueError(
-                "Dinomaly encoder outputs must be NCHW feature maps; "
-                f"got {tuple(feature.shape)}"
-            )
-        features.append(feature)
-    if not features:
-        raise ValueError("Dinomaly returned no encoder feature maps")
-    spatial_shapes = {tuple(feature.shape[-2:]) for feature in features}
-    if len(spatial_shapes) != 1:
-        raise ValueError(f"Encoder feature maps have different sizes: {spatial_shapes}")
-    if merge == "mean":
-        result = torch.stack(features, dim=1).mean(dim=1)
-    elif merge == "concat":
-        result = torch.cat(features, dim=1)
-    else:
-        raise ValueError(f"Unsupported feature merge mode: {merge}")
-    return torch.nan_to_num(result)
-
-
 def _load_image_tensor(image_path: Path, transform, device: torch.device):
     with Image.open(image_path) as image:
         image = image.convert("RGB")
@@ -821,7 +792,6 @@ def infer_image(
     image_path: Path,
     transform,
     device: torch.device,
-    feature_merge: str,
     gaussian_filter: Optional[torch.nn.Module] = None,
     patch_backbone=None,
     feature_source: str = "dinomaly",
@@ -829,8 +799,8 @@ def infer_image(
     """Return ``(original-resolution score_map, encoder feature CHW)``.
 
     ``feature_source`` selects the representation used for the second stage:
-    ``dinomaly`` (default) uses the Dinomaly2 encoder output, while
-    ``raw_patch`` uses the final patch-token output of a standalone
+    ``dinomaly`` (default) uses the last encoder feature group (``en[-1]``),
+    while ``raw_patch`` uses the final patch-token output of a standalone
     DINOv2/DINOv3 backbone loaded by :func:`load_patch_backbone`.
     """
 
@@ -854,7 +824,8 @@ def infer_image(
                 device,
             )
         else:
-            feature = encoder_feature_map(encoder_outputs, feature_merge)[0]
+            # en[-1]：最后一层 encoder 特征图，建库/预测/查询三处一致。
+            feature = encoder_outputs[-1][0]
     score_map = np.nan_to_num(
         np.asarray(score_map, dtype=np.float32),
         nan=0.0,
@@ -871,14 +842,13 @@ def extract_encoder_feature(
     image_path: Path,
     transform,
     device: torch.device,
-    feature_merge: str,
 ) -> np.ndarray:
-    """Extract only the Dinomaly2 encoder map for library construction."""
+    """Extract the last encoder feature group (``en[-1]``) for library building."""
 
     _original, image_tensor = _load_image_tensor(image_path, transform, device)
     with torch.no_grad():
         encoder_outputs, _decoder_outputs = model(image_tensor)
-        feature = encoder_feature_map(encoder_outputs, feature_merge)[0]
+        feature = encoder_outputs[-1][0]
     return np.nan_to_num(
         feature.detach().cpu().numpy().astype(np.float32, copy=False)
     )
@@ -1131,7 +1101,7 @@ def write_feature_library(
     vectors = np.asarray(vectors, dtype=np.float32)
     if vectors.ndim != 2 or vectors.shape[0] < 1 or vectors.shape[1] < 1:
         raise ValueError(f"Feature library vectors must be non-empty 2D: {vectors.shape}")
-    index = faiss.IndexFlatL2(int(vectors.shape[1]))
+    index = faiss.IndexFlatIP(int(vectors.shape[1]))
     index.add(np.ascontiguousarray(vectors))
     index_path = output_dir / "index.faiss"
     metadata_path = output_dir / "metadata.json"
@@ -1141,7 +1111,8 @@ def write_feature_library(
     metadata.update(
         {
             "format_version": 2,
-            "index_type": "IndexFlatL2",
+            "index_type": "IndexFlatIP",
+            "distance_metric": "1 - inner_product",
             "feature_dim": int(vectors.shape[1]),
             "vector_count": int(vectors.shape[0]),
             "index_file": index_path.name,
@@ -1294,7 +1265,12 @@ def search_library_topk(
     vector: np.ndarray,
     top_k: int = 1,
 ) -> List[Tuple[float, int]]:
-    """Search a library and return ``(distance, vector_id)`` pairs."""
+    """Search a library and return ``(distance, vector_id)`` pairs.
+
+    The library uses ``IndexFlatIP`` (inner product), so the reported
+    "distance" is ``1 - inner_product``: smaller is more similar, keeping the
+    distance semantics used by :func:`calculate_distance_offset`.
+    """
 
     vector = np.asarray(vector, dtype=np.float32).reshape(1, -1)
     top_k = max(1, min(int(top_k), int(library.index.ntotal)))
@@ -1303,10 +1279,13 @@ def search_library_topk(
             f"Query feature dimension {vector.shape[1]} does not match "
             f"library dimension {library.index.d}."
         )
-    distances, neighbours = library.index.search(np.ascontiguousarray(vector), top_k)
+    inner_products, neighbours = library.index.search(
+        np.ascontiguousarray(vector),
+        top_k,
+    )
     return [
-        (float(distance), int(neighbour))
-        for distance, neighbour in zip(distances[0], neighbours[0])
+        (1.0 - float(inner_product), int(neighbour))
+        for inner_product, neighbour in zip(inner_products[0], neighbours[0])
         if int(neighbour) >= 0
     ]
 
@@ -1399,14 +1378,19 @@ def validate_library_compatibility(
 
 
 def search_library(library: SearchLibrary, vector: np.ndarray) -> Tuple[float, int]:
+    """Search one library; returns ``(1 - inner_product, vector_id)``."""
+
     vector = np.asarray(vector, dtype=np.float32).reshape(1, -1)
     if vector.shape[1] != int(library.index.d):
         raise ValueError(
             f"Query feature dimension {vector.shape[1]} does not match "
             f"library dimension {library.index.d}."
         )
-    distances, neighbours = library.index.search(np.ascontiguousarray(vector), 1)
-    return float(distances[0, 0]), int(neighbours[0, 0])
+    inner_products, neighbours = library.index.search(
+        np.ascontiguousarray(vector),
+        1,
+    )
+    return 1.0 - float(inner_products[0, 0]), int(neighbours[0, 0])
 
 
 def _model_feature_mask(
@@ -1531,7 +1515,6 @@ def _build_feature_library(
                     image_path,
                     transform,
                     device,
-                    args.feature_merge,
                     patch_backbone=patch_backbone,
                     feature_source=args.feature_source,
                 )
@@ -1548,7 +1531,6 @@ def _build_feature_library(
                     image_path,
                     transform,
                     device,
-                    args.feature_merge,
                 )
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
             LOGGER.warning("Skipping %s: %s", image_path, error)
@@ -1610,9 +1592,9 @@ def _build_feature_library(
                     component["component_id"],
                 )
                 for patch_index, (row, col) in enumerate(positions):
+                    # 不归一化：特征直接用 en[-1] 区域像素向量，
+                    # 距离度量 = 1 - 内积（IndexFlatIP）。
                     vector = feature[:, int(row), int(col)]
-                    if args.normalize:
-                        vector = l2_normalize(vector)
                     patch_geometry = feature_patch_geometry(
                         int(row),
                         int(col),
@@ -1663,8 +1645,6 @@ def _build_feature_library(
                 args.roi_size,
                 device,
             )
-            if args.normalize:
-                vector = l2_normalize(vector)
             vector_id = len(vectors)
             vectors.append(vector)
             records.append(
@@ -1719,10 +1699,11 @@ def _build_feature_library(
                 else "dinomaly_encoder_output"
             ),
             "feature_layout": (
-                "per-patch top-ratio patch tokens; each patch is one vector"
+                "per-patch en[-1] feature vectors; each patch is one vector"
             ),
             "roi_size": int(args.roi_size),
-            "normalize": bool(args.normalize),
+            "normalize": False,
+            "distance_metric": "1 - inner_product (IndexFlatIP)",
             "image_size": int(args.image_size),
             "crop_size": int(args.crop_size),
             "backbone": args.backbone,
@@ -1742,7 +1723,8 @@ def _build_feature_library(
             "feature_source": "raw_patch",
             "feature_layout": "final normed patch tokens (x_norm_patchtokens) before ROIAlign",
             "roi_size": int(args.roi_size),
-            "normalize": bool(args.normalize),
+            "normalize": False,
+            "distance_metric": "1 - inner_product (IndexFlatIP)",
             "image_size": int(args.image_size),
             "crop_size": int(args.crop_size),
             "backbone": args.backbone,
@@ -1754,10 +1736,10 @@ def _build_feature_library(
             "library_type": library_type,
             "library_mode": "roi",
             "feature_source": "dinomaly_encoder_output",
-            "feature_layout": "CHW before ROIAlign",
-            "feature_merge": args.feature_merge,
+            "feature_layout": "en[-1] CHW before ROIAlign",
             "roi_size": int(args.roi_size),
-            "normalize": bool(args.normalize),
+            "normalize": False,
+            "distance_metric": "1 - inner_product (IndexFlatIP)",
             "image_size": int(args.image_size),
             "crop_size": int(args.crop_size),
             "backbone": args.backbone,
@@ -1935,7 +1917,6 @@ def predict_images(args) -> int:
                 image_path,
                 transform,
                 device,
-                args.feature_merge,
                 gaussian_filter,
                 patch_backbone=patch_backbone,
                 feature_source=args.feature_source,
@@ -2226,12 +2207,6 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--max_regions", type=int, default=0)
     build.add_argument("--mask_threshold", type=float, default=0.0)
     build.add_argument(
-        "--no-normalize",
-        dest="normalize",
-        action="store_false",
-        help="Do not L2-normalize vectors before adding them to FAISS",
-    )
-    build.add_argument(
         "--library_mode",
         choices=("roi", "patch"),
         default="roi",
@@ -2279,8 +2254,6 @@ def build_parser() -> argparse.ArgumentParser:
             "(default: 0 = off)"
         ),
     )
-    build.set_defaults(normalize=True)
-
     build_by_label = subparsers.add_parser(
         "build-libraries",
         help="Build good/anomaly FAISS libraries by routing Labelme labels",
@@ -2313,12 +2286,6 @@ def build_parser() -> argparse.ArgumentParser:
     build_by_label.add_argument("--max_regions", type=int, default=0)
     build_by_label.add_argument("--mask_threshold", type=float, default=0.0)
     build_by_label.add_argument(
-        "--no-normalize",
-        dest="normalize",
-        action="store_false",
-        help="Do not L2-normalize vectors before adding them to FAISS",
-    )
-    build_by_label.add_argument(
         "--library_mode",
         choices=("roi", "patch"),
         default="roi",
@@ -2366,8 +2333,6 @@ def build_parser() -> argparse.ArgumentParser:
             "(default: 0 = off)"
         ),
     )
-    build_by_label.set_defaults(normalize=True)
-
     predict = subparsers.add_parser(
         "predict",
         help="Run Dinomaly2 stage 1 and good/anomaly-library stage 2",
