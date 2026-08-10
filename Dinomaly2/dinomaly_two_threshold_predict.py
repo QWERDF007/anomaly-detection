@@ -23,7 +23,6 @@ import functools
 import json
 import logging
 import multiprocessing
-import os
 import sys
 import time
 from pathlib import Path
@@ -737,7 +736,7 @@ def apply_library_metadata(args, metadata: Mapping[str, Any]) -> None:
 _WORKER: Dict[str, Any] = {}
 
 
-def _worker_init(args, output_dir: Path) -> None:
+def _worker_init(args, output_dir: Path, gpu_index: int) -> None:
     """Load per-process model, libraries and transform into the global state.
 
     Every worker process (and the single-process path) owns its own Dinomaly2
@@ -747,7 +746,7 @@ def _worker_init(args, output_dir: Path) -> None:
     """
 
     global _WORKER
-    device = select_device(args.gpu)
+    device = select_device(int(gpu_index))
     faiss_on_gpu = device.type == "cuda"
     root = Path(output_dir).parent
     good_library = load_feature_library(root / "good", device, faiss_on_gpu)
@@ -784,6 +783,7 @@ def _worker_init(args, output_dir: Path) -> None:
 def _process_one_entry(
     args,
     output_dir: Path,
+    gpu_index: int,
     entry: Tuple[Path, Path, str],
 ) -> Optional[
     Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]], int]
@@ -800,7 +800,7 @@ def _process_one_entry(
 
     global _WORKER
     if not _WORKER:
-        _worker_init(args, output_dir)
+        _worker_init(args, output_dir, gpu_index)
     image_path, image_relative, dataset_label = entry
     worker = _WORKER
     args = worker["args"]
@@ -1081,11 +1081,11 @@ def predict_images(args) -> int:
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
             LOGGER.warning("Cannot read library metadata: %s", error)
 
-    workers = int(args.workers)
+    gpu_devices = [int(value) for value in args.gpu_devices]
     entries = list(image_entries)
     start_time = time.time()
-    if workers <= 1:
-        _worker_init(args, output_dir)
+    if len(gpu_devices) <= 1:
+        _worker_init(args, output_dir, gpu_devices[0])
         collected = []
         for entry in tqdm(
             entries,
@@ -1093,24 +1093,57 @@ def predict_images(args) -> int:
             unit="image",
             dynamic_ncols=True,
         ):
-            result = _process_one_entry(args, output_dir, entry)
+            result = _process_one_entry(args, output_dir, gpu_devices[0], entry)
             if result is not None:
                 collected.append(result)
     else:
         context = multiprocessing.get_context("spawn")
-        task = functools.partial(_process_one_entry, args, output_dir)
-        with context.Pool(processes=workers) as pool:
-            collected = [
-                result
-                for result in tqdm(
-                    pool.imap(task, entries),
-                    total=len(entries),
-                    desc=f"Dinomaly2 dual-threshold prediction ({workers} workers)",
-                    unit="image",
-                    dynamic_ncols=True,
-                )
-                if result is not None
-            ]
+        chunk_count = len(gpu_devices)
+        chunks = [
+            entries[index::chunk_count] for index in range(chunk_count)
+        ]
+        pools = []
+        iterators = []
+        for gpu_index, chunk in zip(gpu_devices, chunks):
+            pool = context.Pool(processes=1)
+            task = functools.partial(
+                _process_one_entry,
+                args,
+                output_dir,
+                gpu_index,
+            )
+            pools.append(pool)
+            iterators.append(pool.imap(task, chunk))
+        collected = []
+        alive = list(range(len(iterators)))
+        try:
+            with tqdm(
+                total=len(entries),
+                desc=f"Dinomaly2 dual-threshold prediction (GPUs {gpu_devices})",
+                unit="image",
+                dynamic_ncols=True,
+            ) as progress:
+                while alive:
+                    index = alive.pop(0)
+                    iterator = iterators[index]
+                    try:
+                        result = next(iterator)
+                    except StopIteration:
+                        continue
+                    else:
+                        if result is not None:
+                            collected.append(result)
+                        progress.update(1)
+                        alive.append(index)
+        except Exception:
+            for pool in pools:
+                pool.terminate()
+            raise
+        finally:
+            for pool in pools:
+                pool.close()
+            for pool in pools:
+                pool.join()
 
     rows = [result[0] for result in collected]
     details = [result[1] for result in collected]
@@ -1252,6 +1285,7 @@ def predict_images(args) -> int:
                     ),
                     "min_area_pct": args.min_area_pct,
                     "max_regions": args.max_regions,
+                    "gpus": [int(value) for value in args.gpu_devices],
                     "process_size": int(args.process_size),
                     "density_points": args.density_points,
                     "feature_merge": args.feature_merge,
@@ -1327,6 +1361,27 @@ def build_parser() -> argparse.ArgumentParser:
         description="Dinomaly2 prediction with good/anomaly score thresholds"
     )
     add_model_arguments(parser)
+    # The shared --gpu argument is a single int; replace it with a GPU-index
+    # list so one worker process is spawned per GPU.  _remove_action does
+    # not clean _option_string_actions, so remove those mappings explicitly.
+    for action in list(parser._actions):
+        if getattr(action, "dest", None) == "gpu":
+            parser._remove_action(action)
+            for option_string in ("--gpu", "--cuda"):
+                parser._option_string_actions.pop(option_string, None)
+    parser.add_argument(
+        "--gpu",
+        "--cuda",
+        dest="gpu",
+        nargs="+",
+        type=int,
+        default=[0],
+        help=(
+            "GPU index(es); one worker process is spawned per GPU "
+            "(e.g. '--gpu 0 1 2 3' runs 4 workers on GPUs 0-3). Each worker "
+            "loads its own model and FAISS indexes. Defaults to [0]."
+        ),
+    )
     parser.add_argument(
         "--data_root",
         "--input",
@@ -1377,17 +1432,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--max_regions", type=int, default=0)
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=None,
-        help=(
-            "Number of worker processes for prediction; each worker loads "
-            "its own model and FAISS indexes (multiprocessing, not threads). "
-            "Defaults to min(4, CPU count); reduce when GPU memory is "
-            "limited, e.g. --workers 2"
-        ),
-    )
     parser.add_argument(
         "--density_points",
         type=int,
@@ -1447,10 +1491,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.workers is None:
-        args.workers = min(4, os.cpu_count() or 1)
-    if args.workers < 1:
-        raise ValueError("workers must be at least 1")
+    gpu_devices = [int(value) for value in args.gpu]
+    if not gpu_devices:
+        raise ValueError("at least one GPU index is required")
+    if len(set(gpu_devices)) != len(gpu_devices):
+        raise ValueError("GPU indices must be unique")
+    args.gpu_devices = gpu_devices
     validate_args(args)
     if len(args.thresholds) != 2:
         raise ValueError(
