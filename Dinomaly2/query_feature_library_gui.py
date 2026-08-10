@@ -1824,6 +1824,12 @@ class MainWindow(QMainWindow):
             if mask_path is not None:
                 break
         if mask_path is None:
+            # 兜底：图像同目录下的同名 labelme 标注（test/bad/x.jpg 旁常有
+            # x.json），即使 GT 目录推导失败也能显示标注异常多边形。
+            sibling = image_path.with_suffix(".json")
+            if sibling.is_file():
+                mask_path = sibling
+        if mask_path is None:
             return
         try:
             if mask_path.suffix.lower() == ".json":

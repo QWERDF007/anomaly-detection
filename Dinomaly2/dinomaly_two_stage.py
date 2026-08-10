@@ -1559,8 +1559,9 @@ def _build_feature_library(
         image_id = make_image_id(image_relative)
         for component in components:
             if library_mode == "patch":
-                # 建库前对区域膨胀（good/anomaly 分开控制）：扩大一圈后再
-                # 挑选前 x% 的 patch，与预测端 --roi_dilation 语义一致。
+                # 建库前对区域膨胀（good/anomaly 分开控制）：在原始图像
+                # 空间按像素膨胀（每圈一次 3x3 结构元素），扩大一圈后再
+                # 挑选前 x% 的 patch。
                 dilation = int(
                     getattr(args, "good_dilation", 0)
                     if library_type == "good"
@@ -2240,9 +2241,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help=(
-            "Dilate each annotated region (one 3x3 iteration per unit) "
-            "before selecting patches when building the good library "
-            "(default: 0 = off)"
+            "Dilate each annotated region in the original image space (one "
+            "3x3 pixel iteration per unit) before selecting patches when "
+            "building the good library (default: 0 = off)"
         ),
     )
     build.add_argument(
@@ -2250,8 +2251,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help=(
-            "Dilate each annotated region before selecting patches when "
-            "building the anomaly library (default: 0 = off)"
+            "Dilate each annotated region in the original image space before "
+            "selecting patches when building the anomaly library "
+            "(default: 0 = off)"
         ),
     )
     build.set_defaults(normalize=True)
@@ -2317,9 +2319,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help=(
-            "Dilate each annotated region (one 3x3 iteration per unit) "
-            "before selecting patches when building the good library "
-            "(default: 0 = off)"
+            "Dilate each annotated region in the original image space (one "
+            "3x3 pixel iteration per unit) before selecting patches when "
+            "building the good library (default: 0 = off)"
         ),
     )
     build_by_label.add_argument(
@@ -2327,8 +2329,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help=(
-            "Dilate each annotated region before selecting patches when "
-            "building the anomaly library (default: 0 = off)"
+            "Dilate each annotated region in the original image space before "
+            "selecting patches when building the anomaly library "
+            "(default: 0 = off)"
         ),
     )
     build_by_label.set_defaults(normalize=True)
