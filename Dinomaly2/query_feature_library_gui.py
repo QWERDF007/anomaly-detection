@@ -1254,6 +1254,8 @@ class MainWindow(QMainWindow):
         overlay_text = canvas.overlay_text
         overlay_color = QColor(canvas.overlay_color)
         overlay_dashed = canvas.overlay_dashed
+        zoom = canvas.zoom
+        pan = canvas.pan
         if (
             self.heatmap_checkbox.isChecked()
             and score_map is not None
@@ -1286,6 +1288,10 @@ class MainWindow(QMainWindow):
         # set_numpy_image 会把 image_path 置空，这里恢复，否则下次
         # 切换显示模式时 _apply_display_mode 会因 image_path 为 None 而跳过。
         canvas.image_path = image_path
+        # set_image/set_numpy_image 会重置视图缩放与平移；
+        # 模式切换不应丢失当前视图，这里恢复。
+        canvas.zoom = zoom
+        canvas.pan = pan
         canvas.update()
 
     def _apply_display_mode(self) -> None:
@@ -2616,7 +2622,18 @@ class MainWindow(QMainWindow):
                     color=overlay_color,
                 )
                 self._update_right_patch_box(result)
-                self._apply_display_mode()
+                # 只重渲染最近邻画布（按热力图开关），不动候选区域图，
+                # 避免其视图/多边形被重置。
+                right_score = None
+                try:
+                    right_score = self.load_score_map(source_path)
+                except (OSError, ValueError, RuntimeError):
+                    right_score = None
+                self._apply_canvas_display(
+                    self.right_canvas,
+                    source_path,
+                    right_score,
+                )
                 self.status_label.setText(
                     f"匹配：{source_path}，"
                     f"distance={float(result.get('distance', 0.0)):.6f}，"
