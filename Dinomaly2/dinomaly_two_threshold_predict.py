@@ -19,11 +19,10 @@ from __future__ import annotations
 
 import argparse
 import csv
-import functools
 import json
 import logging
-import multiprocessing
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -1073,6 +1072,68 @@ def _process_one_entry(
     return row, detail, roi_rows_for_image, cache_hit
 
 
+def run_worker_process(args, position: int) -> int:
+    """Child-process entry: predict this GPU's image slice and report back.
+
+    The child is launched by ``predict_images`` with ``CUDA_VISIBLE_DEVICES``
+    already restricted to its physical GPU in the environment, so the CUDA
+    runtime only ever sees that card.  Results are written to
+    ``preds/.worker_<position>.json`` for the parent to merge.
+    """
+
+    gpu_index = int(args.gpu[position])
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
+    data_root = Path(args.data_root).expanduser()
+    image_entries = collect_data_root_images(data_root)
+    total = len(args.gpu_devices)
+    entries = [
+        entry
+        for index, entry in enumerate(image_entries)
+        if index % total == position
+    ]
+    output_dir = Path(args.root).expanduser() / "preds"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _worker_init(args, output_dir, gpu_index)
+    rows: List[Dict[str, Any]] = []
+    details: List[Dict[str, Any]] = []
+    roi_rows: List[Dict[str, Any]] = []
+    cache_hits = 0
+    for entry in tqdm(
+        entries,
+        desc=f"GPU {gpu_index} ({len(entries)} images)",
+        unit="image",
+        dynamic_ncols=True,
+    ):
+        result = _process_one_entry(args, output_dir, gpu_index, entry)
+        if result is None:
+            continue
+        rows.append(result[0])
+        details.append(result[1])
+        roi_rows.extend(result[2])
+        cache_hits += result[3]
+    worker_path = output_dir / f".worker_{position}.json"
+    with worker_path.open("w", encoding="utf-8") as file:
+        json.dump(
+            _json_safe(
+                {
+                    "rows": rows,
+                    "details": details,
+                    "roi_rows": roi_rows,
+                    "cache_hits": cache_hits,
+                }
+            ),
+            file,
+            ensure_ascii=False,
+            indent=2,
+        )
+    print(
+        f"Worker GPU {gpu_index} finished: {len(entries)} images, "
+        f"{cache_hits} cache hits",
+        flush=True,
+    )
+    return 0
+
+
 def predict_images(args) -> int:
     data_root = Path(args.data_root).expanduser()
     image_entries = collect_data_root_images(data_root)
@@ -1097,9 +1158,12 @@ def predict_images(args) -> int:
     gpu_devices = [int(value) for value in args.gpu_devices]
     entries = list(image_entries)
     start_time = time.time()
+    rows: List[Dict[str, Any]] = []
+    details: List[Dict[str, Any]] = []
+    roi_rows: List[Dict[str, Any]] = []
+    cache_hits = 0
     if len(gpu_devices) <= 1:
         _worker_init(args, output_dir, gpu_devices[0])
-        collected = []
         for entry in tqdm(
             entries,
             desc="Dinomaly2 dual-threshold prediction",
@@ -1107,61 +1171,61 @@ def predict_images(args) -> int:
             dynamic_ncols=True,
         ):
             result = _process_one_entry(args, output_dir, gpu_devices[0], entry)
-            if result is not None:
-                collected.append(result)
+            if result is None:
+                continue
+            rows.append(result[0])
+            details.append(result[1])
+            roi_rows.extend(result[2])
+            cache_hits += result[3]
     else:
-        context = multiprocessing.get_context("spawn")
-        chunk_count = len(gpu_devices)
-        chunks = [
-            entries[index::chunk_count] for index in range(chunk_count)
-        ]
-        pools = []
-        iterators = []
-        for gpu_index, chunk in zip(gpu_devices, chunks):
-            pool = context.Pool(processes=1)
-            task = functools.partial(
-                _process_one_entry,
-                args,
-                output_dir,
-                gpu_index,
+        # One subprocess per GPU, each launched with its own
+        # CUDA_VISIBLE_DEVICES so the CUDA runtime only ever sees that card.
+        # Setting the variable inside a pool worker is too late: torch/FAISS
+        # may already have initialised a CUDA context on the default device.
+        command = [sys.executable, "-u", str(Path(__file__).resolve())]
+        command.extend(sys.argv[1:])
+        processes = []
+        for position, gpu_index in enumerate(gpu_devices):
+            child_env = dict(os.environ)
+            child_env["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
+            processes.append(
+                subprocess.Popen(
+                    [*command, "--_worker_pos", str(position)],
+                    env=child_env,
+                )
             )
-            pools.append(pool)
-            iterators.append(pool.imap(task, chunk))
-        collected = []
-        alive = list(range(len(iterators)))
-        try:
-            with tqdm(
-                total=len(entries),
-                desc=f"Dinomaly2 dual-threshold prediction (GPUs {gpu_devices})",
-                unit="image",
-                dynamic_ncols=True,
-            ) as progress:
-                while alive:
-                    index = alive.pop(0)
-                    iterator = iterators[index]
-                    try:
-                        result = next(iterator)
-                    except StopIteration:
-                        continue
-                    else:
-                        if result is not None:
-                            collected.append(result)
-                        progress.update(1)
-                        alive.append(index)
-        except Exception:
-            for pool in pools:
-                pool.terminate()
-            raise
-        finally:
-            for pool in pools:
-                pool.close()
-            for pool in pools:
-                pool.join()
-
-    rows = [result[0] for result in collected]
-    details = [result[1] for result in collected]
-    roi_rows = [roi for result in collected for roi in result[2]]
-    cache_hits = sum(result[3] for result in collected)
+        failed = []
+        for process, gpu_index in zip(processes, gpu_devices):
+            exit_code = process.wait()
+            if exit_code != 0:
+                failed.append((gpu_index, exit_code))
+        if failed:
+            raise RuntimeError(
+                "worker process(es) failed: "
+                + ", ".join(f"GPU {gpu} exit={code}" for gpu, code in failed)
+            )
+        order = {
+            relative: index
+            for index, (_path, relative, _label) in enumerate(entries)
+        }
+        for position in range(len(gpu_devices)):
+            worker_path = output_dir / f".worker_{position}.json"
+            try:
+                with worker_path.open("r", encoding="utf-8") as file:
+                    payload = json.load(file)
+            except (OSError, json.JSONDecodeError) as error:
+                raise RuntimeError(
+                    f"Cannot read worker result {worker_path}: {error}"
+                ) from error
+            finally:
+                worker_path.unlink(missing_ok=True)
+            rows.extend(payload["rows"])
+            details.extend(payload["details"])
+            roi_rows.extend(payload["roi_rows"])
+            cache_hits += int(payload["cache_hits"])
+        rows.sort(key=lambda row: order.get(row["image_relative"], 0))
+        details.sort(key=lambda detail: order.get(detail["image_relative"], 0))
+        roi_rows.sort(key=lambda roi: order.get(roi["image_relative"], 0))
     computed = len(entries) - cache_hits
 
     csv_path = output_dir / "results.csv"
@@ -1485,6 +1549,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--_worker_pos",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--metric_size",
         type=int,
         default=256,
@@ -1535,6 +1605,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise ValueError("min_area_pct cannot be negative")
     if not 0.0 < args.region_top_ratio <= 1.0:
         raise ValueError("region_top_ratio must be in (0, 1]")
+    if args._worker_pos is not None:
+        return run_worker_process(args, int(args._worker_pos))
     return predict_images(args)
 
 
