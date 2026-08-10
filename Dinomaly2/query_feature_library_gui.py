@@ -1283,6 +1283,9 @@ class MainWindow(QMainWindow):
                 overlay_color,
                 overlay_dashed,
             )
+        # set_numpy_image 会把 image_path 置空，这里恢复，否则下次
+        # 切换显示模式时 _apply_display_mode 会因 image_path 为 None 而跳过。
+        canvas.image_path = image_path
         canvas.update()
 
     def _apply_display_mode(self) -> None:
