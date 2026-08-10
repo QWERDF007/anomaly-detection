@@ -1585,7 +1585,13 @@ def _build_feature_library(
             if bbox_feature is None:
                 continue
             if library_mode == "patch":
-                patch_ratio = float(getattr(args, "patch_top_ratio", 0.5))
+                # 良品库/异常库分开控制入库比例：默认良品 100% 全量入库，
+                # 异常库取区域内分数最高的前 anomaly_patch_ratio。
+                patch_ratio = float(
+                    getattr(args, "good_patch_ratio", 1.0)
+                    if library_type == "good"
+                    else getattr(args, "anomaly_patch_ratio", 0.5)
+                )
                 score_feature = resize_score_map_to_feature(
                     score_map,
                     feature_shape,
@@ -1692,7 +1698,15 @@ def _build_feature_library(
         metadata = {
             "library_type": library_type,
             "library_mode": "patch",
-            "patch_top_ratio": float(getattr(args, "patch_top_ratio", 0.5)),
+            "patch_top_ratio": float(
+                getattr(args, "good_patch_ratio", 1.0)
+                if library_type == "good"
+                else getattr(args, "anomaly_patch_ratio", 0.5)
+            ),
+            "good_patch_ratio": float(getattr(args, "good_patch_ratio", 1.0)),
+            "anomaly_patch_ratio": float(
+                getattr(args, "anomaly_patch_ratio", 0.5)
+            ),
             "patch_selection_rule": (
                 "top_ratio_by_score_among_feature_cells_whose_center_is_inside_mask"
             ),
@@ -2228,12 +2242,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     build.add_argument(
-        "--patch_top_ratio",
+        "--good_patch_ratio",
+        type=float,
+        default=1.0,
+        help=(
+            "Fraction of feature patches stored per region in the good "
+            "library (default: 1.0 = all patches stored)"
+        ),
+    )
+    build.add_argument(
+        "--anomaly_patch_ratio",
         type=float,
         default=0.5,
         help=(
             "Fraction of highest-score feature patches stored per region in "
-            "patch library mode (default: 0.5 = 50%)"
+            "the anomaly library (default: 0.5 = top 50%)"
         ),
     )
     build.add_argument(
@@ -2306,12 +2329,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     build_by_label.add_argument(
-        "--patch_top_ratio",
+        "--good_patch_ratio",
+        type=float,
+        default=1.0,
+        help=(
+            "Fraction of feature patches stored per region in the good "
+            "library (default: 1.0 = all patches stored)"
+        ),
+    )
+    build_by_label.add_argument(
+        "--anomaly_patch_ratio",
         type=float,
         default=0.5,
         help=(
             "Fraction of highest-score feature patches stored per region in "
-            "patch library mode (default: 0.5 = 50%)"
+            "the anomaly library (default: 0.5 = top 50%)"
         ),
     )
     build_by_label.add_argument(
@@ -2416,8 +2448,9 @@ def validate_args(args) -> None:
     if hasattr(args, "score_threshold") and not np.isfinite(args.score_threshold):
         raise ValueError("score_threshold must be finite")
     if hasattr(args, "library_mode") and args.library_mode == "patch":
-        if not 0.0 < args.patch_top_ratio <= 1.0:
-            raise ValueError("patch_top_ratio must be in (0, 1]")
+        for key in ("good_patch_ratio", "anomaly_patch_ratio"):
+            if not 0.0 < getattr(args, key) <= 1.0:
+                raise ValueError(f"{key} must be in (0, 1]")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
