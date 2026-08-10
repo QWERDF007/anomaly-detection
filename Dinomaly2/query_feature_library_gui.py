@@ -23,6 +23,7 @@ import numpy as np
 from PySide6.QtCore import QPointF, QProcess, QRectF, Qt, Signal
 from dinomaly_two_stage import (
     calculate_distance_offset,
+    dilate_mask,
     feature_patch_geometry,
     load_labelme_library_mask,
     load_mask,
@@ -2652,8 +2653,8 @@ class LibraryPatchTab(QWidget):
                 "未找到建库记录：请检查 --preds 上级目录的 good/anomaly/metadata.json"
             )
 
-    def _library_metadata(self) -> Dict[str, Any]:
-        metadata_path = self._library_root() / "good" / "metadata.json"
+    def _library_metadata(self, library_type: str = "good") -> Dict[str, Any]:
+        metadata_path = self._library_root() / library_type / "metadata.json"
         try:
             with metadata_path.open("r", encoding="utf-8") as file:
                 return json.load(file)
@@ -2834,15 +2835,33 @@ class LibraryPatchTab(QWidget):
 
             outlined = original.copy()
             if good_mask is not None:
+                # 建库时若对该库区域做了膨胀，绘制时按同样的膨胀圈数
+                # 绘制膨胀后的区域，使多边形范围与建库 patch 选取一致。
+                good_dilation = int(
+                    self._library_metadata("good").get("region_dilation", 0)
+                )
+                good_outline_mask = (
+                    dilate_mask(good_mask, good_dilation)
+                    if good_dilation > 0
+                    else good_mask
+                )
                 outlined = self._draw_mask_outline(
                     outlined,
-                    good_mask,
+                    good_outline_mask,
                     (83, 200, 0),
                 )
             if anomaly_mask is not None:
+                anomaly_dilation = int(
+                    self._library_metadata("anomaly").get("region_dilation", 0)
+                )
+                anomaly_outline_mask = (
+                    dilate_mask(anomaly_mask, anomaly_dilation)
+                    if anomaly_dilation > 0
+                    else anomaly_mask
+                )
                 outlined = self._draw_mask_outline(
                     outlined,
-                    anomaly_mask,
+                    anomaly_outline_mask,
                     (68, 23, 255),
                 )
 

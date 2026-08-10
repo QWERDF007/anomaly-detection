@@ -1559,8 +1559,18 @@ def _build_feature_library(
         image_id = make_image_id(image_relative)
         for component in components:
             if library_mode == "patch":
+                # 建库前对区域膨胀（good/anomaly 分开控制）：扩大一圈后再
+                # 挑选前 x% 的 patch，与预测端 --roi_dilation 语义一致。
+                dilation = int(
+                    getattr(args, "good_dilation", 0)
+                    if library_type == "good"
+                    else getattr(args, "anomaly_dilation", 0)
+                )
+                region_mask = component["mask"]
+                if dilation > 0:
+                    region_mask = dilate_mask(region_mask, dilation)
                 mask_feature = _model_patch_center_mask(
-                    component["mask"],
+                    region_mask,
                     feature_shape,
                     args,
                 )
@@ -1703,6 +1713,11 @@ def _build_feature_library(
             "backbone": args.backbone,
             "model": str(Path(args.model).expanduser()),
             "feature_shape": [int(feature_shape[0]), int(feature_shape[1])],
+            "region_dilation": int(
+                getattr(args, "good_dilation", 0)
+                if library_type == "good"
+                else getattr(args, "anomaly_dilation", 0)
+            ),
             "records": records,
         }
     elif args.feature_source == "raw_patch":
@@ -2220,6 +2235,25 @@ def build_parser() -> argparse.ArgumentParser:
             "patch library mode (default: 0.5 = 50%)"
         ),
     )
+    build.add_argument(
+        "--good_dilation",
+        type=int,
+        default=0,
+        help=(
+            "Dilate each annotated region (one 3x3 iteration per unit) "
+            "before selecting patches when building the good library "
+            "(default: 0 = off)"
+        ),
+    )
+    build.add_argument(
+        "--anomaly_dilation",
+        type=int,
+        default=0,
+        help=(
+            "Dilate each annotated region before selecting patches when "
+            "building the anomaly library (default: 0 = off)"
+        ),
+    )
     build.set_defaults(normalize=True)
 
     build_by_label = subparsers.add_parser(
@@ -2276,6 +2310,25 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Fraction of highest-score feature patches stored per region in "
             "patch library mode (default: 0.5 = 50%)"
+        ),
+    )
+    build_by_label.add_argument(
+        "--good_dilation",
+        type=int,
+        default=0,
+        help=(
+            "Dilate each annotated region (one 3x3 iteration per unit) "
+            "before selecting patches when building the good library "
+            "(default: 0 = off)"
+        ),
+    )
+    build_by_label.add_argument(
+        "--anomaly_dilation",
+        type=int,
+        default=0,
+        help=(
+            "Dilate each annotated region before selecting patches when "
+            "building the anomaly library (default: 0 = off)"
         ),
     )
     build_by_label.set_defaults(normalize=True)
@@ -2348,6 +2401,9 @@ def validate_args(args) -> None:
         raise ValueError("max_regions cannot be negative")
     if hasattr(args, "roi_dilation") and args.roi_dilation < 0:
         raise ValueError("roi_dilation cannot be negative")
+    for key in ("good_dilation", "anomaly_dilation"):
+        if hasattr(args, key) and getattr(args, key) < 0:
+            raise ValueError(f"{key} cannot be negative")
     if hasattr(args, "offset_scale") and args.offset_scale < 0:
         raise ValueError("offset_scale cannot be negative")
     if hasattr(args, "max_offset") and args.max_offset is not None and args.max_offset < 0:
