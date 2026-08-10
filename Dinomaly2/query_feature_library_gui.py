@@ -2900,13 +2900,30 @@ def build_parser() -> argparse.ArgumentParser:
             "candidate_regions/, adjusted_candidate_regions/, details/, "
             "run.json) from this directory. The image root is derived from "
             "preds/details/*.json; ground-truth masks default to "
-            "<data_root>/ground_truth."
+            "<data_root>/ground_truth or <data_root>/../ground_truth."
         ),
     )
     parser.add_argument("--top_k", type=int, default=1)
     parser.add_argument("--gpu", "--cuda", dest="gpu", type=int, default=0)
     parser.add_argument("--output_dir", default="./gui_lookup_results")
     return parser
+
+
+def resolve_ground_truth(data_root: Path) -> Optional[Path]:
+    """Locate the ground-truth mask directory for a derived image root.
+
+    Tries ``<data_root>/ground_truth`` first, then the sibling directory
+    ``<data_root>/../ground_truth`` (e.g. ``.../leishi_026/ground_truth``
+    next to ``.../leishi_026/test``).
+    """
+
+    for candidate in (
+        data_root / "ground_truth",
+        data_root.parent / "ground_truth",
+    ):
+        if candidate.is_dir():
+            return candidate
+    return None
 
 
 def derive_data_root(preds: Path) -> Optional[Path]:
@@ -3007,8 +3024,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     data_root = derive_data_root(preds)
     if data_root is not None:
         args.data_root = str(data_root)
-        ground_truth = data_root / "ground_truth"
-        if ground_truth.is_dir():
+        ground_truth = resolve_ground_truth(data_root)
+        if ground_truth is not None:
             args.mask_dir = str(ground_truth)
     if args.good_threshold >= args.anomaly_threshold:
         raise SystemExit(
