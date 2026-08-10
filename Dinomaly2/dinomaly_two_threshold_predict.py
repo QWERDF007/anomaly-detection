@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import functools
 import json
 import logging
 import multiprocessing
@@ -781,6 +782,8 @@ def _worker_init(args, output_dir: Path) -> None:
 
 
 def _process_one_entry(
+    args,
+    output_dir: Path,
     entry: Tuple[Path, Path, str],
 ) -> Optional[
     Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]], int]
@@ -788,9 +791,16 @@ def _process_one_entry(
     """Predict one image; returns ``(row, detail, roi_rows, cache_hit)``.
 
     Artifacts are written to their own paths, so worker processes never
-    contend; only the row/detail/roi rows are returned to the parent.
+    contend; only the row/detail/roi rows are returned to the parent.  The
+    worker state is initialised lazily on the first task: multiprocessing
+    swallows exceptions raised by a Pool ``initializer``, which hid the real
+    failure behind a later ``KeyError``, so initialisation happens here and
+    any error propagates to the parent through the task result.
     """
 
+    global _WORKER
+    if not _WORKER:
+        _worker_init(args, output_dir)
     image_path, image_relative, dataset_label = entry
     worker = _WORKER
     args = worker["args"]
@@ -1083,20 +1093,17 @@ def predict_images(args) -> int:
             unit="image",
             dynamic_ncols=True,
         ):
-            result = _process_one_entry(entry)
+            result = _process_one_entry(args, output_dir, entry)
             if result is not None:
                 collected.append(result)
     else:
         context = multiprocessing.get_context("spawn")
-        with context.Pool(
-            processes=workers,
-            initializer=_worker_init,
-            initargs=(args, output_dir),
-        ) as pool:
+        task = functools.partial(_process_one_entry, args, output_dir)
+        with context.Pool(processes=workers) as pool:
             collected = [
                 result
                 for result in tqdm(
-                    pool.imap(_process_one_entry, entries),
+                    pool.imap(task, entries),
                     total=len(entries),
                     desc=f"Dinomaly2 dual-threshold prediction ({workers} workers)",
                     unit="image",
