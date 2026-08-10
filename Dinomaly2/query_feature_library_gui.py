@@ -34,6 +34,7 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -849,6 +850,12 @@ class MainWindow(QMainWindow):
         controls.addStretch(1)
         controls.addWidget(QLabel("区域 top%："))
         controls.addWidget(self.region_top_spin)
+        self.heatmap_checkbox = QCheckBox("热力图叠加")
+        self.heatmap_checkbox.setToolTip(
+            "候选区域图与最近邻原图：勾选后显示原图叠加热力图的混合图，"
+            "取消则显示原图；切换时已绘制的多边形/虚线框保持显示"
+        )
+        controls.addWidget(self.heatmap_checkbox)
         controls.addWidget(self.fit_button)
         controls.addWidget(self.threshold_label)
         controls.addWidget(self.query_button)
@@ -962,6 +969,7 @@ class MainWindow(QMainWindow):
         self.query_button.clicked.connect(self.start_query)
         self.fit_button.clicked.connect(self.fit_all_canvases)
         self.region_top_spin.valueChanged.connect(self._region_top_ratio_changed)
+        self.heatmap_checkbox.toggled.connect(self._apply_display_mode)
         self.left_canvas.shapes_changed.connect(self.update_controls)
         self.left_canvas.shapes_changed.connect(self._update_selected_region_calculation)
         self.left_canvas.candidate_changed.connect(self.candidate_selection_changed)
@@ -1174,6 +1182,7 @@ class MainWindow(QMainWindow):
                         f"{len(self.raw_canvas.candidate_regions)} 个。"
                     )
             self.update_controls()
+            self._apply_display_mode()
         except (OSError, ValueError, TypeError) as error:
             QMessageBox.critical(self, "打开失败", str(error))
 
@@ -1189,6 +1198,118 @@ class MainWindow(QMainWindow):
         ):
             canvas.fit_to_window()
         self.library_view_tab.fit_all()
+
+    @staticmethod
+    def _heatmap_blend(
+        image_bgr: np.ndarray,
+        score_map: np.ndarray,
+    ) -> np.ndarray:
+        """Overlay a jet-coloured score map on an image copy."""
+
+        score_map = np.asarray(score_map, dtype=np.float32)
+        if score_map.shape[:2] != image_bgr.shape[:2]:
+            score_map = cv2.resize(
+                score_map,
+                (image_bgr.shape[1], image_bgr.shape[0]),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        score_min = float(score_map.min())
+        score_max = float(score_map.max())
+        if score_max - score_min < 1e-12:
+            score_norm = np.zeros_like(score_map, dtype=np.uint8)
+        else:
+            score_norm = (
+                (score_map - score_min) / (score_max - score_min) * 255.0
+            ).astype(np.uint8)
+        heat = cv2.applyColorMap(score_norm, cv2.COLORMAP_JET)
+        return cv2.addWeighted(image_bgr, 0.6, heat, 0.4, 0)
+
+    def _apply_canvas_display(
+        self,
+        canvas: ImageCanvas,
+        image_path: Optional[Path],
+        score_map: Optional[np.ndarray],
+    ) -> None:
+        """Re-render one canvas in the current heatmap mode, keeping overlays.
+
+        The candidate regions, patch rects and overlay bbox are captured,
+        the base image is swapped (original or heatmap blend), then every
+        overlay is restored so toggling the switch never drops annotations.
+        """
+
+        if canvas.image is None or image_path is None:
+            return
+        regions = list(canvas.candidate_regions)
+        selected_index = canvas.selected_candidate_index
+        patch_rects = [
+            [
+                float(rect.left()),
+                float(rect.top()),
+                float(rect.right()),
+                float(rect.bottom()),
+            ]
+            for rect in canvas.patch_rects
+        ]
+        overlay_bbox = canvas.overlay_bbox
+        overlay_text = canvas.overlay_text
+        overlay_color = QColor(canvas.overlay_color)
+        overlay_dashed = canvas.overlay_dashed
+        if (
+            self.heatmap_checkbox.isChecked()
+            and score_map is not None
+            and bool(np.any(score_map))
+        ):
+            image_bgr = cv2.imread(str(image_path))
+            if image_bgr is not None:
+                canvas.set_numpy_image(
+                    cv2.cvtColor(
+                        self._heatmap_blend(image_bgr, score_map),
+                        cv2.COLOR_BGR2RGB,
+                    )
+                )
+            else:
+                canvas.set_image(image_path)
+        else:
+            canvas.set_image(image_path)
+        if regions:
+            canvas.set_candidate_regions(regions, emit=False)
+        canvas.selected_candidate_index = selected_index
+        if patch_rects:
+            canvas.set_patch_rects(patch_rects)
+        if overlay_bbox is not None:
+            canvas.set_overlay_bbox(
+                overlay_bbox,
+                overlay_text,
+                overlay_color,
+                overlay_dashed,
+            )
+        canvas.update()
+
+    def _apply_display_mode(self) -> None:
+        """Re-render the candidate and nearest-neighbour canvases.
+
+        The nearest-neighbour image uses its own cached score map when one
+        exists (test-set images); library build images have none and stay as
+        the original image.
+        """
+
+        if self.left_canvas.image_path is not None:
+            self._apply_canvas_display(
+                self.left_canvas,
+                self.left_canvas.image_path,
+                self.score_map,
+            )
+        if self.right_canvas.image_path is not None:
+            right_score = None
+            try:
+                right_score = self.load_score_map(self.right_canvas.image_path)
+            except (OSError, ValueError, RuntimeError):
+                right_score = None
+            self._apply_canvas_display(
+                self.right_canvas,
+                self.right_canvas.image_path,
+                right_score,
+            )
 
     def _fit_image_splitter(self) -> None:
         """Redistribute the file list and four image panels to the window."""
@@ -2492,6 +2613,7 @@ class MainWindow(QMainWindow):
                     color=overlay_color,
                 )
                 self._update_right_patch_box(result)
+                self._apply_display_mode()
                 self.status_label.setText(
                     f"匹配：{source_path}，"
                     f"distance={float(result.get('distance', 0.0)):.6f}，"
