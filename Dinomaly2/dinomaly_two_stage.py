@@ -1056,6 +1056,12 @@ def l2_normalize(vector: np.ndarray) -> np.ndarray:
     return vector.astype(np.float32, copy=False)
 
 
+def _build_index_is_l2(args) -> bool:
+    """True when the library index type is ``l2`` (normalised + Euclidean)."""
+
+    return str(getattr(args, "index_type", "l2")).casefold() == "l2"
+
+
 def _require_faiss():
     try:
         import faiss
@@ -1102,6 +1108,8 @@ def write_feature_library(
     if vectors.ndim != 2 or vectors.shape[0] < 1 or vectors.shape[1] < 1:
         raise ValueError(f"Feature library vectors must be non-empty 2D: {vectors.shape}")
     index = faiss.IndexFlatL2(int(vectors.shape[1]))
+    if str(metadata.get("index_type", "IndexFlatL2")).casefold() == "indexflatip":
+        index = faiss.IndexFlatIP(int(vectors.shape[1]))
     index.add(np.ascontiguousarray(vectors))
     index_path = output_dir / "index.faiss"
     metadata_path = output_dir / "metadata.json"
@@ -1111,8 +1119,13 @@ def write_feature_library(
     metadata.update(
         {
             "format_version": 2,
-            "index_type": "IndexFlatL2",
-            "distance_metric": "L2 (Euclidean)",
+            "index_type": str(metadata.get("index_type", "IndexFlatL2")),
+            "distance_metric": (
+                "1 - inner_product"
+                if str(metadata.get("index_type", "IndexFlatL2")).casefold()
+                == "indexflatip"
+                else "L2 (Euclidean)"
+            ),
             "feature_dim": int(vectors.shape[1]),
             "vector_count": int(vectors.shape[0]),
             "index_file": index_path.name,
@@ -1260,6 +1273,15 @@ def record_for_vector_id(
     )
 
 
+def _uses_inner_product(library: SearchLibrary) -> bool:
+    """True when the library uses ``IndexFlatIP`` (inner product)."""
+
+    return (
+        str(library.metadata.get("index_type", "")).casefold()
+        in {"indexflatip", "ip"}
+    )
+
+
 def search_library_topk(
     library: SearchLibrary,
     vector: np.ndarray,
@@ -1267,8 +1289,10 @@ def search_library_topk(
 ) -> List[Tuple[float, int]]:
     """Search a library and return ``(distance, vector_id)`` pairs.
 
-    The library uses ``IndexFlatL2`` (Euclidean distance) on L2-normalised
-    vectors, so smaller distances mean more similar features.
+    For ``IndexFlatIP`` the reported "distance" is ``1 - inner_product``;
+    for ``IndexFlatL2`` the raw Euclidean distance is returned.  Smaller is
+    always more similar, keeping the distance semantics used by
+    :func:`calculate_distance_offset`.
     """
 
     vector = np.asarray(vector, dtype=np.float32).reshape(1, -1)
@@ -1278,13 +1302,19 @@ def search_library_topk(
             f"Query feature dimension {vector.shape[1]} does not match "
             f"library dimension {library.index.d}."
         )
-    distances, neighbours = library.index.search(
+    raw_distances, neighbours = library.index.search(
         np.ascontiguousarray(vector),
         top_k,
     )
+    if _uses_inner_product(library):
+        return [
+            (1.0 - float(raw_distance), int(neighbour))
+            for raw_distance, neighbour in zip(raw_distances[0], neighbours[0])
+            if int(neighbour) >= 0
+        ]
     return [
-        (float(distance), int(neighbour))
-        for distance, neighbour in zip(distances[0], neighbours[0])
+        (float(raw_distance), int(neighbour))
+        for raw_distance, neighbour in zip(raw_distances[0], neighbours[0])
         if int(neighbour) >= 0
     ]
 
@@ -1377,7 +1407,11 @@ def validate_library_compatibility(
 
 
 def search_library(library: SearchLibrary, vector: np.ndarray) -> Tuple[float, int]:
-    """Search one library; returns ``(L2 distance, vector_id)``."""
+    """Search one library; returns ``(distance, vector_id)``.
+
+    Distance is the raw L2 norm for ``IndexFlatL2`` and
+    ``1 - inner_product`` for ``IndexFlatIP``.
+    """
 
     vector = np.asarray(vector, dtype=np.float32).reshape(1, -1)
     if vector.shape[1] != int(library.index.d):
@@ -1385,11 +1419,14 @@ def search_library(library: SearchLibrary, vector: np.ndarray) -> Tuple[float, i
             f"Query feature dimension {vector.shape[1]} does not match "
             f"library dimension {library.index.d}."
         )
-    distances, neighbours = library.index.search(
+    raw_distances, neighbours = library.index.search(
         np.ascontiguousarray(vector),
         1,
     )
-    return float(distances[0, 0]), int(neighbours[0, 0])
+    distance = float(raw_distances[0, 0])
+    if _uses_inner_product(library):
+        distance = 1.0 - distance
+    return distance, int(neighbours[0, 0])
 
 
 def _model_feature_mask(
@@ -1591,10 +1628,11 @@ def _build_feature_library(
                     component["component_id"],
                 )
                 for patch_index, (row, col) in enumerate(positions):
-                    # 特征来源 en[-1]；建库先 L2 归一化，
-                    # 索引 IndexFlatL2（欧氏距离），预测/查询同规则。
+                    # 特征来源 en[-1]；l2 模式先归一化再用 IndexFlatL2
+                    # 欧氏距离，ip 模式不归一化用 IndexFlatIP（距离=1-内积）。
                     vector = feature[:, int(row), int(col)]
-                    vector = l2_normalize(vector)
+                    if _build_index_is_l2(args):
+                        vector = l2_normalize(vector)
                     patch_geometry = feature_patch_geometry(
                         int(row),
                         int(col),
@@ -1645,7 +1683,8 @@ def _build_feature_library(
                 args.roi_size,
                 device,
             )
-            vector = l2_normalize(vector)
+            if _build_index_is_l2(args):
+                vector = l2_normalize(vector)
             vector_id = len(vectors)
             vectors.append(vector)
             records.append(
@@ -1703,8 +1742,15 @@ def _build_feature_library(
                 "per-patch en[-1] feature vectors; each patch is one vector"
             ),
             "roi_size": int(args.roi_size),
-            "normalize": True,
-            "distance_metric": "L2 (Euclidean) on L2-normalised vectors",
+            "index_type": (
+                "IndexFlatL2" if _build_index_is_l2(args) else "IndexFlatIP"
+            ),
+            "normalize": _build_index_is_l2(args),
+            "distance_metric": (
+                "L2 (Euclidean) on L2-normalised vectors"
+                if _build_index_is_l2(args)
+                else "1 - inner_product"
+            ),
             "image_size": int(args.image_size),
             "crop_size": int(args.crop_size),
             "backbone": args.backbone,
@@ -1724,8 +1770,15 @@ def _build_feature_library(
             "feature_source": "raw_patch",
             "feature_layout": "final normed patch tokens (x_norm_patchtokens) before ROIAlign",
             "roi_size": int(args.roi_size),
-            "normalize": True,
-            "distance_metric": "L2 (Euclidean) on L2-normalised vectors",
+            "index_type": (
+                "IndexFlatL2" if _build_index_is_l2(args) else "IndexFlatIP"
+            ),
+            "normalize": _build_index_is_l2(args),
+            "distance_metric": (
+                "L2 (Euclidean) on L2-normalised vectors"
+                if _build_index_is_l2(args)
+                else "1 - inner_product"
+            ),
             "image_size": int(args.image_size),
             "crop_size": int(args.crop_size),
             "backbone": args.backbone,
@@ -1739,8 +1792,15 @@ def _build_feature_library(
             "feature_source": "dinomaly_encoder_output",
             "feature_layout": "en[-1] CHW before ROIAlign",
             "roi_size": int(args.roi_size),
-            "normalize": True,
-            "distance_metric": "L2 (Euclidean) on L2-normalised vectors",
+            "index_type": (
+                "IndexFlatL2" if _build_index_is_l2(args) else "IndexFlatIP"
+            ),
+            "normalize": _build_index_is_l2(args),
+            "distance_metric": (
+                "L2 (Euclidean) on L2-normalised vectors"
+                if _build_index_is_l2(args)
+                else "1 - inner_product"
+            ),
             "image_size": int(args.image_size),
             "crop_size": int(args.crop_size),
             "backbone": args.backbone,
@@ -2218,6 +2278,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     build.add_argument(
+        "--index_type",
+        choices=("l2", "ip"),
+        default="l2",
+        help=(
+            "l2 = L2-normalise features and build an IndexFlatL2 index "
+            "(Euclidean distance, default); ip = keep features unnormalised "
+            "and build an IndexFlatIP index (distance = 1 - inner product)"
+        ),
+    )
+    build.add_argument(
         "--good_patch_ratio",
         type=float,
         default=1.0,
@@ -2294,6 +2364,16 @@ def build_parser() -> argparse.ArgumentParser:
             "roi = one pooled ROIAlign vector per annotated region "
             "(default); patch = one vector per highest-score patch inside "
             "each region (no ROIAlign)"
+        ),
+    )
+    build_by_label.add_argument(
+        "--index_type",
+        choices=("l2", "ip"),
+        default="l2",
+        help=(
+            "l2 = L2-normalise features and build an IndexFlatL2 index "
+            "(Euclidean distance, default); ip = keep features unnormalised "
+            "and build an IndexFlatIP index (distance = 1 - inner product)"
         ),
     )
     build_by_label.add_argument(

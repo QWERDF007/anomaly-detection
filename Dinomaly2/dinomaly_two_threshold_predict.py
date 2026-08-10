@@ -76,6 +76,7 @@ from dinomaly_two_stage import (
     select_strongest_region,
     validate_args,
     validate_library_compatibility,
+    _uses_inner_product,
 )
 from utils import get_gaussian_kernel
 
@@ -333,6 +334,36 @@ def top_ratio_mean(values: np.ndarray, ratio: float) -> float:
     return float(np.sort(values)[-top_count:].mean())
 
 
+def _apply_ip_two_stage_decision(
+    region: Dict[str, Any],
+    args,
+    good_library,
+) -> Dict[str, Any]:
+    """Fixed-band two-stage decision for IP (unnormalised inner-product) libraries.
+
+    Inner-product distances are unbounded, so the continuous
+    ``min(d) × offset_scale`` correction is meaningless there.  Instead the
+    region score is set to a fixed band decided by the nearer library:
+    anomaly distance < good distance → ``1.5 × anomaly_threshold`` (anomaly),
+    otherwise → ``0.5 × good_threshold`` (good).
+    """
+
+    if not _uses_inner_product(good_library):
+        return region
+    anomaly_distance = float(region["anomaly_distance"])
+    good_distance = float(region["good_distance"])
+    if anomaly_distance < good_distance:
+        region["region_score"] = 1.5 * float(args.anomaly_threshold)
+        region["similar_library"] = "anomaly"
+    else:
+        region["region_score"] = 0.5 * float(args.good_threshold)
+        region["similar_library"] = "good"
+    region["offset"] = 0.0
+    region["signed_offset"] = 0.0
+    region["confidence"] = 0.0
+    return region
+
+
 def _build_region_result(
     component: Mapping[str, Any],
     score_map: np.ndarray,
@@ -465,7 +496,7 @@ def _build_region_result(
         }
         region["good_neighbour"] = int(good_neighbour)
         region["anomaly_neighbour"] = int(anomaly_neighbour)
-        return region
+        return _apply_ip_two_stage_decision(region, args, good_library)
 
     vector = roi_align_masked(
         feature,
@@ -503,7 +534,7 @@ def _build_region_result(
     # Keep the integer neighbour fields alongside the reverse mapping fields.
     region["good_neighbour"] = int(good_neighbour)
     region["anomaly_neighbour"] = int(anomaly_neighbour)
-    return region
+    return _apply_ip_two_stage_decision(region, args, good_library)
 
 
 def evaluate_image_level(
