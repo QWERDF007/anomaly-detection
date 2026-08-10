@@ -1408,7 +1408,7 @@ class MainWindow(QMainWindow):
             ):
                 final_judged.append(candidate)
         self.unmatched_region_count = unmatched_count
-        # 候选面板保持一阶段着色（load_candidate_regions 已按原始分数分档），
+        # 候选面板保持候选区域青色/标注红色的着色（load_candidate_regions），
         # 不把二阶段判定结果写回；二阶段着色只用于下方调整结果面板。
         self.adjust_canvas.set_candidate_regions(final_judged, emit=False)
         judged_with_score = [
@@ -2006,24 +2006,17 @@ class MainWindow(QMainWindow):
         filtered: List[Dict[str, Any]] = []
         for component in components:
             if component.get("is_annotation"):
+                # 标注区域固定红色，与 Dinomaly2 预测候选的青色区分。
                 component.setdefault("color", "#ff1744")
                 filtered.append(component)
                 continue
             # 背景高分连片会把整图变成一个连通域；仅过滤接近整图的区域。
             if int(component.get("area", 0)) > 0.9 * image_area:
                 continue
+            # Dinomaly2 预测的候选区域统一青色，不再按分数分档着色，
+            # 避免与标注（红色）混淆。
             component["label"] = None
-            region_score = float(component.get("score", float("nan")))
-            if not np.isfinite(region_score):
-                region_score = self._predictor_region_score(
-                    np.asarray(component["mask"], dtype=bool)
-                )
-            if region_score < good_threshold:
-                component["color"] = "#00c853"
-            elif region_score > anomaly_threshold:
-                component["color"] = "#ff1744"
-            else:
-                component["color"] = "#00bcd4"
+            component["color"] = "#00bcd4"
             filtered.append(component)
         components = filtered
 
