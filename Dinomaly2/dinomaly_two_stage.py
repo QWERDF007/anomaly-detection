@@ -642,6 +642,180 @@ def patch_center_mask_with_fallback(
     return cells
 
 
+def polygon_points_from_mask(
+    mask: np.ndarray,
+) -> List[np.ndarray]:
+    """Return the outer-contour polygons (float32, mask coordinates) of a mask."""
+
+    contours, _ = cv2.findContours(
+        (np.asarray(mask) > 0).astype(np.uint8),
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    return [
+        contour.reshape(-1, 2).astype(np.float32)
+        for contour in contours
+        if contour.shape[0] >= 3
+    ]
+
+
+def _polygon_from_shape(shape: Mapping[str, Any]) -> Optional[np.ndarray]:
+    """Convert one Labelme shape to a closed polygon (float32, original coords)."""
+
+    points = np.asarray(shape.get("points", []), dtype=np.float32)
+    shape_type = str(shape.get("shape_type", "polygon")).lower()
+    if shape_type == "rectangle" and points.shape[0] >= 2:
+        x1, y1 = points[0]
+        x2, y2 = points[1]
+        return np.asarray(
+            [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
+            dtype=np.float32,
+        )
+    if points.ndim != 2 or points.shape[0] < 3 or points.shape[1] != 2:
+        return None
+    return points
+
+
+def load_labelme_library_polygons(
+    mask_path: Path,
+    library_type: str,
+    good_labels: Sequence[str],
+    ignore_labels: Sequence[str],
+) -> List[np.ndarray]:
+    """Return the polygons routed to one library from a Labelme JSON.
+
+    Mirrors :func:`load_labelme_library_mask` label routing, but keeps the
+    original polygons (image coordinates) so patch centres can be tested with
+    ``cv2.pointPolygonTest`` directly against the annotation outline.
+    """
+
+    mask_path = Path(mask_path)
+    if mask_path.suffix.lower() != ".json":
+        raise ValueError(
+            "Polygon routing requires Labelme JSON masks; "
+            f"got {mask_path}"
+        )
+    if library_type not in {"good", "anomaly"}:
+        raise ValueError(f"Unsupported library type: {library_type}")
+    with mask_path.open("r", encoding="utf-8") as file:
+        annotation = json.load(file)
+    good_label_set = _normalized_labels(good_labels)
+    ignore_label_set = _normalized_labels(ignore_labels)
+    polygons: List[np.ndarray] = []
+    for shape in annotation.get("shapes", []):
+        if not isinstance(shape, Mapping):
+            continue
+        label = str(shape.get("label", "")).strip().casefold()
+        if label in ignore_label_set:
+            continue
+        is_good = label in good_label_set
+        if (library_type == "good") != is_good:
+            continue
+        polygon = _polygon_from_shape(shape)
+        if polygon is not None:
+            polygons.append(polygon)
+    return polygons
+
+
+def patch_center_mask_from_polygons(
+    polygons: Sequence[np.ndarray],
+    feature_shape: Tuple[int, int],
+    image_shape: Tuple[int, int],
+) -> np.ndarray:
+    """Feature cells whose centre (mapped linearly to the original image) lies
+    inside any of the polygons.
+
+    Each feature-cell centre is mapped back to the original image with the
+    linear ``scale = image / feature`` mapping and tested with
+    ``cv2.pointPolygonTest`` (boundary counts as inside) against the
+    annotation polygons.  This matches the legacy pipeline's outline-based
+    region membership without rasterising the annotation.
+    """
+
+    feature_height, feature_width = [int(value) for value in feature_shape]
+    image_height, image_width = [int(value) for value in image_shape]
+    scale_x = float(image_width) / float(feature_width)
+    scale_y = float(image_height) / float(feature_height)
+    contours = [
+        np.asarray(polygon, dtype=np.float32).reshape(-1, 2)
+        for polygon in polygons
+        if np.asarray(polygon).ndim == 2 and len(polygon) >= 3
+    ]
+    cells = np.zeros((feature_height, feature_width), dtype=bool)
+    for row in range(feature_height):
+        center_y = (float(row) + 0.5) * scale_y
+        for col in range(feature_width):
+            center_x = (float(col) + 0.5) * scale_x
+            for contour in contours:
+                if (
+                    cv2.pointPolygonTest(
+                        contour,
+                        (float(center_x), float(center_y)),
+                        False,
+                    )
+                    >= 0
+                ):
+                    cells[row, col] = True
+                    break
+    return cells
+
+
+def nearest_feature_cell_from_polygon(
+    polygon: np.ndarray,
+    feature_shape: Tuple[int, int],
+    image_shape: Tuple[int, int],
+) -> Tuple[int, int]:
+    """Return the feature cell whose centre is nearest the polygon centroid.
+
+    Used when no feature-cell centre lies inside a tiny region: the polygon
+    centroid is matched against every feature-cell centre (mapped back to the
+    original image) and the closest cell is returned.
+    """
+
+    polygon = np.asarray(polygon, dtype=np.float32).reshape(-1, 2)
+    center_x = float(np.mean(polygon[:, 0]))
+    center_y = float(np.mean(polygon[:, 1]))
+    feature_height, feature_width = [int(value) for value in feature_shape]
+    image_height, image_width = [int(value) for value in image_shape]
+    scale_x = float(image_width) / float(feature_width)
+    scale_y = float(image_height) / float(feature_height)
+    best_row, best_col = 0, 0
+    best_distance = float("inf")
+    for row in range(feature_height):
+        delta_y = (float(row) + 0.5) * scale_y - center_y
+        for col in range(feature_width):
+            delta_x = (float(col) + 0.5) * scale_x - center_x
+            distance = delta_y * delta_y + delta_x * delta_x
+            if distance < best_distance:
+                best_distance = distance
+                best_row, best_col = row, col
+    return int(best_row), int(best_col)
+
+
+def dilate_polygons(
+    polygons: Sequence[np.ndarray],
+    dilation: int,
+    image_shape: Tuple[int, int],
+) -> List[np.ndarray]:
+    """Dilate polygons in the original image space.
+
+    Each polygon is rasterised onto a mask, dilated with the 3x3 structuring
+    element ``dilation`` times, and its outer contour is returned.
+    """
+
+    if int(dilation) <= 0:
+        return [np.asarray(polygon, dtype=np.float32) for polygon in polygons]
+    image_height, image_width = [int(value) for value in image_shape]
+    mask = np.zeros((image_height, image_width), dtype=np.uint8)
+    for polygon in polygons:
+        points = np.round(
+            np.asarray(polygon, dtype=np.float32)
+        ).astype(np.int32)
+        cv2.fillPoly(mask, [points], 1)
+    dilated = dilate_mask(mask, int(dilation)).astype(np.uint8)
+    return polygon_points_from_mask(dilated)
+
+
 def linear_mask_to_feature(
     mask: np.ndarray,
     feature_shape: Tuple[int, int],
@@ -1570,13 +1744,19 @@ def _build_feature_library(
     library_type: str,
     output_dir: Path,
     mask_loader=None,
+    polygons_loader=None,
     model=None,
     transform=None,
     device: Optional[torch.device] = None,
     label_routing: Optional[Mapping[str, Any]] = None,
     patch_backbone=None,
 ) -> int:
-    """Extract and write one library, optionally using a custom mask loader."""
+    """Extract and write one library, optionally using custom loaders.
+
+    ``mask_loader`` returns the routed binary mask; ``polygons_loader``
+    (Labelme only) returns the routed annotation polygons so patch-mode
+    centre tests use ``cv2.pointPolygonTest`` against the original outlines.
+    """
 
     if device is None:
         device = select_device(args.gpu)
@@ -1647,71 +1827,147 @@ def _build_feature_library(
         feature_shape = feature.shape[-2:]
         image_relative = _relative_image_path(image_path, images_root).as_posix()
         image_id = make_image_id(image_relative)
-        for component in components:
-            if library_mode == "patch":
-                # 建库前对区域膨胀（good/anomaly 分开控制）：在原始图像
-                # 空间按像素膨胀（每圈一次 3x3 结构元素），扩大一圈后再
-                # 挑选前 x% 的 patch。
-                dilation = int(
-                    getattr(args, "good_dilation", 0)
-                    if library_type == "good"
-                    else getattr(args, "anomaly_dilation", 0)
+        patch_ratio = float(
+            getattr(args, "good_patch_ratio", 1.0)
+            if library_type == "good"
+            else getattr(args, "anomaly_patch_ratio", 0.5)
+        )
+        dilation = int(
+            getattr(args, "good_dilation", 0)
+            if library_type == "good"
+            else getattr(args, "anomaly_dilation", 0)
+        )
+        if library_mode == "patch":
+            polygons = None
+            if polygons_loader is not None:
+                try:
+                    polygons = polygons_loader(mask_path, image_shape)
+                except (OSError, ValueError, json.JSONDecodeError):
+                    polygons = None
+            if polygons is not None:
+                # labelme 多边形直判路径：每个多边形一个区域，cell 中心
+                # 映射回原图用 pointPolygonTest 判定。
+                region_polygons = dilate_polygons(
+                    polygons,
+                    dilation,
+                    image_shape,
                 )
-                region_mask = component["mask"]
-                if dilation > 0:
-                    region_mask = dilate_mask(region_mask, dilation)
-                if not _build_index_is_l2(args):
-                    # ip 模式：完全照旧脚本流程（dinomaly2_feature_bank_
-                    # labelme_0807_add0.7ad.py）——区域 mask 线性缩放到
-                    # 特征网格，不做 Resize+CenterCrop 几何。
-                    mask_feature = linear_mask_to_feature(
-                        region_mask,
+                score_feature = linear_score_to_feature(
+                    score_map,
+                    feature_shape,
+                )
+                for poly_index, polygon in enumerate(region_polygons):
+                    mask_feature = patch_center_mask_from_polygons(
+                        [polygon],
                         feature_shape,
+                        image_shape,
                     )
                     if not mask_feature.any():
-                        # 旧脚本：区域太小无特征像素时取质心所在 cell。
-                        row, col = nearest_feature_cell(
-                            region_mask,
+                        # 区域太小没有 patch 落在多边形内：取最近 cell 兜底。
+                        row, col = nearest_feature_cell_from_polygon(
+                            polygon,
                             feature_shape,
+                            image_shape,
                         )
                         mask_feature = np.zeros(feature_shape, dtype=bool)
                         mask_feature[row, col] = True
-                else:
-                    mask_feature = _model_patch_center_mask(
-                        region_mask,
-                        feature_shape,
-                        args,
+                    bbox_feature = mask_bbox(mask_feature)
+                    if bbox_feature is None:
+                        continue
+                    positions = select_patch_positions(
+                        score_feature,
+                        mask_feature,
+                        patch_ratio,
                     )
-            else:
-                mask_feature = _model_feature_mask(
-                    component["mask"],
-                    feature_shape,
-                    args,
-                )
-            bbox_feature = mask_bbox(mask_feature)
-            if bbox_feature is None:
+                    if positions.shape[0] == 0:
+                        continue
+                    base_roi_id = make_roi_id(image_id, poly_index)
+                    polygon_bbox = [
+                        float(polygon[:, 0].min()),
+                        float(polygon[:, 1].min()),
+                        float(polygon[:, 0].max()),
+                        float(polygon[:, 1].max()),
+                    ]
+                    for patch_index, (row, col) in enumerate(positions):
+                        vector = feature[:, int(row), int(col)]
+                        vector = l2_normalize(vector)
+                        patch_geometry = linear_patch_geometry(
+                            int(row),
+                            int(col),
+                            feature_shape,
+                            image_shape,
+                        )
+                        vector_id = len(vectors)
+                        vectors.append(vector)
+                        records.append(
+                            {
+                                "vector_id": vector_id,
+                                "id": vector_id,
+                                "image_id": image_id,
+                                "roi_id": f"{base_roi_id}_p{patch_index}",
+                                "image_name": image_path.name,
+                                "image_path": str(image_path.resolve()),
+                                "image_relative": image_relative,
+                                "mask_path": str(mask_path.resolve()),
+                                "component_id": int(poly_index),
+                                "patch_index": int(patch_index),
+                                "patch_row": int(row),
+                                "patch_col": int(col),
+                                "patch_center_inside_mask": True,
+                                "feature_shape": patch_geometry["feature_shape"],
+                                "patch_center_feature": patch_geometry[
+                                    "center_feature"
+                                ],
+                                "patch_bbox_resized": patch_geometry["bbox_original"],
+                                "patch_center_resized": patch_geometry[
+                                    "center_original"
+                                ],
+                                "patch_bbox_original": patch_geometry[
+                                    "bbox_original"
+                                ],
+                                "patch_center_original": patch_geometry[
+                                    "center_original"
+                                ],
+                                "area": 1,
+                                "bbox_original": polygon_bbox,
+                                "bbox_feature": [
+                                    float(col),
+                                    float(row),
+                                    float(col + 1),
+                                    float(row + 1),
+                                ],
+                            }
+                        )
                 continue
-            if library_mode == "patch":
-                # 良品库/异常库分开控制入库比例：默认良品 100% 全量入库，
-                # 异常库取区域内分数最高的前 anomaly_patch_ratio。
-                patch_ratio = float(
-                    getattr(args, "good_patch_ratio", 1.0)
-                    if library_type == "good"
-                    else getattr(args, "anomaly_patch_ratio", 0.5)
+            for component in components:
+                # 掩码路径：连通域轮廓转多边形后同样用 pointPolygonTest
+                # 判定 patch 中心（与 labelme 多边形路径完全一致）。
+                component_mask = component["mask"]
+                if dilation > 0:
+                    component_mask = dilate_mask(component_mask, dilation)
+                polygons = polygon_points_from_mask(component_mask)
+                if not polygons:
+                    continue
+                mask_feature = patch_center_mask_from_polygons(
+                    polygons,
+                    feature_shape,
+                    image_shape,
                 )
-                if not _build_index_is_l2(args):
-                    # ip 模式：score map 直接线性缩放到特征网格（旧脚本式）。
-                    score_feature = linear_score_to_feature(
-                        score_map,
+                if not mask_feature.any():
+                    # 区域太小没有 patch 落在多边形内：取最近 cell 兜底。
+                    row, col = nearest_feature_cell(
+                        component_mask,
                         feature_shape,
                     )
-                else:
-                    score_feature = resize_score_map_to_feature(
-                        score_map,
-                        feature_shape,
-                        args.image_size,
-                        args.crop_size,
-                    )
+                    mask_feature = np.zeros(feature_shape, dtype=bool)
+                    mask_feature[row, col] = True
+                bbox_feature = mask_bbox(mask_feature)
+                if bbox_feature is None:
+                    continue
+                score_feature = linear_score_to_feature(
+                    score_map,
+                    feature_shape,
+                )
                 positions = select_patch_positions(
                     score_feature,
                     mask_feature,
@@ -1724,35 +1980,13 @@ def _build_feature_library(
                     component["component_id"],
                 )
                 for patch_index, (row, col) in enumerate(positions):
-                    # 特征来源 en[-1]；两种模式均 L2 归一化：
-                    # l2 用 IndexFlatL2 欧氏距离，ip 用 IndexFlatIP
-                    # （归一化后内积=余弦，距离=1-内积 ∈ [0,2]，照旧脚本）。
                     vector = feature[:, int(row), int(col)]
                     vector = l2_normalize(vector)
-                    if not _build_index_is_l2(args):
-                        # ip 模式记录旧脚本式线性几何（无 crop 偏移）。
-                        patch_geometry = linear_patch_geometry(
-                            int(row),
-                            int(col),
-                            feature_shape,
-                            image_shape,
-                        )
-                    else:
-                        patch_geometry = feature_patch_geometry(
-                            int(row),
-                            int(col),
-                            feature_shape,
-                            image_shape,
-                            args.image_size,
-                            args.crop_size,
-                        )
-                    patch_bbox_resized = patch_geometry.get(
-                        "bbox_resized",
-                        patch_geometry["bbox_original"],
-                    )
-                    patch_center_resized = patch_geometry.get(
-                        "center_resized",
-                        patch_geometry["center_original"],
+                    patch_geometry = linear_patch_geometry(
+                        int(row),
+                        int(col),
+                        feature_shape,
+                        image_shape,
                     )
                     vector_id = len(vectors)
                     vectors.append(vector)
@@ -1773,8 +2007,8 @@ def _build_feature_library(
                             "patch_center_inside_mask": True,
                             "feature_shape": patch_geometry["feature_shape"],
                             "patch_center_feature": patch_geometry["center_feature"],
-                            "patch_bbox_resized": patch_bbox_resized,
-                            "patch_center_resized": patch_center_resized,
+                            "patch_bbox_resized": patch_geometry["bbox_original"],
+                            "patch_center_resized": patch_geometry["center_original"],
                             "patch_bbox_original": patch_geometry["bbox_original"],
                             "patch_center_original": patch_geometry["center_original"],
                             "area": 1,
@@ -1789,6 +2023,15 @@ def _build_feature_library(
                             ],
                         }
                     )
+            continue
+        for component in components:
+            mask_feature = _model_feature_mask(
+                component["mask"],
+                feature_shape,
+                args,
+            )
+            bbox_feature = mask_bbox(mask_feature)
+            if bbox_feature is None:
                 continue
             vector = roi_align_masked(
                 feature,
@@ -1840,7 +2083,8 @@ def _build_feature_library(
                 getattr(args, "anomaly_patch_ratio", 0.5)
             ),
             "patch_selection_rule": (
-                "top_ratio_by_score_among_feature_cells_whose_center_is_inside_mask"
+                "top_ratio_by_score_among_feature_cells_whose_centre_is_inside_polygon"
+                "(pointPolygonTest, centre mapped linearly back to the original image)"
             ),
             "patch_center_coordinate_system": (
                 "preprocessed_mask_crop_feature_cell_center"
@@ -1992,6 +2236,14 @@ def build_libraries_by_label(args) -> int:
                 ignore_labels,
             )
 
+        def polygons_loader(mask_path, image_shape=None, target=library_type):
+            return load_labelme_library_polygons(
+                mask_path,
+                target,
+                good_labels,
+                ignore_labels,
+            )
+
         _build_feature_library(
             args,
             images_root,
@@ -2000,6 +2252,7 @@ def build_libraries_by_label(args) -> int:
             library_type,
             output_root / library_type,
             mask_loader=mask_loader,
+            polygons_loader=polygons_loader,
             model=model,
             transform=transform,
             device=device,

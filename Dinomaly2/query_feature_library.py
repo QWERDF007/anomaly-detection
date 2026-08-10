@@ -24,8 +24,6 @@ from dinomaly_two_stage import (
     _uses_inner_product,
     connected_components,
     dilate_mask,
-    feature_patch_geometry,
-    linear_mask_to_feature,
     linear_patch_geometry,
     linear_score_to_feature,
     l2_normalize,
@@ -33,12 +31,12 @@ from dinomaly_two_stage import (
     load_mask,
     make_image_id,
     mask_bbox,
-    nearest_feature_cell,
-    patch_center_mask_with_fallback,
+    nearest_feature_cell_from_polygon,
+    patch_center_mask_from_polygons,
+    polygon_points_from_mask,
     preprocess_mask,
     record_for_vector_id,
     resize_mask_to_feature,
-    resize_score_map_to_feature,
     roi_align_masked,
     search_library_topk,
     select_device,
@@ -389,41 +387,36 @@ def query_feature_library(args) -> int:
         results.append(result)
 
     for component in components:
-        model_mask = preprocess_mask(
-            component["mask"],
-            image_size,
-            crop_size,
-        )
         use_inner_product = _uses_inner_product(libraries[0])
         if library_mode == "patch":
-            if use_inner_product:
-                # ip 模式：与建库一致的旧脚本流程（区域线性缩放到特征网格）。
-                mask_feature = linear_mask_to_feature(
-                    component["mask"],
+            # 与建库一致的统一流程：连通域轮廓转多边形，cell 中心线性
+            # 映射回原图用 pointPolygonTest 判定；太小无命中取最近 cell。
+            polygons = polygon_points_from_mask(component["mask"])
+            if not polygons:
+                vanished_count += 1
+                continue
+            mask_feature = patch_center_mask_from_polygons(
+                polygons,
+                feature_shape,
+                image_shape,
+            )
+            if not mask_feature.any():
+                row, col = nearest_feature_cell_from_polygon(
+                    polygons[0],
                     feature_shape,
+                    image_shape,
                 )
-                if not mask_feature.any():
-                    row, col = nearest_feature_cell(
-                        component["mask"],
-                        feature_shape,
-                    )
-                    mask_feature = np.zeros(feature_shape, dtype=bool)
-                    mask_feature[row, col] = True
-            else:
-                # Keep query patch selection identical to library construction:
-                # the feature-cell centre, not OpenCV's nearest-neighbour sample,
-                # must be inside the preprocessed ROI mask.  Tiny regions or
-                # regions outside the CenterCrop fall back to the nearest feature
-                # cell (in original image space when needed) so the ROI is still
-                # queried instead of being dropped.
-                if not model_mask.any():
-                    model_mask = np.asarray(component["mask"], dtype=bool)
-                mask_feature = patch_center_mask_with_fallback(
-                    model_mask,
-                    feature_shape,
-                )
+                mask_feature = np.zeros(feature_shape, dtype=bool)
+                mask_feature[row, col] = True
         else:
-            mask_feature = resize_mask_to_feature(model_mask, feature_shape)
+            mask_feature = resize_mask_to_feature(
+                preprocess_mask(
+                    component["mask"],
+                    image_size,
+                    crop_size,
+                ),
+                feature_shape,
+            )
         if mask_bbox(mask_feature) is None and library_mode != "patch":
             mask_feature = dilate_mask(mask_feature, 1)
         if mask_bbox(mask_feature) is None:
@@ -434,18 +427,10 @@ def query_feature_library(args) -> int:
             )
             continue
         if library_mode == "patch":
-            if use_inner_product:
-                score_feature = linear_score_to_feature(
-                    score_map,
-                    feature_shape,
-                )
-            else:
-                score_feature = resize_score_map_to_feature(
-                    score_map,
-                    feature_shape,
-                    image_size,
-                    crop_size,
-                )
+            score_feature = linear_score_to_feature(
+                score_map,
+                feature_shape,
+            )
             positions = select_patch_positions(
                 score_feature,
                 mask_feature,
@@ -457,22 +442,12 @@ def query_feature_library(args) -> int:
             # 与预测一致：只用区域内分数最高的单个 patch 查询
             # （select_patch_positions 按分数降序，首行即最大）。
             positions = positions[:1]
-            if use_inner_product:
-                query_patch_geometry = linear_patch_geometry(
-                    int(positions[0, 0]),
-                    int(positions[0, 1]),
-                    feature_shape,
-                    image_shape,
-                )
-            else:
-                query_patch_geometry = feature_patch_geometry(
-                    int(positions[0, 0]),
-                    int(positions[0, 1]),
-                    feature_shape,
-                    image_shape,
-                    image_size,
-                    crop_size,
-                )
+            query_patch_geometry = linear_patch_geometry(
+                int(positions[0, 0]),
+                int(positions[0, 1]),
+                feature_shape,
+                image_shape,
+            )
             patch_vectors = []
             for row, col in positions:
                 patch_vector = feature[:, int(row), int(col)]
