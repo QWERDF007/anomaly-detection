@@ -21,6 +21,8 @@ import argparse
 import csv
 import json
 import logging
+import multiprocessing
+import os
 import sys
 import time
 from pathlib import Path
@@ -731,6 +733,323 @@ def apply_library_metadata(args, metadata: Mapping[str, Any]) -> None:
         args.feature_source = "dinomaly"
 
 
+_WORKER: Dict[str, Any] = {}
+
+
+def _worker_init(args, output_dir: Path) -> None:
+    """Load per-process model, libraries and transform into the global state.
+
+    Every worker process (and the single-process path) owns its own Dinomaly2
+    model and FAISS indexes; nothing is shared across processes.  Spawn is
+    used for multiprocessing so each worker initialises its CUDA context
+    cleanly.
+    """
+
+    global _WORKER
+    device = select_device(args.gpu)
+    faiss_on_gpu = device.type == "cuda"
+    root = Path(output_dir).parent
+    good_library = load_feature_library(root / "good", device, faiss_on_gpu)
+    anomaly_library = load_feature_library(root / "anomaly", device, faiss_on_gpu)
+    apply_library_metadata(args, good_library.metadata)
+    validate_library_compatibility(good_library, anomaly_library, args)
+    model = load_dinomaly_model(args, device)
+    patch_backbone = None
+    if args.feature_source == "raw_patch":
+        patch_backbone = load_patch_backbone(args, device)
+    transform = build_transform(args)
+    gaussian_filter = get_gaussian_kernel(5, 4).to(device)
+    cache_root = Path(output_dir) / (
+        "features_raw_patch" if args.feature_source == "raw_patch" else "features"
+    )
+    cache_root.mkdir(parents=True, exist_ok=True)
+    _WORKER.update(
+        {
+            "args": args,
+            "device": device,
+            "good_library": good_library,
+            "anomaly_library": anomaly_library,
+            "model": model,
+            "patch_backbone": patch_backbone,
+            "transform": transform,
+            "gaussian_filter": gaussian_filter,
+            "output_dir": Path(output_dir),
+            "cache_root": cache_root,
+            "process_size": int(args.process_size),
+        }
+    )
+
+
+def _process_one_entry(
+    entry: Tuple[Path, Path, str],
+) -> Optional[
+    Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]], int]
+]:
+    """Predict one image; returns ``(row, detail, roi_rows, cache_hit)``.
+
+    Artifacts are written to their own paths, so worker processes never
+    contend; only the row/detail/roi rows are returned to the parent.
+    """
+
+    image_path, image_relative, dataset_label = entry
+    worker = _WORKER
+    args = worker["args"]
+    device = worker["device"]
+    good_library = worker["good_library"]
+    anomaly_library = worker["anomaly_library"]
+    model = worker["model"]
+    patch_backbone = worker["patch_backbone"]
+    transform = worker["transform"]
+    gaussian_filter = worker["gaussian_filter"]
+    output_dir = worker["output_dir"]
+    cache_root = worker["cache_root"]
+    process_size = worker["process_size"]
+
+    with Image.open(image_path) as image:
+        original_image_shape = (int(image.height), int(image.width))
+    score_path = output_artifact_path(
+        output_dir,
+        "score_maps",
+        image_relative,
+        ".npy",
+    )
+    feature_path = output_artifact_path(
+        cache_root,
+        "",
+        image_relative,
+        ".npy",
+    )
+    cached = (
+        not args.recompute_features
+        and score_path.is_file()
+        and feature_path.is_file()
+    )
+    if cached:
+        score_map = np.load(score_path)
+        feature = np.load(feature_path)
+        cache_hit = 1
+    else:
+        score_map, feature = infer_image(
+            model,
+            image_path,
+            transform,
+            device,
+            args.feature_merge,
+            gaussian_filter,
+            patch_backbone=patch_backbone,
+            feature_source=args.feature_source,
+        )
+        score_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(score_path, score_map)
+        feature_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(feature_path, feature)
+        cache_hit = 0
+    if process_size > 0:
+        score_map = cv2.resize(
+            score_map,
+            (process_size, process_size),
+            interpolation=cv2.INTER_LINEAR,
+        )
+    raw_score = (
+        float(training_image_score(score_map)) if score_map.size else 0.0
+    )
+    initial_label = initial_score_label(
+        raw_score,
+        args.good_threshold,
+        args.anomaly_threshold,
+    )
+    regions: List[Dict[str, Any]] = []
+    # Always save the direct Dinomaly2 threshold result.  This is kept
+    # separate from candidate_regions, which contains only the regions
+    # used by the second-stage feature-library search.
+    raw_region_mask = (
+        np.asarray(score_map >= float(args.good_threshold), dtype=np.uint8)
+    )
+    candidate_mask = np.zeros(score_map.shape, dtype=np.uint8)
+
+    if initial_label == "middle":
+        # Equality belongs to the middle band because the direct rules
+        # intentionally use strict < and > comparisons.
+        min_area = 1
+        if float(args.min_area_pct) > 0.0:
+            min_area = max(
+                min_area,
+                int(
+                    round(
+                        float(args.min_area_pct) / 100.0 * score_map.size
+                    )
+                ),
+            )
+        components = connected_components(
+            score_map >= float(args.good_threshold),
+            min_area=min_area,
+            max_regions=args.max_regions,
+        )
+        for component in components:
+            candidate_mask[component["mask"]] = 1
+            try:
+                region = _build_region_result(
+                    component,
+                    score_map,
+                    feature,
+                    good_library,
+                    anomaly_library,
+                    args,
+                    device,
+                    original_image_shape,
+                )
+            except (RuntimeError, TypeError, ValueError) as error:
+                LOGGER.warning(
+                    "Skipping ROI %s in %s: %s",
+                    component["component_id"],
+                    image_path,
+                    error,
+                )
+                continue
+            if region is not None:
+                regions.append(region)
+
+    selected = select_strongest_region(regions)
+    signed_offset = float(selected["signed_offset"]) if selected else 0.0
+    adjusted_anomaly_mask = np.zeros(score_map.shape, dtype=np.uint8)
+    overlay = score_map.copy()
+    if regions:
+        count, labels, _stats, _ = cv2.connectedComponentsWithStats(
+            (candidate_mask > 0).astype(np.uint8),
+            8,
+        )
+        for region in regions:
+            region_id = int(region["region_id"])
+            if not 0 < region_id < count:
+                continue
+            region_mask = labels == region_id
+            region_adjusted = float(region["region_score"]) + float(
+                region["signed_offset"]
+            )
+            region_label, _region_reason = final_score_label(
+                region_adjusted,
+                args.good_threshold,
+                args.anomaly_threshold,
+                str(region.get("similar_library", "")),
+            )
+            if region_label == "good":
+                overlay[region_mask] = 0.0
+            else:
+                overlay[region_mask] = region_adjusted
+                adjusted_anomaly_mask[region_mask] = 1
+        adjusted_score = (
+            float(training_image_score(overlay)) if overlay.size else 0.0
+        )
+    else:
+        adjusted_score = raw_score
+    final_label, decision_reason = final_score_label(
+        adjusted_score,
+        args.good_threshold,
+        args.anomaly_threshold,
+        str(selected.get("similar_library", "")) if selected else "",
+    )
+    relative_text = image_relative.as_posix()
+    roi_rows_for_image: List[Dict[str, Any]] = []
+    for region in regions:
+        roi_rows_for_image.append(
+            {
+                "image_path": str(image_path),
+                "image_relative": relative_text,
+                "dataset_label": dataset_label,
+                "raw_score": raw_score,
+                "good_threshold": float(args.good_threshold),
+                "anomaly_threshold": float(args.anomaly_threshold),
+                **region,
+            }
+        )
+
+    raw_region_path = output_artifact_path(
+        output_dir,
+        "raw_regions",
+        image_relative,
+        ".png",
+    )
+    region_path = output_artifact_path(
+        output_dir,
+        "candidate_regions",
+        image_relative,
+        ".png",
+    )
+    adjusted_region_path = output_artifact_path(
+        output_dir,
+        "adjusted_candidate_regions",
+        image_relative,
+        ".png",
+    )
+    detail_path = output_artifact_path(
+        output_dir,
+        "details",
+        image_relative,
+        ".json",
+    )
+    if not cv2.imwrite(str(raw_region_path), raw_region_mask * 255):
+        raise OSError(f"Cannot write raw threshold region mask: {raw_region_path}")
+    if not cv2.imwrite(str(region_path), candidate_mask * 255):
+        raise OSError(f"Cannot write candidate region mask: {region_path}")
+    # This is the mask used by the GUI/final visualization.  A region
+    # judged good by stage two is intentionally absent here.  Keep the
+    # original candidate mask above because pixel-level adjusted metrics
+    # still need to know which regions must be overwritten with zero.
+    if not cv2.imwrite(
+        str(adjusted_region_path),
+        adjusted_anomaly_mask * 255,
+    ):
+        raise OSError(
+            "Cannot write adjusted candidate region mask: "
+            f"{adjusted_region_path}"
+        )
+
+    row = {
+        "image_path": str(image_path),
+        "image_relative": relative_text,
+        "dataset_label": dataset_label,
+        "raw_score": raw_score,
+        "good_threshold": float(args.good_threshold),
+        "anomaly_threshold": float(args.anomaly_threshold),
+        "process_size": process_size,
+        "initial_label": initial_label,
+        "adjusted_score": adjusted_score,
+        "final_label": final_label,
+        "decision_reason": decision_reason,
+        "stage2_applied": bool(initial_label == "middle" and regions),
+        "region_count": len(regions),
+        "selected_region_id": selected.get("region_id", "") if selected else "",
+        "good_distance": selected.get("good_distance", "") if selected else "",
+        "anomaly_distance": selected.get("anomaly_distance", "") if selected else "",
+        "similar_library": selected.get("similar_library", "") if selected else "",
+        "confidence": selected.get("confidence", 0.0) if selected else 0.0,
+        "offset": selected.get("offset", 0.0) if selected else 0.0,
+        "signed_offset": signed_offset,
+    }
+    detail = {
+        **row,
+        "score_map_path": str(score_path),
+        "raw_region_path": str(raw_region_path),
+        "candidate_region_path": str(region_path),
+        "adjusted_candidate_region_path": str(adjusted_region_path),
+        "regions": regions,
+    }
+    with detail_path.open("w", encoding="utf-8") as file:
+        json.dump(_json_safe(detail), file, ensure_ascii=False, indent=2)
+    LOGGER.info(
+        "%s raw=%.6f (%s) adjusted=%.6f (%s) regions=%d library=%s offset=%+.6f",
+        image_path,
+        raw_score,
+        initial_label,
+        adjusted_score,
+        final_label,
+        len(regions),
+        selected.get("similar_library", "none") if selected else "none",
+        signed_offset,
+    )
+    return row, detail, roi_rows_for_image, cache_hit
+
+
 def predict_images(args) -> int:
     data_root = Path(args.data_root).expanduser()
     image_entries = collect_data_root_images(data_root)
@@ -740,278 +1059,57 @@ def predict_images(args) -> int:
     root = Path(args.root).expanduser()
     output_dir = root / "preds"
     output_dir.mkdir(parents=True, exist_ok=True)
-    device = select_device(args.gpu)
-    faiss_on_gpu = device.type == "cuda"
-    good_library = load_feature_library(
-        root / "good",
-        device,
-        faiss_on_gpu,
-    )
-    anomaly_library = load_feature_library(
-        root / "anomaly",
-        device,
-        faiss_on_gpu,
-    )
-    apply_library_metadata(args, good_library.metadata)
-    validate_library_compatibility(good_library, anomaly_library, args)
-    model = load_dinomaly_model(args, device)
-    patch_backbone = None
-    if args.feature_source == "raw_patch":
-        patch_backbone = load_patch_backbone(args, device)
-    transform = build_transform(args)
-    gaussian_filter = get_gaussian_kernel(5, 4).to(device)
+    # The parent process only needs the library metadata (for run.json and
+    # the feature configuration); models and indexes are loaded per worker.
+    good_metadata: Dict[str, Any] = {}
+    good_metadata_path = root / "good" / "metadata.json"
+    if good_metadata_path.is_file():
+        try:
+            with good_metadata_path.open("r", encoding="utf-8") as file:
+                good_metadata = json.load(file)
+            apply_library_metadata(args, good_metadata)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
+            LOGGER.warning("Cannot read library metadata: %s", error)
 
-    rows: List[Dict[str, Any]] = []
-    details: List[Dict[str, Any]] = []
-    roi_rows: List[Dict[str, Any]] = []
-    cache_root = output_dir / (
-        "features_raw_patch"
-        if args.feature_source == "raw_patch"
-        else "features"
-    )
-    cache_root.mkdir(parents=True, exist_ok=True)
-    process_size = int(args.process_size)
-    cache_hits = 0
-    computed = 0
+    workers = int(args.workers)
+    entries = list(image_entries)
     start_time = time.time()
-    for image_path, image_relative, dataset_label in tqdm(
-        image_entries,
-        desc="Dinomaly2 dual-threshold prediction",
-        unit="image",
-        dynamic_ncols=True,
-    ):
-        with Image.open(image_path) as image:
-            original_image_shape = (int(image.height), int(image.width))
-        score_path = output_artifact_path(
-            output_dir,
-            "score_maps",
-            image_relative,
-            ".npy",
-        )
-        feature_path = output_artifact_path(
-            cache_root,
-            "",
-            image_relative,
-            ".npy",
-        )
-        cached = (
-            not args.recompute_features
-            and score_path.is_file()
-            and feature_path.is_file()
-        )
-        if cached:
-            score_map = np.load(score_path)
-            feature = np.load(feature_path)
-            cache_hits += 1
-        else:
-            score_map, feature = infer_image(
-                model,
-                image_path,
-                transform,
-                device,
-                args.feature_merge,
-                gaussian_filter,
-                patch_backbone=patch_backbone,
-                feature_source=args.feature_source,
-            )
-            score_path.parent.mkdir(parents=True, exist_ok=True)
-            np.save(score_path, score_map)
-            feature_path.parent.mkdir(parents=True, exist_ok=True)
-            np.save(feature_path, feature)
-            computed += 1
-        if process_size > 0:
-            score_map = cv2.resize(
-                score_map,
-                (process_size, process_size),
-                interpolation=cv2.INTER_LINEAR,
-            )
-        raw_score = (
-            float(training_image_score(score_map)) if score_map.size else 0.0
-        )
-        initial_label = initial_score_label(
-            raw_score,
-            args.good_threshold,
-            args.anomaly_threshold,
-        )
-        regions: List[Dict[str, Any]] = []
-        # Always save the direct Dinomaly2 threshold result.  This is kept
-        # separate from candidate_regions, which contains only the regions
-        # used by the second-stage feature-library search.
-        raw_region_mask = (
-            np.asarray(score_map >= float(args.good_threshold), dtype=np.uint8)
-        )
-        candidate_mask = np.zeros(score_map.shape, dtype=np.uint8)
-
-        if initial_label == "middle":
-            # Equality belongs to the middle band because the direct rules
-            # intentionally use strict < and > comparisons.
-            min_area = 1
-            if float(args.min_area_pct) > 0.0:
-                min_area = max(
-                    min_area,
-                    int(
-                        round(
-                            float(args.min_area_pct) / 100.0 * score_map.size
-                        )
-                    ),
-                )
-            components = connected_components(
-                score_map >= float(args.good_threshold),
-                min_area=min_area,
-                max_regions=args.max_regions,
-            )
-            for component in components:
-                candidate_mask[component["mask"]] = 1
-                try:
-                    region = _build_region_result(
-                        component,
-                        score_map,
-                        feature,
-                        good_library,
-                        anomaly_library,
-                        args,
-                        device,
-                        original_image_shape,
-                    )
-                except (RuntimeError, TypeError, ValueError) as error:
-                    LOGGER.warning(
-                        "Skipping ROI %s in %s: %s",
-                        component["component_id"],
-                        image_path,
-                        error,
-                    )
-                    continue
-                if region is not None:
-                    regions.append(region)
-
-        selected = select_strongest_region(regions)
-        signed_offset = float(selected["signed_offset"]) if selected else 0.0
-        adjusted_anomaly_mask = np.zeros(score_map.shape, dtype=np.uint8)
-        overlay = score_map.copy()
-        if regions:
-            count, labels, _stats, _ = cv2.connectedComponentsWithStats(
-                (candidate_mask > 0).astype(np.uint8),
-                8,
-            )
-            for region in regions:
-                region_id = int(region["region_id"])
-                if not 0 < region_id < count:
-                    continue
-                region_mask = labels == region_id
-                region_adjusted = float(region["region_score"]) + float(
-                    region["signed_offset"]
-                )
-                region_label, _region_reason = final_score_label(
-                    region_adjusted,
-                    args.good_threshold,
-                    args.anomaly_threshold,
-                    str(region.get("similar_library", "")),
-                )
-                if region_label == "good":
-                    overlay[region_mask] = 0.0
-                else:
-                    overlay[region_mask] = region_adjusted
-                    adjusted_anomaly_mask[region_mask] = 1
-            adjusted_score = (
-                float(training_image_score(overlay)) if overlay.size else 0.0
-            )
-        else:
-            adjusted_score = raw_score
-        final_label, decision_reason = final_score_label(
-            adjusted_score,
-            args.good_threshold,
-            args.anomaly_threshold,
-            str(selected.get("similar_library", "")) if selected else "",
-        )
-        relative_text = image_relative.as_posix()
-        for region in regions:
-            roi_rows.append(
-                {
-                    "image_path": str(image_path),
-                    "image_relative": relative_text,
-                    "dataset_label": dataset_label,
-                    "raw_score": raw_score,
-                    "good_threshold": float(args.good_threshold),
-                    "anomaly_threshold": float(args.anomaly_threshold),
-                    **region,
-                }
-            )
-
-        raw_region_path = output_artifact_path(
-            output_dir,
-            "raw_regions",
-            image_relative,
-            ".png",
-        )
-        region_path = output_artifact_path(
-            output_dir,
-            "candidate_regions",
-            image_relative,
-            ".png",
-        )
-        adjusted_region_path = output_artifact_path(
-            output_dir,
-            "adjusted_candidate_regions",
-            image_relative,
-            ".png",
-        )
-        detail_path = output_artifact_path(
-            output_dir,
-            "details",
-            image_relative,
-            ".json",
-        )
-        if not cv2.imwrite(str(raw_region_path), raw_region_mask * 255):
-            raise OSError(f"Cannot write raw threshold region mask: {raw_region_path}")
-        if not cv2.imwrite(str(region_path), candidate_mask * 255):
-            raise OSError(f"Cannot write candidate region mask: {region_path}")
-        # This is the mask used by the GUI/final visualization.  A region
-        # judged good by stage two is intentionally absent here.  Keep the
-        # original candidate mask above because pixel-level adjusted metrics
-        # still need to know which regions must be overwritten with zero.
-        if not cv2.imwrite(
-            str(adjusted_region_path),
-            adjusted_anomaly_mask * 255,
+    if workers <= 1:
+        _worker_init(args, output_dir)
+        collected = []
+        for entry in tqdm(
+            entries,
+            desc="Dinomaly2 dual-threshold prediction",
+            unit="image",
+            dynamic_ncols=True,
         ):
-            raise OSError(
-                "Cannot write adjusted candidate region mask: "
-                f"{adjusted_region_path}"
-            )
+            result = _process_one_entry(entry)
+            if result is not None:
+                collected.append(result)
+    else:
+        context = multiprocessing.get_context("spawn")
+        with context.Pool(
+            processes=workers,
+            initializer=_worker_init,
+            initargs=(args, output_dir),
+        ) as pool:
+            collected = [
+                result
+                for result in tqdm(
+                    pool.imap(_process_one_entry, entries),
+                    total=len(entries),
+                    desc=f"Dinomaly2 dual-threshold prediction ({workers} workers)",
+                    unit="image",
+                    dynamic_ncols=True,
+                )
+                if result is not None
+            ]
 
-        row = {
-            "image_path": str(image_path),
-            "image_relative": relative_text,
-            "dataset_label": dataset_label,
-            "raw_score": raw_score,
-            "good_threshold": float(args.good_threshold),
-            "anomaly_threshold": float(args.anomaly_threshold),
-            "process_size": process_size,
-            "initial_label": initial_label,
-            "adjusted_score": adjusted_score,
-            "final_label": final_label,
-            "decision_reason": decision_reason,
-            "stage2_applied": bool(initial_label == "middle" and regions),
-            "region_count": len(regions),
-            "selected_region_id": selected.get("region_id", "") if selected else "",
-            "good_distance": selected.get("good_distance", "") if selected else "",
-            "anomaly_distance": selected.get("anomaly_distance", "") if selected else "",
-            "similar_library": selected.get("similar_library", "") if selected else "",
-            "confidence": selected.get("confidence", 0.0) if selected else 0.0,
-            "offset": selected.get("offset", 0.0) if selected else 0.0,
-            "signed_offset": signed_offset,
-        }
-        detail = {
-            **row,
-            "score_map_path": str(score_path),
-            "raw_region_path": str(raw_region_path),
-            "candidate_region_path": str(region_path),
-            "adjusted_candidate_region_path": str(adjusted_region_path),
-            "regions": regions,
-        }
-        with detail_path.open("w", encoding="utf-8") as file:
-            json.dump(_json_safe(detail), file, ensure_ascii=False, indent=2)
-        rows.append(row)
-        details.append(detail)
+    rows = [result[0] for result in collected]
+    details = [result[1] for result in collected]
+    roi_rows = [roi for result in collected for roi in result[2]]
+    cache_hits = sum(result[3] for result in collected)
+    computed = len(entries) - cache_hits
 
     csv_path = output_dir / "results.csv"
     fieldnames = [
@@ -1130,24 +1228,24 @@ def predict_images(args) -> int:
                     "roi_dilation": args.roi_dilation,
                     "region_top_ratio": args.region_top_ratio,
                     "library_mode": str(
-                        good_library.metadata.get("library_mode", "roi")
+                        good_metadata.get("library_mode", "roi")
                     ),
                     "patch_top_ratio": float(
-                        good_library.metadata.get("patch_top_ratio", 0.5)
+                        good_metadata.get("patch_top_ratio", 0.5)
                     ),
                     "patch_selection_rule": str(
-                        good_library.metadata.get(
+                        good_metadata.get(
                             "patch_selection_rule",
                             "top_ratio_by_score_among_feature_cells_whose_center_is_inside_mask",
                         )
                     ),
-                    "feature_shape": good_library.metadata.get(
+                    "feature_shape": good_metadata.get(
                         "feature_shape",
                         [],
                     ),
                     "min_area_pct": args.min_area_pct,
                     "max_regions": args.max_regions,
-                    "process_size": process_size,
+                    "process_size": int(args.process_size),
                     "density_points": args.density_points,
                     "feature_merge": args.feature_merge,
                     "roi_size": args.roi_size,
@@ -1273,6 +1371,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max_regions", type=int, default=0)
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help=(
+            "Number of worker processes for prediction; each worker loads "
+            "its own model and FAISS indexes (multiprocessing, not threads). "
+            "Defaults to min(4, CPU count); reduce when GPU memory is "
+            "limited, e.g. --workers 2"
+        ),
+    )
+    parser.add_argument(
         "--density_points",
         type=int,
         default=400,
@@ -1331,6 +1440,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.workers is None:
+        args.workers = min(4, os.cpu_count() or 1)
+    if args.workers < 1:
+        raise ValueError("workers must be at least 1")
     validate_args(args)
     if len(args.thresholds) != 2:
         raise ValueError(
