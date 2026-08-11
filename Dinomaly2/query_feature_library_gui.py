@@ -561,11 +561,8 @@ class ImageCanvas(QWidget):
                 [self.image_to_widget(point) for point in points]
             )
             if len(points) >= 3:
-                fill_color = QColor(color)
-                fill_color.setAlpha(55 if selected else 30)
-                painter.setBrush(fill_color)
+                # 多边形只绘制边线，不填充。
                 painter.drawPolygon(polygon)
-                painter.setBrush(Qt.BrushStyle.NoBrush)
                 label_point = polygon.boundingRect().topLeft()
             else:
                 x1, y1, x2, y2 = candidate["bbox"]
