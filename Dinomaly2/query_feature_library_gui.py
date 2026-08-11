@@ -59,7 +59,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-TWO_STAGE_FORMULA_HTML = """<h4 style="margin:2px;">两阶段分数调整公式</h4>
+TWO_STAGE_FORMULA_HTML = """<h4 style="margin:2px;">两阶段分数调整公式（L2 索引）</h4>
 <pre style="font-family:Consolas,'Courier New',monospace; font-size:9pt; white-space:pre-wrap;">
 d_good      = ‖v − p_good‖₂            良品库最近邻 L2 距离
 d_anomaly   = ‖v − p_anomaly‖₂         异常库最近邻 L2 距离
@@ -73,6 +73,28 @@ region_score = score_map 在 ROI 内 top x% 均值
 <li>adjusted_score &lt; good_threshold → <span style="color:#00c853;"><b>正常</b></span></li>
 <li>adjusted_score ≥ good_threshold（含中间带与超过 anomaly_threshold）→ <span style="color:#ff1744;"><b>异常</b></span></li>
 </ul>"""
+
+TWO_STAGE_FORMULA_IP_HTML = """<h4 style="margin:2px;">两阶段分数调整公式（IP 索引）</h4>
+<pre style="font-family:Consolas,'Courier New',monospace; font-size:9pt; white-space:pre-wrap;">
+d_good    = 1 − 内积（良品库最近邻）
+d_anomaly = 1 − 内积（异常库最近邻）
+内积距离无界，不做 offset 连续修正，按近库取固定档位：
+  d_anomaly &lt; d_good → region_score = 1.5 × anomaly_threshold（异常）
+  否则              → region_score = 0.5 × good_threshold（正常）
+</pre>
+<b>双阈值判定</b>（good_threshold &lt; anomaly_threshold）：
+<ul style="margin:2px; padding-left:20px;">
+<li>region_score &lt; good_threshold → <span style="color:#00c853;"><b>正常</b></span></li>
+<li>region_score ≥ good_threshold（含中间带与超过 anomaly_threshold）→ <span style="color:#ff1744;"><b>异常</b></span></li>
+</ul>"""
+
+
+def two_stage_formula_html(index_type: str) -> str:
+    """Return the formula panel HTML for the library index type."""
+
+    if str(index_type).casefold() in {"indexflatip", "ip"}:
+        return TWO_STAGE_FORMULA_IP_HTML
+    return TWO_STAGE_FORMULA_HTML
 
 
 class ImageCanvas(QWidget):
@@ -799,7 +821,11 @@ class MainWindow(QMainWindow):
         self.calculation_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        self.formula_label.setText(TWO_STAGE_FORMULA_HTML)
+        self.formula_label.setText(
+            two_stage_formula_html(
+                str(self._library_metadata().get("index_type", "IndexFlatL2"))
+            )
+        )
 
         self.left_canvas = ImageCanvas(editable=True)
         self.left_canvas.show_scores = False
@@ -1052,6 +1078,15 @@ class MainWindow(QMainWindow):
                 return json.load(file)
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             return {}
+
+    def _index_is_ip(self) -> bool:
+        """True when the feature libraries use ``IndexFlatIP``."""
+
+        metadata = self._library_metadata()
+        return (
+            str(metadata.get("index_type", "")).casefold()
+            in {"indexflatip", "ip"}
+        )
 
     @staticmethod
     def _backbone_patch_size(backbone: str) -> int:
@@ -1668,10 +1703,17 @@ class MainWindow(QMainWindow):
         if self.score_map is not None and np.any(roi_mask):
             region_ratio = float(self.region_top_spin.value()) / 100.0
             region_score = self._predictor_region_score(roi_mask)
-            lines.append(
-                f"region_score（ROI 内 top {region_ratio * 100.0:g}% 均值） = "
-                f"<b>{region_score:.4f}</b>"
-            )
+            if self._index_is_ip():
+                lines.append(
+                    f"region_score（ROI 内 top {region_ratio * 100.0:g}% 均值，"
+                    "仅参考，IP 库实际按近库固定档位） = "
+                    f"<b>{region_score:.4f}</b>"
+                )
+            else:
+                lines.append(
+                    f"region_score（ROI 内 top {region_ratio * 100.0:g}% 均值） = "
+                    f"<b>{region_score:.4f}</b>"
+                )
         else:
             region_score = None
             lines.append("region_score = 未提供 score_map")
@@ -1760,6 +1802,51 @@ class MainWindow(QMainWindow):
         similar_cn = self._similar_library_cn(similar_library)
         lines.append(f"d_good（良品库第 1 近） = <b>{good_distance:.6f}</b>")
         lines.append(f"d_anomaly（异常库第 1 近） = <b>{anomaly_distance:.6f}</b>")
+        if self._index_is_ip():
+            # IP 索引：内积距离无界，无 offset 修正，按近库取固定档位。
+            # region_score 直接采用预测写入的固定档位值。
+            stored_score = float(region.get("region_score", 0.0))
+            if anomaly_distance < good_distance:
+                band_text = (
+                    f"d_anomaly &lt; d_good（近异常库）→ "
+                    f"region_score = 1.5 × anomaly_threshold = "
+                    f"<b>{1.5 * anomaly_threshold:.4f}</b>"
+                )
+            else:
+                band_text = (
+                    f"d_anomaly ≥ d_good（近良品库）→ "
+                    f"region_score = 0.5 × good_threshold = "
+                    f"<b>{0.5 * good_threshold:.4f}</b>"
+                )
+            lines.append(band_text)
+            if region_score is None:
+                return
+            adjusted = stored_score
+            lines.append(
+                f"区域分数（预测写入）= <b>{stored_score:.4f}</b>"
+            )
+            lines.append(
+                f"双阈值：good_threshold = <b>{good_threshold:.4f}</b>，"
+                f"anomaly_threshold = <b>{anomaly_threshold:.4f}</b>"
+            )
+            label, reason = final_score_label(
+                adjusted,
+                good_threshold,
+                anomaly_threshold,
+                similar_library,
+            )
+            label_cn = "正常" if label == "good" else "异常"
+            color = "#00c853" if label == "good" else "#ff1744"
+            reason_cn = {
+                "adjusted_below_good_threshold": "低于良品阈值",
+                "adjusted_above_anomaly_threshold": "高于异常阈值",
+                "adjusted_in_middle_band": "介于两阈值之间",
+            }.get(reason, reason)
+            lines.append(
+                f"最终判定：<span style=\"color:{color}; font-weight:bold;\">"
+                f"{label_cn}</span>（{reason_cn}）"
+            )
+            return
         lines.append(
             f"confidence = {float(region.get('confidence', 0.0)):.6f}，"
             f"offset = {float(region.get('offset', 0.0)):.6f}，"
