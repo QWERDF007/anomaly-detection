@@ -30,6 +30,7 @@ from dinomaly_two_stage import (
     mask_bbox,
 )
 from dinomaly_two_threshold_predict import final_score_label
+from utils import refine_anomaly_map_guided
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -59,12 +60,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-TWO_STAGE_FORMULA_HTML = """<h4 style="margin:2px;">两阶段分数调整公式（L2 索引）</h4>
+TWO_STAGE_FORMULA_HTML = """<h4 style="margin:2px;">两阶段分数自适应调整公式（无量纲 Relative Margin）</h4>
 <pre style="font-family:Consolas,'Courier New',monospace; font-size:9pt; white-space:pre-wrap;">
 d_good      = ‖v − p_good‖₂            良品库最近邻 L2 距离
 d_anomaly   = ‖v − p_anomaly‖₂         异常库最近邻 L2 距离
-offset      = min(d_good, d_anomaly) × offset_scale（上限 max_offset）
-signed_offset = −offset（近良品库） / +offset（近异常库）
+margin      = (d_anomaly − d_good) / (d_anomaly + d_good) ∈ [-1, 1]
+bandwidth   = anomaly_threshold − good_threshold (双阈值带宽)
+offset      = |margin| × (bandwidth / 2) × offset_scale（上限 max_offset）
+signed_offset = −margin × (bandwidth / 2) × offset_scale
 adjusted_score = region_score + signed_offset
 region_score = score_map 在 ROI 内 top x% 均值
 </pre>
@@ -879,6 +882,11 @@ class MainWindow(QMainWindow):
             "取消则显示原图；切换时已绘制的多边形/虚线框保持显示"
         )
         controls.addWidget(self.heatmap_checkbox)
+        self.guided_checkbox = QCheckBox("边缘贴合(导向滤波)")
+        self.guided_checkbox.setToolTip(
+            "利用原图边缘高频信息引导热力图，使热力图边缘紧密贴合划痕物理轮廓"
+        )
+        controls.addWidget(self.guided_checkbox)
         controls.addWidget(self.fit_button)
         controls.addWidget(self.threshold_label)
         controls.addWidget(self.query_button)
@@ -993,6 +1001,7 @@ class MainWindow(QMainWindow):
         self.fit_button.clicked.connect(self.fit_all_canvases)
         self.region_top_spin.valueChanged.connect(self._region_top_ratio_changed)
         self.heatmap_checkbox.toggled.connect(self._apply_display_mode)
+        self.guided_checkbox.toggled.connect(self._apply_display_mode)
         self.left_canvas.shapes_changed.connect(self.update_controls)
         self.left_canvas.shapes_changed.connect(self._update_selected_region_calculation)
         self.left_canvas.candidate_changed.connect(self.candidate_selection_changed)
@@ -1235,6 +1244,7 @@ class MainWindow(QMainWindow):
     def _heatmap_blend(
         image_bgr: np.ndarray,
         score_map: np.ndarray,
+        guided: bool = False,
     ) -> np.ndarray:
         """Overlay a jet-coloured score map on an image copy."""
 
@@ -1245,6 +1255,8 @@ class MainWindow(QMainWindow):
                 (image_bgr.shape[1], image_bgr.shape[0]),
                 interpolation=cv2.INTER_LINEAR,
             )
+        if guided:
+            score_map = refine_anomaly_map_guided(image_bgr, score_map, radius=6, eps=1e-3)
         score_min = float(score_map.min())
         score_max = float(score_map.max())
         if score_max - score_min < 1e-12:
@@ -1297,7 +1309,11 @@ class MainWindow(QMainWindow):
             if image_bgr is not None:
                 canvas.set_numpy_image(
                     cv2.cvtColor(
-                        self._heatmap_blend(image_bgr, score_map),
+                        self._heatmap_blend(
+                            image_bgr,
+                            score_map,
+                            guided=self.guided_checkbox.isChecked(),
+                        ),
                         cv2.COLOR_BGR2RGB,
                     )
                 )
@@ -1762,6 +1778,8 @@ class MainWindow(QMainWindow):
                     float(self.args.offset_scale),
                     self.args.max_offset,
                     float(self.args.offset_eps),
+                    good_threshold=good_threshold,
+                    anomaly_threshold=anomaly_threshold,
                 )
                 query_region = {
                     "good_distance": min(good_distances),

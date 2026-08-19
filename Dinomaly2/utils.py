@@ -2,9 +2,9 @@ import sys
 from pathlib import Path
 
 import torch
-
-import numpy as np
+import torch.nn as nn
 from torch.nn import functional as F
+import numpy as np
 from sklearn.metrics import roc_auc_score, f1_score, recall_score, accuracy_score, precision_recall_curve, \
     average_precision_score
 import cv2
@@ -76,7 +76,81 @@ def global_cosine_hm_percent(a, b, p=0.9, factor=0.):
     return loss
 
 
-def cal_anomaly_maps(fs_list, ft_list, out_size=224):
+def guided_filter_2d(
+    guidance: torch.Tensor,
+    input_map: torch.Tensor,
+    radius: int = 4,
+    eps: float = 1e-3,
+) -> torch.Tensor:
+    """2D Guided Filter implemented in pure PyTorch (He et al., ECCV 2010).
+
+    Uses the guidance image (e.g. grayscale RGB normalized to [0, 1]) to
+    transfer high-frequency structural edges onto the anomaly score map,
+    preventing low-resolution patch leakage into adjacent normal textures.
+
+    Args:
+        guidance: Tensor of shape (B, 1, H, W), typically grayscale in [0, 1].
+        input_map: Tensor of shape (B, 1, H, W) to be refined.
+        radius: Window radius in pixels (box filter kernel size = 2 * radius + 1).
+        eps: Regularization parameter penalizing large gradients in guidance.
+
+    Returns:
+        Refined anomaly map of shape (B, 1, H, W).
+    """
+    k = 2 * radius + 1
+    box_filter = nn.AvgPool2d(kernel_size=k, stride=1, padding=radius)
+
+    mean_I = box_filter(guidance)
+    mean_p = box_filter(input_map)
+    mean_Ip = box_filter(guidance * input_map)
+    cov_Ip = mean_Ip - mean_I * mean_p
+
+    mean_II = box_filter(guidance * guidance)
+    var_I = mean_II - mean_I * mean_I
+
+    a = cov_Ip / (var_I + eps)
+    b = mean_p - a * mean_I
+
+    mean_a = box_filter(a)
+    mean_b = box_filter(b)
+
+    q = mean_a * guidance + mean_b
+    return q
+
+
+def refine_anomaly_map_guided(
+    image_bgr_or_rgb: np.ndarray,
+    score_map: np.ndarray,
+    radius: int = 4,
+    eps: float = 1e-3,
+) -> np.ndarray:
+    """NumPy/OpenCV convenience wrapper for guided filter refinement."""
+    score_map = np.asarray(score_map, dtype=np.float32)
+    img = np.asarray(image_bgr_or_rgb)
+    if img.ndim == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY if img.shape[2] == 3 else cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img
+    gray_norm = gray.astype(np.float32) / 255.0
+    if gray_norm.shape != score_map.shape:
+        gray_norm = cv2.resize(gray_norm, (score_map.shape[1], score_map.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+    s_min, s_max = float(np.nanmin(score_map)), float(np.nanmax(score_map))
+    if s_max - s_min < 1e-12:
+        return score_map.copy()
+
+    s_norm = (score_map - s_min) / (s_max - s_min + 1e-8)
+    I_t = torch.from_numpy(gray_norm).unsqueeze(0).unsqueeze(0)
+    p_t = torch.from_numpy(s_norm).unsqueeze(0).unsqueeze(0)
+
+    with torch.no_grad():
+        refined = guided_filter_2d(I_t, p_t, radius=radius, eps=eps)
+    refined_np = refined[0, 0].cpu().numpy()
+    refined_score = refined_np * (s_max - s_min) + s_min
+    return np.nan_to_num(refined_score, nan=s_min)
+
+
+def cal_anomaly_maps(fs_list, ft_list, out_size=224, layer_weights=None):
     if not isinstance(out_size, tuple):
         out_size = (out_size, out_size)
 
@@ -86,9 +160,20 @@ def cal_anomaly_maps(fs_list, ft_list, out_size=224):
         ft = ft_list[i]
         a_map = 1 - F.cosine_similarity(fs, ft)
         a_map = torch.unsqueeze(a_map, dim=1)
-        a_map = F.interpolate(a_map, size=out_size, mode='bilinear', align_corners=True)
+        a_map = F.interpolate(a_map, size=out_size, mode='bilinear', align_corners=False)
         a_map_list.append(a_map)
-    anomaly_map = torch.cat(a_map_list, dim=1).mean(dim=1, keepdim=True)
+
+    stacked_maps = torch.cat(a_map_list, dim=1)  # (B, num_layers, H, W)
+    if layer_weights is not None:
+        weights_tensor = torch.tensor(layer_weights, dtype=stacked_maps.dtype, device=stacked_maps.device)
+        if weights_tensor.numel() == len(a_map_list):
+            weights_tensor = weights_tensor / (weights_tensor.sum() + 1e-8)
+            weights_tensor = weights_tensor.view(1, -1, 1, 1)
+            anomaly_map = (stacked_maps * weights_tensor).sum(dim=1, keepdim=True)
+        else:
+            anomaly_map = stacked_maps.mean(dim=1, keepdim=True)
+    else:
+        anomaly_map = stacked_maps.mean(dim=1, keepdim=True)
     return anomaly_map, a_map_list
 
 

@@ -162,7 +162,7 @@ def train_mask(item_list, args):
     mask_dir = args.mask_dir
     if mask_dir is None:
         mask_dir = os.path.join(args.data_path, "masks")
-    batch_size = TRAIN_BATCH_SIZE
+    batch_size = getattr(args, 'batch_size', TRAIN_BATCH_SIZE)
     data_transform, gt_transform = get_data_transforms(
         args.image_size,
         args.crop_size,

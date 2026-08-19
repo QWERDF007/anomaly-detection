@@ -464,6 +464,8 @@ def _build_region_result(
             args.offset_scale,
             args.max_offset,
             args.offset_eps,
+            good_threshold=args.good_threshold,
+            anomaly_threshold=args.anomaly_threshold,
         )
         region = {
             "region_id": int(component["component_id"]),
@@ -515,6 +517,8 @@ def _build_region_result(
         args.offset_scale,
         args.max_offset,
         args.offset_eps,
+        good_threshold=args.good_threshold,
+        anomaly_threshold=args.anomaly_threshold,
     )
     region = {
         "region_id": int(component["component_id"]),
@@ -985,10 +989,11 @@ def _process_one_entry(
                 args.anomaly_threshold,
                 str(region.get("similar_library", "")),
             )
+            signed_off = float(region["signed_offset"])
             if region_label == "good":
-                overlay[region_mask] = 0.0
+                overlay[region_mask] = np.clip(score_map[region_mask] + signed_off, 0.0, None)
             else:
-                overlay[region_mask] = region_adjusted
+                overlay[region_mask] = np.clip(score_map[region_mask] + signed_off, 0.0, None)
                 adjusted_anomaly_mask[region_mask] = 1
         adjusted_score = (
             float(training_image_score(overlay)) if overlay.size else 0.0

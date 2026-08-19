@@ -97,18 +97,22 @@ def calculate_distance_offset(
     offset_scale: float = 1.0,
     max_offset: Optional[float] = None,
     eps: float = 1e-8,
+    good_threshold: Optional[float] = None,
+    anomaly_threshold: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Turn two nearest-neighbour distances into a signed score adjustment.
 
-    FAISS returns smaller distances for more similar features.  The offset
-    magnitude is the smaller of the two distances (the distance to the
-    nearer library)::
+    Option 1: Dimensionless Relative Margin Modulation.
+    Uses the relative distance margin:
+        margin = (d_anomaly - d_good) / (d_anomaly + d_good + eps) in [-1.0, 1.0]
 
-        offset = min(d_good, d_anomaly) * offset_scale   (capped by max_offset)
-
-    A good match has a negative signed offset; an anomaly match has a
-    positive signed offset.  Equal or invalid distances produce no
-    correction and are reported as ``tie``/``invalid``.
+    When good_threshold and anomaly_threshold are provided, scales margin
+    by half the threshold bandwidth (anomaly_threshold - good_threshold)/2,
+    ensuring the adjustment is automatically on the same scale as the model's
+    scores and cannot cause explosive false positives:
+        bandwidth = (anomaly_threshold - good_threshold)
+        offset = |margin| * (bandwidth / 2.0) * offset_scale
+        signed_offset = -margin * (bandwidth / 2.0) * offset_scale
     """
 
     good = float(good_distance)
@@ -123,7 +127,8 @@ def calculate_distance_offset(
 
     good = max(good, 0.0)
     anomaly = max(anomaly, 0.0)
-    if abs(good - anomaly) <= max(float(eps), 0.0):
+    denom = good + anomaly
+    if denom <= max(float(eps), 0.0) or abs(good - anomaly) <= max(float(eps), 0.0):
         return {
             "similar_library": "tie",
             "confidence": 0.0,
@@ -131,16 +136,23 @@ def calculate_distance_offset(
             "signed_offset": 0.0,
         }
 
-    nearer = min(good, anomaly)
-    offset = nearer * max(float(offset_scale), 0.0)
+    margin = (anomaly - good) / (denom + float(eps))
+    similar_library = "good" if margin > 0 else "anomaly"
+
+    if good_threshold is not None and anomaly_threshold is not None and float(anomaly_threshold) > float(good_threshold):
+        bandwidth = float(anomaly_threshold) - float(good_threshold)
+        base_magnitude = (bandwidth / 2.0) * abs(margin)
+    else:
+        base_magnitude = min(good, anomaly)
+
+    offset = base_magnitude * max(float(offset_scale), 0.0)
     if max_offset is not None:
         offset = min(offset, max(float(max_offset), 0.0))
 
-    similar_library = "good" if good < anomaly else "anomaly"
     signed_offset = -offset if similar_library == "good" else offset
     return {
         "similar_library": similar_library,
-        "confidence": float(nearer),
+        "confidence": float(abs(margin)),
         "offset": float(offset),
         "signed_offset": float(signed_offset),
     }
@@ -2655,10 +2667,10 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument(
         "--good_patch_ratio",
         type=float,
-        default=1.0,
+        default=0.5,
         help=(
             "Fraction of feature patches stored per region in the good "
-            "library (default: 1.0 = all patches stored)"
+            "library (default: 0.5 = top 50% patches stored)"
         ),
     )
     build.add_argument(
@@ -2744,10 +2756,10 @@ def build_parser() -> argparse.ArgumentParser:
     build_by_label.add_argument(
         "--good_patch_ratio",
         type=float,
-        default=1.0,
+        default=0.5,
         help=(
             "Fraction of feature patches stored per region in the good "
-            "library (default: 1.0 = all patches stored)"
+            "library (default: 0.5 = top 50% patches stored)"
         ),
     )
     build_by_label.add_argument(

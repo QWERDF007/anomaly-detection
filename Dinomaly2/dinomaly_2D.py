@@ -37,7 +37,7 @@ from torch.utils.tensorboard import SummaryWriter
 warnings.filterwarnings("ignore")
 
 # Keep the legacy and mask-constraint training loops on the same schedule.
-TRAIN_BATCH_SIZE = 8
+TRAIN_BATCH_SIZE = 4
 EVAL_EVERY_EPOCHS = -1
 
 
@@ -177,7 +177,7 @@ def train(item_list, args):
     setup_seed(1)
 
     max_iters = args.max_iters
-    batch_size = TRAIN_BATCH_SIZE
+    batch_size = getattr(args, 'batch_size', TRAIN_BATCH_SIZE)
     image_size = args.image_size
     crop_size = args.crop_size
 
@@ -448,6 +448,13 @@ if __name__ == '__main__':
                         help='Context-aware recentering. 1 for yes, 0 for no.')
     parser.add_argument('--image_size', type=int, default=672)
     parser.add_argument('--crop_size', type=int, default=672)
+    parser.add_argument(
+        '--batch-size', '--batch_size',
+        type=int,
+        default=4,
+        dest='batch_size',
+        help='Batch size for training and evaluation (default: 4).',
+    )
     parser.add_argument('--max-iters', type=int, default=40000)
     parser.add_argument(
         '--eval_interval',
