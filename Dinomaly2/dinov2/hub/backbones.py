@@ -54,8 +54,20 @@ def _make_dinov2_model(
 
     if pretrained:
         model_full_name = _make_dinov2_model_name(arch_name, patch_size, num_register_tokens)
-        url = _DINOV2_BASE_URL + f"/{model_base_name}/{model_full_name}_pretrain.pth"
-        state_dict = torch.hub.load_state_dict_from_url(url, map_location="cpu")
+        from pathlib import Path
+        local_candidates = [
+            Path("/data/wt/anomaly-detection/Dinomaly2/backbones/weights") / f"{model_full_name}_pretrain.pth",
+            Path(__file__).resolve().parents[2] / "backbones" / "weights" / f"{model_full_name}_pretrain.pth",
+            Path("/data/cache/torch/hub/checkpoints") / f"{model_full_name}_pretrain.pth",
+        ]
+        state_dict = None
+        for cand in local_candidates:
+            if cand.is_file():
+                state_dict = torch.load(cand, map_location="cpu")
+                break
+        if state_dict is None:
+            url = _DINOV2_BASE_URL + f"/{model_base_name}/{model_full_name}_pretrain.pth"
+            state_dict = torch.hub.load_state_dict_from_url(url, map_location="cpu")
         model.load_state_dict(state_dict, strict=True)
 
     return model

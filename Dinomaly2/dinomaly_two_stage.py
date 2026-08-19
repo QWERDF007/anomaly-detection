@@ -99,20 +99,15 @@ def calculate_distance_offset(
     eps: float = 1e-8,
     good_threshold: Optional[float] = None,
     anomaly_threshold: Optional[float] = None,
+    hard_anomaly_dist_threshold: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Turn two nearest-neighbour distances into a signed score adjustment.
 
-    Option 1: Dimensionless Relative Margin Modulation.
-    Uses the relative distance margin:
-        margin = (d_anomaly - d_good) / (d_anomaly + d_good + eps) in [-1.0, 1.0]
-
-    When good_threshold and anomaly_threshold are provided, scales margin
-    by half the threshold bandwidth (anomaly_threshold - good_threshold)/2,
-    ensuring the adjustment is automatically on the same scale as the model's
-    scores and cannot cause explosive false positives:
-        bandwidth = (anomaly_threshold - good_threshold)
-        offset = |margin| * (bandwidth / 2.0) * offset_scale
-        signed_offset = -margin * (bandwidth / 2.0) * offset_scale
+    1. Prioritized Hard Anomaly Check:
+       If ``hard_anomaly_dist_threshold`` is given and ``anomaly_distance <= hard_anomaly_dist_threshold``,
+       the region directly triggers anomaly judgment with full positive offset.
+    2. Otherwise, calculates relative margin against good library:
+       margin = (d_anomaly - d_good) / (d_anomaly + d_good + eps) in [-1.0, 1.0].
     """
 
     good = float(good_distance)
@@ -123,10 +118,30 @@ def calculate_distance_offset(
             "confidence": 0.0,
             "offset": 0.0,
             "signed_offset": 0.0,
+            "hard_anomaly_triggered": False,
         }
 
     good = max(good, 0.0)
     anomaly = max(anomaly, 0.0)
+    if good_threshold is not None and anomaly_threshold is not None and float(anomaly_threshold) > float(good_threshold):
+        bandwidth = float(anomaly_threshold) - float(good_threshold)
+    else:
+        bandwidth = min(good, anomaly)
+
+    # 1. 强异常优先直接裁决
+    if hard_anomaly_dist_threshold is not None and anomaly <= float(hard_anomaly_dist_threshold):
+        offset = (bandwidth / 2.0) * max(float(offset_scale), 0.0)
+        if max_offset is not None:
+            offset = min(offset, max(float(max_offset), 0.0))
+        return {
+            "similar_library": "anomaly",
+            "confidence": 1.0,
+            "offset": float(offset),
+            "signed_offset": float(offset),
+            "hard_anomaly_triggered": True,
+        }
+
+    # 2. 与良品库比对，二次判定
     denom = good + anomaly
     if denom <= max(float(eps), 0.0) or abs(good - anomaly) <= max(float(eps), 0.0):
         return {
@@ -134,16 +149,12 @@ def calculate_distance_offset(
             "confidence": 0.0,
             "offset": 0.0,
             "signed_offset": 0.0,
+            "hard_anomaly_triggered": False,
         }
 
     margin = (anomaly - good) / (denom + float(eps))
     similar_library = "good" if margin > 0 else "anomaly"
-
-    if good_threshold is not None and anomaly_threshold is not None and float(anomaly_threshold) > float(good_threshold):
-        bandwidth = float(anomaly_threshold) - float(good_threshold)
-        base_magnitude = (bandwidth / 2.0) * abs(margin)
-    else:
-        base_magnitude = min(good, anomaly)
+    base_magnitude = (bandwidth / 2.0) * abs(margin)
 
     offset = base_magnitude * max(float(offset_scale), 0.0)
     if max_offset is not None:
@@ -155,6 +166,7 @@ def calculate_distance_offset(
         "confidence": float(abs(margin)),
         "offset": float(offset),
         "signed_offset": float(signed_offset),
+        "hard_anomaly_triggered": False,
     }
 
 
@@ -1053,13 +1065,15 @@ def infer_image(
     gaussian_filter: Optional[torch.nn.Module] = None,
     patch_backbone=None,
     feature_source: str = "dinomaly",
+    feature_layers: Optional[Sequence[int]] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Return ``(original-resolution score_map, encoder feature CHW)``.
 
     ``feature_source`` selects the representation used for the second stage:
     ``dinomaly`` (default) uses the last encoder feature group (``en[-1]``),
-    while ``raw_patch`` uses the final patch-token output of a standalone
-    DINOv2/DINOv3 backbone loaded by :func:`load_patch_backbone`.
+    ``raw_patch`` uses the final patch-token output of a standalone
+    DINOv2/DINOv3 backbone loaded by :func:`load_patch_backbone`,
+    or ``feature_layers`` extracts patch tokens from specified transformer layers.
     """
 
     original, image_tensor = _load_image_tensor(image_path, transform, device)
@@ -1074,7 +1088,15 @@ def infer_image(
             gaussian_filter = get_gaussian_kernel(5, 4).to(device)
         anomaly_map = gaussian_filter(anomaly_map)
         score_map = anomaly_map[0, 0].detach().cpu().numpy()
-        if feature_source == "raw_patch":
+        if feature_layers is not None:
+            feature = extract_layer_patch_feature(
+                patch_backbone,
+                image_path,
+                transform,
+                device,
+                layers=feature_layers,
+            )
+        elif feature_source == "raw_patch":
             feature = extract_raw_patch_feature(
                 patch_backbone,
                 image_path,
@@ -1109,6 +1131,60 @@ def extract_encoder_feature(
         feature = encoder_outputs[-1][0]
     return np.nan_to_num(
         feature.detach().cpu().numpy().astype(np.float32, copy=False)
+    )
+
+
+def extract_layer_patch_feature(
+    backbone,
+    image_path: Path,
+    transform,
+    device: torch.device,
+    layers: Sequence[int] = (11,),
+) -> np.ndarray:
+    """Extract raw patch-token feature maps from specific backbone transformer blocks as CHW.
+
+    If multiple layers are specified (e.g. [6, 11]), each layer's feature map is channel-normalized
+    and concatenated along the channel dimension.
+    """
+    _original, image_tensor = _load_image_tensor(image_path, transform, device)
+    num_extra = int(
+        getattr(backbone, "num_register_tokens", 0)
+        or getattr(backbone, "n_storage_tokens", 0)
+        or 0
+    )
+    layers = [int(l) for l in layers]
+    max_layer = max(layers)
+    with torch.no_grad():
+        if hasattr(backbone, "prepare_tokens_with_masks"):
+            tokens = backbone.prepare_tokens_with_masks(image_tensor)
+        elif hasattr(backbone, "prepare_tokens"):
+            tokens = backbone.prepare_tokens(image_tensor)
+        else:
+            raise RuntimeError("Backbone missing prepare_tokens method")
+        layer_feats = {}
+        for i, blk in enumerate(backbone.blocks):
+            tokens = blk(tokens)
+            if i in layers:
+                if hasattr(backbone, "norm"):
+                    normed = backbone.norm(tokens)
+                else:
+                    normed = tokens
+                patch = normed[:, 1 + num_extra:, :]
+                B, N, C = patch.shape
+                side = int(round(float(N) ** 0.5))
+                feat = patch.permute(0, 2, 1).reshape(B, C, side, side)
+                if len(layers) > 1:
+                    # Normalize each layer feature across channels so shallow and deep features are balanced
+                    feat = feat / (torch.norm(feat, dim=1, keepdim=True) + 1e-8)
+                layer_feats[i] = feat
+            if i >= max_layer:
+                break
+        if len(layers) == 1:
+            feature = layer_feats[layers[0]]
+        else:
+            feature = torch.cat([layer_feats[l] for l in layers], dim=1)
+    return np.nan_to_num(
+        feature[0].detach().cpu().numpy().astype(np.float32, copy=False)
     )
 
 
@@ -1244,23 +1320,28 @@ def roi_align_masked(
     mask_feature: np.ndarray,
     output_size: int,
     device: torch.device,
+    feature_tensor: Optional[torch.Tensor] = None,
 ) -> np.ndarray:
     """ROIAlign a feature map and average only the pixels covered by a mask."""
 
-    feature = np.asarray(feature_chw, dtype=np.float32)
-    if feature.ndim == 4 and feature.shape[0] == 1:
-        feature = feature[0]
-    if feature.ndim != 3:
-        raise ValueError(f"Expected CHW feature map, got {feature.shape}")
+    if feature_tensor is None:
+        feature = np.asarray(feature_chw, dtype=np.float32)
+        if feature.ndim == 4 and feature.shape[0] == 1:
+            feature = feature[0]
+        if feature.ndim != 3:
+            raise ValueError(f"Expected CHW feature map, got {feature.shape}")
+        channels, height, width = feature.shape
+        feature_tensor = torch.from_numpy(np.ascontiguousarray(feature)).unsqueeze(0).to(device)
+    else:
+        channels, height, width = feature_tensor.shape[1], feature_tensor.shape[2], feature_tensor.shape[3]
     mask = np.asarray(mask_feature, dtype=bool)
-    if mask.shape != tuple(feature.shape[-2:]):
+    if mask.shape != (height, width):
         raise ValueError(
-            f"Feature/mask shape mismatch: {feature.shape[-2:]} vs {mask.shape}"
+            f"Feature/mask shape mismatch: {(height, width)} vs {mask.shape}"
         )
     bbox = mask_bbox(mask)
     if bbox is None:
         raise ValueError("Cannot ROIAlign an empty mask")
-    channels, height, width = feature.shape
     x1, y1, x2, y2 = bbox
     x1 = max(0.0, min(x1, width - 1e-3))
     y1 = max(0.0, min(y1, height - 1e-3))
@@ -1271,7 +1352,6 @@ def roi_align_masked(
         dtype=torch.float32,
         device=device,
     )
-    feature_tensor = torch.from_numpy(np.ascontiguousarray(feature)).unsqueeze(0).to(device)
     mask_tensor = (
         torch.from_numpy(np.ascontiguousarray(mask.astype(np.float32)))
         .unsqueeze(0)
@@ -1627,6 +1707,7 @@ def validate_library_compatibility(
     for key in (
         "feature_dim",
         "feature_source",
+        "feature_layers",
         "roi_size",
         "normalize",
         "backbone",
@@ -1645,9 +1726,9 @@ def validate_library_compatibility(
         "image_size": int(args.image_size),
         "crop_size": int(args.crop_size),
     }
-    if str(good.get("feature_source", "")) == "raw_patch":
+    if str(good.get("feature_source", "")) in ("raw_patch", "layer_patch"):
         expected["backbone"] = args.backbone
-        expected["feature_source"] = "raw_patch"
+        expected["feature_source"] = str(good.get("feature_source", ""))
     else:
         expected["backbone"] = args.backbone
         expected["feature_merge"] = args.feature_merge
@@ -1776,7 +1857,7 @@ def _build_feature_library(
         transform = build_transform(args)
     if model is None:
         model = load_dinomaly_model(args, device)
-    if args.feature_source == "raw_patch":
+    if args.feature_source == "raw_patch" or getattr(args, "feature_layers", None):
         if patch_backbone is None:
             patch_backbone = load_patch_backbone(args, device)
     library_mode = str(getattr(args, "library_mode", "roi"))
@@ -1817,6 +1898,15 @@ def _build_feature_library(
                     device,
                     patch_backbone=patch_backbone,
                     feature_source=args.feature_source,
+                    feature_layers=getattr(args, "feature_layers", None),
+                )
+            elif getattr(args, "feature_layers", None):
+                feature = extract_layer_patch_feature(
+                    patch_backbone,
+                    image_path,
+                    transform,
+                    device,
+                    layers=args.feature_layers,
                 )
             elif args.feature_source == "raw_patch":
                 feature = extract_raw_patch_feature(
@@ -2129,6 +2219,29 @@ def _build_feature_library(
                 if library_type == "good"
                 else getattr(args, "anomaly_dilation", 0)
             ),
+            "records": records,
+        }
+    elif getattr(args, "feature_layers", None):
+        metadata = {
+            "library_type": library_type,
+            "library_mode": "roi",
+            "feature_source": "layer_patch",
+            "feature_layers": [int(l) for l in args.feature_layers],
+            "feature_layout": f"layers {args.feature_layers} patch tokens before ROIAlign",
+            "roi_size": int(args.roi_size),
+            "index_type": (
+                "IndexFlatL2" if _build_index_is_l2(args) else "IndexFlatIP"
+            ),
+            "normalize": True,
+            "distance_metric": (
+                "L2 (Euclidean) on L2-normalised vectors"
+                if _build_index_is_l2(args)
+                else "1 - inner_product"
+            ),
+            "image_size": int(args.image_size),
+            "crop_size": int(args.crop_size),
+            "backbone": args.backbone,
+            "model": args.backbone,
             "records": records,
         }
     elif args.feature_source == "raw_patch":
@@ -2609,13 +2722,25 @@ def add_model_arguments(parser: argparse.ArgumentParser, model_required: bool = 
     parser.add_argument("--gpu", "--cuda", dest="gpu", type=int, default=0)
     parser.add_argument(
         "--feature_source",
-        choices=("dinomaly", "raw_patch"),
+        choices=("dinomaly", "raw_patch", "layer_patch"),
         default="dinomaly",
         help=(
             "Second-stage feature representation: 'dinomaly' uses the "
             "Dinomaly2 encoder output; 'raw_patch' uses the final "
             "patch-token output (x_norm_patchtokens) of the same --backbone "
-            "loaded standalone from the local dinov2/dinov3 packages"
+            "loaded standalone from the local dinov2/dinov3 packages; "
+            "'layer_patch' extracts patch tokens from specified transformer layers"
+        ),
+    )
+    parser.add_argument(
+        "--feature_layers",
+        nargs="+",
+        type=int,
+        default=None,
+        help=(
+            "Backbone transformer layer index/indices to extract features from "
+            "(e.g. '--feature_layers 6', '--feature_layers 8', '--feature_layers 11', "
+            "or '--feature_layers 6 11' for shallow-deep cascade)."
         ),
     )
 
@@ -2670,7 +2795,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.5,
         help=(
             "Fraction of feature patches stored per region in the good "
-            "library (default: 0.5 = top 50% patches stored)"
+            "library (default: 0.5 = top 50%% patches stored)"
         ),
     )
     build.add_argument(
@@ -2759,7 +2884,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.5,
         help=(
             "Fraction of feature patches stored per region in the good "
-            "library (default: 0.5 = top 50% patches stored)"
+            "library (default: 0.5 = top 50%% patches stored)"
         ),
     )
     build_by_label.add_argument(

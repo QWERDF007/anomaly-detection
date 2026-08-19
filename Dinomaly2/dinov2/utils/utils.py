@@ -19,7 +19,19 @@ logger = logging.getLogger("dinov2")
 
 def load_pretrained_weights(model, pretrained_weights, checkpoint_key):
     if urlparse(pretrained_weights).scheme:  # If it looks like an URL
-        state_dict = torch.hub.load_state_dict_from_url(pretrained_weights, map_location="cpu")
+        from pathlib import Path
+        filename = os.path.basename(pretrained_weights)
+        local_candidates = [
+            Path("/data/wt/anomaly-detection/Dinomaly2/backbones/weights") / filename,
+            Path("/data/cache/torch/hub/checkpoints") / filename,
+        ]
+        state_dict = None
+        for cand in local_candidates:
+            if cand.is_file():
+                state_dict = torch.load(cand, map_location="cpu")
+                break
+        if state_dict is None:
+            state_dict = torch.hub.load_state_dict_from_url(pretrained_weights, map_location="cpu")
     else:
         state_dict = torch.load(pretrained_weights, map_location="cpu")
     if checkpoint_key is not None and checkpoint_key in state_dict:

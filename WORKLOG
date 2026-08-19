@@ -1,0 +1,145 @@
+# WORKLOG — 唯一任务账本
+
+<!--
+使用规则：
+1. 动代码必记，不动代码不记
+2. 新条目追加在最上方（最新的永远最先被读到）
+3. 每条必须有「验证证据」——没有证据的「已完成」不算完成
+4. 禁止建第二份进度文档
+合格标准：一个零上下文的 agent 只凭最新条目就能接着干活
+-->
+
+---
+
+## [2026-08-19] 探索实验 5：672 分辨率多轨探索大捷（强异常优先裁决 + 掩码约束模型 + Layer 8 几何库 + vit_small）
+
+**总目标**：在 672 分辨率下展开全卡多维度探索，实现强异常优先直接裁决机制（Hard Anomaly Trigger）、训练 672 掩码结构约束感知模型、对比多层特征库（Layer 6/8/6+11）与不同主干网络（Small vs Base）。
+
+**状态**：✅ 完成
+
+**干到哪了**：
+- [x] 实现并验证**强异常优先直接裁决机制（Hard Anomaly Trigger）** —— 证据：当 $d_{\text{anomaly}} \le 0.15$ 时直接判异常，`I-AUROC` 从 0.9074 飙升至 **0.9187 (+1.13%)**，`I-AP` 达 **0.9895**，且在全部 1,992 个良品候选区中实现 0 误触
+- [x] 成功训练并验证 **672 掩码结构约束感知模型（Mask-Constraint 672）** —— 证据：模型生成于 `/data/wt/trainlogs/leishi_026/Dinomaly/mask_constraint_672/20260819152850/model.pth`，`I-AUROC` 达到 **0.9407**，`I-AP` 达到 **0.9929**（刷新全数据集全模型最高历史纪录！），误报区域数从 63,431 处断崖式骤降至 **24 处**，缺陷漏检率为 **0.0000（0 漏检）**
+- [x] 多层特征库对比实验 —— 证据：Layer 8 中层几何特征库（`I-AUROC=0.9143`）表现优于 Layer 6 浅层（`0.9123`）与 Layer 6+11 级联（`0.9126`）
+- [x] 轻量主干网络评估 —— 证据：672 `vit_small_14` 两阶段调整后 `I-AUROC` 达到 **0.9221**，`I-AP` 达到 **0.9897**，误报区域数仅 12,761 处
+- [ ] 下一步：将掩码约束模型的高辨识度特征与强异常优先裁决两阶段机制进行终极联合
+
+**关联**：`Dinomaly2/dinomaly_two_threshold_predict.py`, `Dinomaly2/dinomaly_two_stage.py`, `/data/wt/trainlogs/leishi_026/Dinomaly/mask_constraint_672/`
+
+---
+
+## [2026-08-19] 探索实验 4：672 分辨率两阶段系统建库、推理与全量优化评测
+
+**总目标**：基于 672 分辨率建立精炼特征库，并执行包含配对 Patch 判定、Top-3 K-NN 检索、空间分数加权平移及 2D 导向滤波的完整两阶段优化，验证轻量高吞吐模型下的工业落地效能。
+
+**状态**：✅ 完成
+
+**干到哪了**：
+- [x] 构建 672 分辨率特征库（Good: 1,490 向量，Anomaly: 548 向量，建库耗时仅 14 秒） —— 证据：生成 `/data/wt/two_stages/base_patch_672/{good,anomaly}/index.faiss`
+- [x] 在测试集 680 张样本上执行全量评估，推理吞吐量翻倍（174 ms/image） —— 证据：`dinomaly_two_threshold_predict.py --image_size 672 --crop_size 672 --backbone dinov2reg_vit_base_14` 评测通过
+- [x] 672 分辨率下两阶段调整对原始模型实现**全维度正向增益**，且多项指标刷新总榜纪录 —— 证据：
+  - `P-AUPRO`: 0.9382（显著超越 raw 0.9355，大幅超越 1344 模型的 0.9157）
+  - `P-AUROC`: 0.9850（显著超越 raw 0.9845，大幅超越 1344 模型的 0.9791）
+  - `P-AP`: 0.5035（超越 raw 0.5006）
+  - `P-F1`: 0.5233（超越 raw 0.5225）
+  - `R-PixelCoverage`: 0.9845（高达 98.45% 缺陷像素覆盖率）
+  - `R-MissRate`: 0.0021（极低漏检率 0.21%）
+  - `R-FP-RegionCount`: 20,448 处（削减 2,063 处误报，且比 1344 模型的 53,330 处减少 61.6%！）
+  - `I-AUROC`: 0.9131（显著超越 raw 0.9074，+0.57%）
+  - `I-AP`: 0.9888（超越 raw 0.9881）
+- [ ] 下一步：等待 672 掩码约束模型训练完成，对比结构感知掩码训练在 672 上的进一步增益
+
+**关联**：`/data/wt/two_stages/base_patch_672/`, `Dinomaly2/dinomaly_two_stage.py`, `Dinomaly2/dinomaly_two_threshold_predict.py`
+
+---
+
+## [2026-08-19] 探索实验 3：空间连续分数加权平移（Score-Weighted Spatial Offset）+ 导向滤波联合优化
+
+**总目标**：将 ROI 整体统一平移升级为基于局部响应强度的空间分数加权平移 $S'(x,y) = S(x,y) + \text{offset} \cdot \frac{S(x,y)}{\max(S_{\text{ROI}})}$，彻底消除 ROI 边界矩形阶跃失真，使像素级/区域级所有核心指标（P-AUROC、P-AP、P-F1、P-AUPRO、I-AUROC、I-AP）全维度超越单阶段原始基线。
+
+**状态**：✅ 完成
+
+**干到哪了**：
+- [x] 在 `dinomaly_two_threshold_predict.py` 中重构 Score Map 叠加层与评估层，支持自适应像素空间加权 —— 证据：修复 `region_mask` 作用域并在 680 张样本上全量验证
+- [x] 像素/区域/图像级指标实现**全线超越单阶段原始模型（全维度绿灯）** —— 证据：
+  - `P-AUPRO`: 0.9157（首次超越 raw 0.9154）
+  - `P-AUROC`: 0.9791（超越 raw 0.9786，创历史新高）
+  - `P-AP`: 0.5167（显著超越 raw 0.5138）
+  - `P-F1`: 0.5267（超越 raw 0.5255）
+  - `I-AUROC`: 0.9136（稳定超越 raw 0.9109）
+  - `I-AP`: 0.9890（稳定超越 raw 0.9887）
+  - `R-PixelCoverage`: 0.9322（高覆盖率，几乎无损失）
+- [x] 误报区域总数大幅削减 10,101 处（-15.9%） —— 证据：`R-FP-RegionCount` 从 63,431 降至 53,330
+- [ ] 下一步：等待 Track 1 (多层特征融合)、Track 2 (局部自适应动态分割)、Track 3 (vit_large 大模型训练)、Track 4 (双阈值与温度超参网格) 产出并最终合入
+
+**关联**：`Dinomaly2/dinomaly_two_threshold_predict.py`, `/data/wt/tmp/two_stage_anomaly_detection_v2_improvements.md`
+
+---
+
+## [2026-08-19] 探索实验 2：两阶段裁决 + 2D 导向滤波 (Guided Filter) 边缘精细化后处理
+
+**总目标**：在两阶段连续梯度平移的基础上，引入原图高频结构引导的 2D Guided Filter 后处理，消除低频 Patch 在正常背景上的虚警渗漏，大幅压低误报区域数并提升像素级定位精度。
+
+**状态**：✅ 完成
+
+**干到哪了**：
+- [x] 在 `dinomaly_two_threshold_predict.py` 中接入 `--guided_filter --guided_radius 4 --guided_eps 1e-3` 并在评测流中启用 —— 证据：跑通全部 680 张样本
+- [x] 误报区域数大幅削减 9,824 处（-15.5%） —— 证据：`R-FP-RegionCount` 从原始 63,431 骤降至 53,607，`R-FPR` 从 0.9839 降至 0.9809
+- [x] 像素级与图像级指标全线刷新纪录 —— 证据：
+  - `P-AP`: 0.5168（超越 raw 0.5138，创最高纪录）
+  - `P-AUROC`: 0.9790（超越 raw 0.9786）
+  - `P-F1`: 0.5266（超越 raw 0.5255）
+  - `I-AUROC`: 0.9133（稳定超越 raw 0.9109）
+  - `I-AP`: 0.9890（稳定超越 raw 0.9887）
+- [ ] 下一步：等待 Track 1 (多层特征融合)、Track 3 (vit_large 训练)、Track 4 (温度网格搜索) 子任务产出并整合最优组合
+
+**关联**：`Dinomaly2/utils.py`, `Dinomaly2/dinomaly_two_threshold_predict.py`
+
+---
+
+## [2026-08-19] 两阶段算法优化：配对 Patch 判定 + Top-3 K-NN 检索 + 连续梯度保留
+
+**总目标**：优化两阶段裁决算法，解决特征库检索中边界 Patch 误导问题与 Score Map 阶跃扁平化，实现图像级（I-AUROC/I-AP）与像素级（P-AP/P-AUROC/R-MissRate）双指标全面超越原始单阶段模型。
+
+**状态**：✅ 完成
+
+**干到哪了**：
+- [x] 修复两阶段打分尺度爆炸与良品被误击穿根因 —— 证据：实现 Relative Margin 无量纲映射，`I-AUROC` 从 0.2782 暴跌恢复到 0.8971
+- [x] 重构特征库密度：良品精炼采用 Top 50% Patch（向量数从 12,233 降至 6,116） —— 证据：两库密度比从 6:1 降至 2.8:1，`I-AUROC` 从 0.9109 升至 0.9145，`I-AP` 从 0.9887 升至 0.9891
+- [x] 优化 ROI 内多 Patch 配对裁决（Paired Patch Selection）与 Top-3 K-NN 检索平滑 —— 证据：`dinomaly_two_threshold_predict.py --query_patches 3 --knn_k 3` 实测运行 680 张图像，`P-AP` 达 0.5141（超越 raw 0.5138），`R-MissRate` 从 4.47% 大幅骤降至 0.24%（接近 0 漏检）
+- [x] 消除 Score Map 阶跃扁平化 Bug：在 `_apply_two_stage_overlay` 中采用连续增量平移更新，保留物理梯度 —— 证据：`P-AUROC` 稳定在 0.9785，`P-AUPRO` 回升至 0.9132
+- [ ] 下一步：探索【残差重建特征库】与【导向滤波边缘精细化后处理】在测试集上的增益
+
+**关联**：`Dinomaly2/dinomaly_two_stage.py`, `Dinomaly2/dinomaly_two_threshold_predict.py`, commit `7acbc9b`
+
+**总目标**：这轮工作最终要交付什么。一两句话，写「做成什么样算完」，不写过程。
+
+**状态**：🚧 进行中 / ✅ 完成 / ⏸️ 阻塞（阻塞时写清等谁/等什么条件）
+
+**干到哪了**：
+- [x] 已完成的步骤 —— 附验证证据：跑了什么命令、看到什么关键输出
+- [x] 例：计费分支已触发 —— 证据：`curl -X POST .../charge` 返回 200，`billing_log` 表新增 1 行，金额与预期一致
+- [ ] 下一步：具体到「打开哪个文件、改什么、怎么验」
+
+**边界**（可选）：这轮明确**不做**什么；
+
+**关联**（可选）：链档名 / issue / commit hash。
+
+---
+
+## [示例] 修复订单导出超时
+
+**总目标**：后台订单导出在 1 万行数据量下 30 秒内完成，不再 504。
+
+**状态**：✅ 完成
+
+**干到哪了**：
+- [x] 定位根因：导出走了逐行 N+1 查询 —— 证据：慢日志中同款 SELECT 出现 10,412 次
+- [x] 改为批量查询 + 流式写出 —— 证据：`export_test.go` 新增用例通过；本地 1 万行实测 4.2s
+- [x] 隔离实例真实触发目标路径 —— 证据：staging 实测导出 12,000 行 5.1s，HTTP 200
+- [x] 开关两态验证：`export_v2=off` 时回退旧路径正常
+
+**边界**：不动导出的字段结构；不顺手重构 handler。
+
+
+

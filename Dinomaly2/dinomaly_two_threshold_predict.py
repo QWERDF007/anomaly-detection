@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
+import torch
 from PIL import Image
 from tqdm import tqdm
 
@@ -74,13 +75,14 @@ from dinomaly_two_stage import (
     record_for_vector_id,
     roi_align_masked,
     search_library,
+    search_library_topk,
     select_device,
     select_patch_positions,
     select_strongest_region,
     validate_args,
     validate_library_compatibility,
 )
-from utils import get_gaussian_kernel
+from utils import get_gaussian_kernel, refine_anomaly_map_guided
 
 
 LOGGER = logging.getLogger("dinomaly_two_threshold_predict")
@@ -375,6 +377,7 @@ def _build_region_result(
     args,
     device,
     image_shape: Tuple[int, int],
+    feature_tensor: Optional[torch.Tensor] = None,
 ) -> Optional[Dict[str, Any]]:
     """Search both libraries for one score-map connected component."""
 
@@ -422,50 +425,69 @@ def _build_region_result(
         )
         if positions.shape[0] == 0:
             return None
-        # 建库用区域内前 x% 的 patch 全量入库；查询只用区域内
-        # 分数最高的单个 patch（select_patch_positions 降序，首行即最大）。
-        positions = positions[:1]
-        good_matches = []
-        anomaly_matches = []
+        query_patches = getattr(args, "query_patches", 3)
+        if query_patches > 0:
+            positions = positions[:query_patches]
+        knn_k = max(1, getattr(args, "knn_k", 1))
+
+        patch_candidates = []
         for row, col in positions:
             patch_vector = feature[:, int(row), int(col)]
             if bool(good_library.metadata.get("normalize", True)):
                 patch_vector = l2_normalize(patch_vector)
-            good_distance, good_neighbour = search_library(
-                good_library,
-                patch_vector,
+
+            if knn_k > 1:
+                g_matches = search_library_topk(good_library, patch_vector, top_k=knn_k)
+                a_matches = search_library_topk(anomaly_library, patch_vector, top_k=knn_k)
+                good_dist = float(np.mean([m[0] for m in g_matches])) if g_matches else 1.0
+                good_neigh = g_matches[0][1] if g_matches else -1
+                anomaly_dist = float(np.mean([m[0] for m in a_matches])) if a_matches else 1.0
+                anomaly_neigh = a_matches[0][1] if a_matches else -1
+            else:
+                good_dist, good_neigh = search_library(good_library, patch_vector)
+                anomaly_dist, anomaly_neigh = search_library(anomaly_library, patch_vector)
+
+            dec = calculate_distance_offset(
+                good_dist,
+                anomaly_dist,
+                args.offset_scale,
+                args.max_offset,
+                args.offset_eps,
+                good_threshold=args.good_threshold,
+                anomaly_threshold=args.anomaly_threshold,
+                hard_anomaly_dist_threshold=getattr(args, "hard_anomaly_dist_threshold", None),
             )
-            anomaly_distance, anomaly_neighbour = search_library(
-                anomaly_library,
-                patch_vector,
-            )
-            good_matches.append((good_distance, good_neighbour))
-            anomaly_matches.append((anomaly_distance, anomaly_neighbour))
-        good_distance, good_neighbour = min(
-            good_matches,
-            key=lambda match: match[0],
+            patch_candidates.append({
+                "good_distance": good_dist,
+                "good_neighbour": good_neigh,
+                "anomaly_distance": anomaly_dist,
+                "anomaly_neighbour": anomaly_neigh,
+                "row": int(row),
+                "col": int(col),
+                "decision": dec,
+            })
+
+        # Paired patch decision: select the most decisive patch representing the ROI
+        best_candidate = max(
+            patch_candidates,
+            key=lambda p: (
+                float(p["decision"]["signed_offset"]),
+                -float(p["anomaly_distance"]),
+            ),
         )
-        anomaly_distance, anomaly_neighbour = min(
-            anomaly_matches,
-            key=lambda match: match[0],
-        )
-        best_row, best_col = positions[
-            min(range(len(good_matches)), key=lambda i: good_matches[i][0])
-        ]
+        good_distance = best_candidate["good_distance"]
+        good_neighbour = best_candidate["good_neighbour"]
+        anomaly_distance = best_candidate["anomaly_distance"]
+        anomaly_neighbour = best_candidate["anomaly_neighbour"]
+        best_row = best_candidate["row"]
+        best_col = best_candidate["col"]
+        decision = best_candidate["decision"]
+
         patch_geometry = linear_patch_geometry(
             int(best_row),
             int(best_col),
             feature.shape[-2:],
             image_shape,
-        )
-        decision = calculate_distance_offset(
-            good_distance,
-            anomaly_distance,
-            args.offset_scale,
-            args.max_offset,
-            args.offset_eps,
-            good_threshold=args.good_threshold,
-            anomaly_threshold=args.anomaly_threshold,
         )
         region = {
             "region_id": int(component["component_id"]),
@@ -506,6 +528,7 @@ def _build_region_result(
         mask_feature,
         args.roi_size,
         device,
+        feature_tensor=feature_tensor,
     )
     if bool(good_library.metadata.get("normalize", True)):
         vector = l2_normalize(vector)
@@ -635,19 +658,11 @@ def _apply_two_stage_overlay(
         if not 0 < region_id < count:
             continue
         region_mask = labels == region_id
-        region_score = float(region.get("region_score", 0.0))
+        region_scores = score_map[region_mask]
+        max_s = float(np.max(region_scores)) if region_scores.size else 1.0
+        weight = (region_scores / max_s) if max_s > 1e-8 else 1.0
         signed_offset = float(region.get("signed_offset", 0.0))
-        adjusted_score = region_score + signed_offset
-        label, _reason = final_score_label(
-            adjusted_score,
-            good_threshold,
-            anomaly_threshold,
-            str(region.get("similar_library", "")),
-        )
-        if label == "good":
-            overlay[region_mask] = 0.0
-        else:
-            overlay[region_mask] = adjusted_score
+        overlay[region_mask] = np.clip(region_scores + signed_offset * weight, 0.0, None)
     return overlay
 
 
@@ -658,16 +673,11 @@ def evaluate_pixel_level(
     metric_size: int,
     good_threshold: float = 0.0,
     adjusted: bool = False,
+    guided_filter: bool = False,
+    guided_radius: int = 4,
+    guided_eps: float = 1e-3,
 ) -> Dict[str, float]:
-    """Evaluate pixel-level metrics on the saved score maps.
-
-    With ``adjusted=False`` the raw saved score maps are evaluated.  With
-    ``adjusted=True`` each score map is copied and the two-stage region
-    results are overwritten on the copy (:func:`_apply_two_stage_overlay`),
-    then pixel metrics and GT-region detection metrics (R-MissRate /
-    R-PixelCoverage at the good threshold) are computed on it.  Only anomaly
-    images with a ground-truth mask contribute.
-    """
+    """Evaluate pixel-level metrics on the saved score maps."""
 
     if ground_truth_dir is None:
         print("未提供 GT 目录，跳过像素级评估。", flush=True)
@@ -691,6 +701,17 @@ def evaluate_pixel_level(
                 output_dir,
                 image_relative,
             )
+            if guided_filter:
+                img_path = Path(row.get("image_path", ""))
+                if img_path.is_file():
+                    img_bgr = cv2.imread(str(img_path))
+                    if img_bgr is not None:
+                        score_map = refine_anomaly_map_guided(
+                            img_bgr,
+                            score_map,
+                            radius=guided_radius,
+                            eps=guided_eps,
+                        )
         gt_path = None
         for suffix in (".png", ".jpg", ".jpeg", ".npy", ".tif", ".json"):
             candidate = ground_truth_dir / image_relative.with_suffix(suffix)
@@ -771,10 +792,12 @@ def apply_library_metadata(args, metadata: Mapping[str, Any]) -> None:
             continue
         setattr(args, arg_key, cast(value))
     source = str(metadata.get("feature_source", ""))
-    if source == "raw_patch":
-        args.feature_source = "raw_patch"
+    if source in ("raw_patch", "layer_patch"):
+        args.feature_source = source
     elif source == "dinomaly_encoder_output":
         args.feature_source = "dinomaly"
+    if "feature_layers" in metadata:
+        args.feature_layers = metadata["feature_layers"]
 
 
 _WORKER: Dict[str, Any] = {}
@@ -803,13 +826,17 @@ def _worker_init(args, output_dir: Path, gpu_index: int) -> None:
     validate_library_compatibility(good_library, anomaly_library, args)
     model = load_dinomaly_model(args, device)
     patch_backbone = None
-    if args.feature_source == "raw_patch":
+    if args.feature_source in ("raw_patch", "layer_patch") or getattr(args, "feature_layers", None):
         patch_backbone = load_patch_backbone(args, device)
     transform = build_transform(args)
     gaussian_filter = get_gaussian_kernel(5, 4).to(device)
-    cache_root = Path(output_dir) / (
-        "features_raw_patch" if args.feature_source == "raw_patch" else "features"
-    )
+    if getattr(args, "feature_layers", None):
+        cache_tag = f"features_layer_{'_'.join(str(l) for l in args.feature_layers)}"
+    elif args.feature_source == "raw_patch":
+        cache_tag = "features_raw_patch"
+    else:
+        cache_tag = "features"
+    cache_root = Path(output_dir) / cache_tag
     cache_root.mkdir(parents=True, exist_ok=True)
     _WORKER.update(
         {
@@ -895,6 +922,7 @@ def _process_one_entry(
             gaussian_filter,
             patch_backbone=patch_backbone,
             feature_source=args.feature_source,
+            feature_layers=getattr(args, "feature_layers", None),
         )
         score_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(score_path, score_map)
@@ -942,6 +970,13 @@ def _process_one_entry(
             min_area=min_area,
             max_regions=args.max_regions,
         )
+        feature_tensor = (
+            torch.from_numpy(np.ascontiguousarray(feature))
+            .unsqueeze(0)
+            .to(device)
+            if components
+            else None
+        )
         for component in components:
             candidate_mask[component["mask"]] = 1
             try:
@@ -954,6 +989,7 @@ def _process_one_entry(
                     args,
                     device,
                     original_image_shape,
+                    feature_tensor=feature_tensor,
                 )
             except (RuntimeError, TypeError, ValueError) as error:
                 LOGGER.warning(
@@ -989,11 +1025,12 @@ def _process_one_entry(
                 args.anomaly_threshold,
                 str(region.get("similar_library", "")),
             )
+            region_scores = score_map[region_mask]
+            max_s = float(np.max(region_scores)) if region_scores.size else 1.0
+            weight = (region_scores / max_s) if max_s > 1e-8 else 1.0
             signed_off = float(region["signed_offset"])
-            if region_label == "good":
-                overlay[region_mask] = np.clip(score_map[region_mask] + signed_off, 0.0, None)
-            else:
-                overlay[region_mask] = np.clip(score_map[region_mask] + signed_off, 0.0, None)
+            overlay[region_mask] = np.clip(region_scores + signed_off * weight, 0.0, None)
+            if region_label != "good":
                 adjusted_anomaly_mask[region_mask] = 1
         adjusted_score = (
             float(training_image_score(overlay)) if overlay.size else 0.0
@@ -1440,6 +1477,9 @@ def predict_images(args) -> int:
         args.metric_size,
         good_threshold=args.good_threshold,
         adjusted=True,
+        guided_filter=getattr(args, "guided_filter", False),
+        guided_radius=getattr(args, "guided_radius", 4),
+        guided_eps=getattr(args, "guided_eps", 1e-3),
     )
     if pixel_raw and pixel_adjusted:
         print("\n像素级/区域级评估对比（原始 vs 二次调整后）：", flush=True)
@@ -1574,6 +1614,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max_offset", type=float, default=None)
     parser.add_argument("--offset_eps", type=float, default=1e-8)
+    parser.add_argument(
+        "--hard_anomaly_dist_threshold",
+        type=float,
+        default=None,
+        help="Hard distance threshold to anomaly library: if d_anomaly <= threshold, directly judge as anomaly (e.g. 0.15)",
+    )
+    parser.add_argument(
+        "--knn_k",
+        type=int,
+        default=1,
+        help="Top-K nearest neighbors averaged for FAISS distance (default: 1)",
+    )
+    parser.add_argument(
+        "--query_patches",
+        type=int,
+        default=3,
+        help="Number of salient patches evaluated per candidate ROI (default: 3)",
+    )
+    parser.add_argument(
+        "--guided_filter",
+        action="store_true",
+        help="Apply 2D Guided Filter to align score map boundaries with image structure",
+    )
+    parser.add_argument(
+        "--guided_radius",
+        type=int,
+        default=4,
+        help="Radius for Guided Filter (default: 4)",
+    )
+    parser.add_argument(
+        "--guided_eps",
+        type=float,
+        default=1e-3,
+        help="Eps regularization for Guided Filter (default: 1e-3)",
+    )
     parser.add_argument(
         "--ground_truth_dir",
         default=None,
