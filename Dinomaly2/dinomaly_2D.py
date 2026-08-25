@@ -10,6 +10,7 @@ from torchvision.datasets import ImageFolder
 import numpy as np
 import random
 import os
+import json
 from torch.utils.data import DataLoader, ConcatDataset
 
 from models.uad import Dinomaly
@@ -192,15 +193,18 @@ def train(item_list, args):
             gt_transform=gt_transform,
             phase='train',
         )
-        dataset_cls = CustomRAMDataset if args.cache else CustomDataset
-        test_data = dataset_cls(
-            root=args.data_path,
-            transform=data_transform,
-            gt_transform=gt_transform,
-            phase='test',
-        )
         train_data_list.append(train_data)
-        test_data_list.append(test_data)
+        dataset_cls = CustomRAMDataset if args.cache else CustomDataset
+        try:
+            test_data = dataset_cls(
+                root=args.data_path,
+                transform=data_transform,
+                gt_transform=gt_transform,
+                phase='test',
+            )
+            test_data_list.append(test_data)
+        except (FileNotFoundError, RuntimeError) as error:
+            print(f"Skip default evaluation: {error}", flush=True)
     else:
         for i, item in enumerate(item_list):
             train_path = os.path.join(args.data_path, item, 'train')
@@ -393,8 +397,12 @@ def train(item_list, args):
         if it >= max_iters:
             break
 
+    peak_gpu_mem_mb = torch.cuda.max_memory_allocated(device) / (1024 * 1024) if torch.cuda.is_available() else 0.0
+    print(f'Peak GPU Memory: {peak_gpu_mem_mb:.1f} MB', flush=True)
+
+    metrics_dict = {"peak_gpu_mem_mb": round(peak_gpu_mem_mb, 2)}
     if args.eval_interval == -1:
-        evaluate_model(
+        mean_metrics = evaluate_model(
             model,
             test_data_list,
             item_list,
@@ -403,9 +411,15 @@ def train(item_list, args):
             total_epochs,
             writer,
         )
+        if mean_metrics is not None:
+            metric_names = ['I-AUROC', 'I-AP', 'I-F1', 'P-AUROC', 'P-AP', 'P-F1', 'P-AUPRO']
+            for name, val in zip(metric_names, mean_metrics):
+                metrics_dict[name] = round(float(val), 6)
 
     writer.close()
     torch.save(model.state_dict(), os.path.join(args.save_dir, 'model.pth'))
+    with open(os.path.join(args.save_dir, 'metrics.json'), 'w', encoding='utf-8') as f:
+        json.dump(metrics_dict, f, indent=2)
 
     return
 
@@ -455,7 +469,7 @@ if __name__ == '__main__':
         dest='batch_size',
         help='Batch size for training and evaluation (default: 4).',
     )
-    parser.add_argument('--max-iters', type=int, default=40000)
+    parser.add_argument('--max-iters', '--max_iters', type=int, default=40000, dest='max_iters')
     parser.add_argument(
         '--eval_interval',
         type=int,

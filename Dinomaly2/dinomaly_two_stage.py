@@ -2804,7 +2804,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.5,
         help=(
             "Fraction of highest-score feature patches stored per region in "
-            "the anomaly library (default: 0.5 = top 50%)"
+            "the anomaly library (default: 0.5 = top 50%%)"
         ),
     )
     build.add_argument(

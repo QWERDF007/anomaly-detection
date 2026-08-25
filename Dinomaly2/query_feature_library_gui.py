@@ -1610,14 +1610,15 @@ class MainWindow(QMainWindow):
                     dashed=True,
                 )
 
-        # 整图最终结果：predict 已把 ROI 结果覆写进 score map 副本后
-        # 取 top 1% 均值（与 raw_score 同口径），直接使用 details 的值。
+        # 整图最终结果：优先读取 details 记录的 final_label
         adjusted_score = float(detail.get("adjusted_score", raw_score))
-        label, _reason = final_score_label(
-            adjusted_score,
-            good_threshold,
-            anomaly_threshold,
-        )
+        label = str(detail.get("final_label", ""))
+        if not label:
+            label, _reason = final_score_label(
+                adjusted_score,
+                good_threshold,
+                anomaly_threshold,
+            )
         label_cn = "正常" if label == "good" else "异常"
         color = "#00c853" if label == "good" else "#ff1744"
         self.adjust_panel_label.setText(

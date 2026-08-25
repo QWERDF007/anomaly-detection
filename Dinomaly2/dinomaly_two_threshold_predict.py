@@ -287,15 +287,30 @@ def final_score_label(
 ) -> tuple[str, str]:
     """Make a binary final decision and return ``(label, reason)``.
 
-    Scores strictly below the good threshold are normal; anything at or
-    above it, including the middle band, is anomaly.
+    Scores strictly below the good threshold are normal; scores strictly above
+    the anomaly threshold are anomaly. In the middle band, decisions are made
+    based on second-stage feature library matching (good vs anomaly).
     """
 
-    if float(adjusted_score) < float(good_threshold):
+    adj = float(adjusted_score)
+    g_th = float(good_threshold)
+    a_th = float(anomaly_threshold)
+
+    if adj < g_th:
         return "good", "adjusted_below_good_threshold"
-    if float(adjusted_score) > float(anomaly_threshold):
+    if adj > a_th:
+        if similar_library == "good" and adj <= a_th * 1.15:
+            return "good", "strong_good_library_override"
         return "anomaly", "adjusted_above_anomaly_threshold"
-    return "anomaly", "adjusted_in_middle_band"
+
+    if similar_library == "good":
+        return "good", "adjusted_by_good_library"
+    if similar_library == "anomaly":
+        return "anomaly", "adjusted_by_anomaly_library"
+
+    if adj < (g_th + a_th) / 2.0:
+        return "good", "middle_band_closer_to_good"
+    return "anomaly", "middle_band_closer_to_anomaly"
 
 
 def _match_metadata(
@@ -611,6 +626,7 @@ def _apply_two_stage_overlay(
     score_map: np.ndarray,
     output_dir: Path,
     image_relative: Path,
+    args: Optional[Any] = None,
 ) -> np.ndarray:
     """Return a copy of ``score_map`` with the two-stage results overwritten.
 
@@ -661,8 +677,20 @@ def _apply_two_stage_overlay(
         region_scores = score_map[region_mask]
         max_s = float(np.max(region_scores)) if region_scores.size else 1.0
         weight = (region_scores / max_s) if max_s > 1e-8 else 1.0
-        signed_offset = float(region.get("signed_offset", 0.0))
-        overlay[region_mask] = np.clip(region_scores + signed_offset * weight, 0.0, None)
+        
+        da = float(region.get("anomaly_distance", 1.0))
+        dg = float(region.get("good_distance", 1.0))
+        hard_t = getattr(args, "hard_anomaly_dist_threshold", None) if args is not None else None
+        
+        if hard_t is not None and da <= hard_t:
+            overlay[region_mask] = np.clip(region_scores + 0.008 * weight, 0.0, None)
+        elif dg < da:
+            conf = (da - dg) / (da + dg + 1e-8)
+            decay = max(0.0, 1.0 - conf * 0.9)
+            overlay[region_mask] = region_scores * decay
+        else:
+            signed_offset = float(region.get("signed_offset", 0.0))
+            overlay[region_mask] = np.clip(region_scores + signed_offset * weight, 0.0, None)
     return overlay
 
 
@@ -676,6 +704,9 @@ def evaluate_pixel_level(
     guided_filter: bool = False,
     guided_radius: int = 4,
     guided_eps: float = 1e-3,
+    bg_floor_percentile: float = 0.0,
+    morph_opening: int = 0,
+    args: Optional[Any] = None,
 ) -> Dict[str, float]:
     """Evaluate pixel-level metrics on the saved score maps."""
 
@@ -700,7 +731,16 @@ def evaluate_pixel_level(
                 score_map,
                 output_dir,
                 image_relative,
+                args=args,
             )
+            if morph_opening > 0:
+                kernel = cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE, (morph_opening, morph_opening)
+                )
+                score_map = cv2.morphologyEx(score_map, cv2.MORPH_OPEN, kernel)
+            if bg_floor_percentile > 0.0:
+                bg = float(np.percentile(score_map, bg_floor_percentile))
+                score_map = np.maximum(score_map - bg, 0.0)
             if guided_filter:
                 img_path = Path(row.get("image_path", ""))
                 if img_path.is_file():
@@ -952,9 +992,8 @@ def _process_one_entry(
     )
     candidate_mask = np.zeros(score_map.shape, dtype=np.uint8)
 
-    if initial_label == "middle":
-        # Equality belongs to the middle band because the direct rules
-        # intentionally use strict < and > comparisons.
+    # Trigger Stage 2 ROI extraction if in middle band OR if any local pixel meets good_threshold
+    if initial_label == "middle" or np.any(score_map >= float(args.good_threshold)):
         min_area = 1
         if float(args.min_area_pct) > 0.0:
             min_area = max(
@@ -1029,20 +1068,56 @@ def _process_one_entry(
             max_s = float(np.max(region_scores)) if region_scores.size else 1.0
             weight = (region_scores / max_s) if max_s > 1e-8 else 1.0
             signed_off = float(region["signed_offset"])
-            overlay[region_mask] = np.clip(region_scores + signed_off * weight, 0.0, None)
+            da = float(region.get("anomaly_distance", 1.0))
+            dg = float(region.get("good_distance", 1.0))
+            hard_t = getattr(args, "hard_anomaly_dist_threshold", None)
+            
+            if hard_t is not None and da <= hard_t:
+                overlay[region_mask] = np.clip(region_scores + 0.008 * weight, 0.0, None)
+            elif dg < da:
+                conf = (da - dg) / (da + dg + 1e-8)
+                decay = max(0.0, 1.0 - conf * 0.9)
+                overlay[region_mask] = region_scores * decay
+            else:
+                overlay[region_mask] = np.clip(region_scores + signed_off * weight, 0.0, None)
             if region_label != "good":
                 adjusted_anomaly_mask[region_mask] = 1
         adjusted_score = (
             float(training_image_score(overlay)) if overlay.size else 0.0
         )
+        has_anomaly_region = any(
+            (getattr(args, "hard_anomaly_dist_threshold", None) is not None and float(r.get("anomaly_distance", 1.0)) <= getattr(args, "hard_anomaly_dist_threshold", None))
+            or (str(r.get("similar_library", "")) == "anomaly")
+            for r in regions
+        )
+        if has_anomaly_region:
+            final_label = "anomaly"
+            decision_reason = "anomaly_region_confirmed"
+            # Ensure adjusted_score reflects the anomaly detection above threshold
+            strongest_ano = max(
+                (r for r in regions if str(r.get("similar_library", "")) == "anomaly" or (getattr(args, "hard_anomaly_dist_threshold", None) is not None and float(r.get("anomaly_distance", 1.0)) <= getattr(args, "hard_anomaly_dist_threshold", None))),
+                key=lambda x: float(x.get("region_score", 0.0))
+            )
+            reg_adj = float(strongest_ano.get("region_score", 0.0)) + float(strongest_ano.get("signed_offset", 0.008))
+            adjusted_score = max(adjusted_score, reg_adj, float(args.anomaly_threshold) * 1.02)
+        elif all(str(r.get("similar_library", "")) == "good" for r in regions):
+            final_label = "good"
+            decision_reason = "all_regions_good"
+        else:
+            final_label, decision_reason = final_score_label(
+                adjusted_score,
+                args.good_threshold,
+                args.anomaly_threshold,
+                str(selected.get("similar_library", "")) if selected else "",
+            )
     else:
         adjusted_score = raw_score
-    final_label, decision_reason = final_score_label(
-        adjusted_score,
-        args.good_threshold,
-        args.anomaly_threshold,
-        str(selected.get("similar_library", "")) if selected else "",
-    )
+        final_label, decision_reason = final_score_label(
+            adjusted_score,
+            args.good_threshold,
+            args.anomaly_threshold,
+            str(selected.get("similar_library", "")) if selected else "",
+        )
     relative_text = image_relative.as_posix()
     roi_rows_for_image: List[Dict[str, Any]] = []
     for region in regions:
@@ -1111,7 +1186,7 @@ def _process_one_entry(
         "adjusted_score": adjusted_score,
         "final_label": final_label,
         "decision_reason": decision_reason,
-        "stage2_applied": bool(initial_label == "middle" and regions),
+        "stage2_applied": bool(regions),
         "region_count": len(regions),
         "selected_region_id": selected.get("region_id", "") if selected else "",
         "good_distance": selected.get("good_distance", "") if selected else "",
@@ -1164,7 +1239,7 @@ def run_worker_process(args, position: int) -> int:
         for index, entry in enumerate(image_entries)
         if index % total == position
     ]
-    output_dir = Path(args.root).expanduser() / "preds"
+    output_dir = Path(args.output_dir).expanduser() if getattr(args, "output_dir", None) else Path(args.root).expanduser() / "preds"
     output_dir.mkdir(parents=True, exist_ok=True)
     _worker_init(args, output_dir, gpu_index)
     rows: List[Dict[str, Any]] = []
@@ -1214,7 +1289,7 @@ def predict_images(args) -> int:
         raise RuntimeError(f"No images found under {data_root}")
 
     root = Path(args.root).expanduser()
-    output_dir = root / "preds"
+    output_dir = Path(args.output_dir).expanduser() if getattr(args, "output_dir", None) else root / "preds"
     output_dir.mkdir(parents=True, exist_ok=True)
     # The parent process only needs the library metadata (for run.json and
     # the feature configuration); models and indexes are loaded per worker.
@@ -1480,6 +1555,9 @@ def predict_images(args) -> int:
         guided_filter=getattr(args, "guided_filter", False),
         guided_radius=getattr(args, "guided_radius", 4),
         guided_eps=getattr(args, "guided_eps", 1e-3),
+        bg_floor_percentile=getattr(args, "bg_floor_percentile", 0.0),
+        morph_opening=getattr(args, "morph_opening", 0),
+        args=args,
     )
     if pixel_raw and pixel_adjusted:
         print("\n像素级/区域级评估对比（原始 vs 二次调整后）：", flush=True)
@@ -1554,6 +1632,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--output_dir",
+        "--out_dir",
+        type=Path,
+        default=None,
+        help=(
+            "Custom directory to write prediction artifacts to. "
+            "Defaults to --root/preds"
+        ),
+    )
+    parser.add_argument(
         "--thresholds",
         nargs="+",
         type=float,
@@ -1571,7 +1659,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help=(
             "Minimum connected-component area as a percentage of the image "
-            "area (e.g. 0.1 = 0.1%)"
+            "area (e.g. 0.1 = 0.1%%)"
         ),
     )
     parser.add_argument(
@@ -1603,7 +1691,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.10,
         help=(
             "Fraction of highest-pixel scores averaged into each ROI's "
-            "region_score for anti-noise robustness (default: 0.10 = 10%)"
+            "region_score for anti-noise robustness (default: 0.10 = 10%%)"
         ),
     )
     parser.add_argument(
@@ -1648,6 +1736,24 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1e-3,
         help="Eps regularization for Guided Filter (default: 1e-3)",
+    )
+    parser.add_argument(
+        "--bg_floor_percentile",
+        type=float,
+        default=0.0,
+        help=(
+            "Percentile of score map to subtract as background noise floor "
+            "(e.g. 20.0 to subtract 20th percentile, eliminating background false alarms)"
+        ),
+    )
+    parser.add_argument(
+        "--morph_opening",
+        type=int,
+        default=0,
+        help=(
+            "Structuring element size for morphological opening denoising "
+            "(e.g. 3 for 3x3 opening to wipe out single-pixel background noise)"
+        ),
     )
     parser.add_argument(
         "--ground_truth_dir",

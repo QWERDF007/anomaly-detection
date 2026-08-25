@@ -253,9 +253,18 @@ def train(args) -> List[Dict[str, object]]:
         )
 
         input_shape = train_dataset.imagesize
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats()
         model = build_patchcore(args, input_shape, device, len(train_dataset))
         LOGGER.info("Fitting PatchCore with %d training images", len(train_dataset))
         model.fit(train_loader)
+
+        peak_gpu_mem_mb = (
+            torch.cuda.max_memory_allocated() / (1024 * 1024)
+            if device.type == "cuda"
+            else 0.0
+        )
+        LOGGER.info("Peak GPU Memory: %.1f MB", peak_gpu_mem_mb)
 
         model.save_to_path(str(output_root))
         LOGGER.info("Saved model to %s", output_root)
@@ -267,7 +276,7 @@ def train(args) -> List[Dict[str, object]]:
                 f"{name}={metrics[name]:.4f}" for name in metrics
             )
             LOGGER.info("%s: %s", category_name, metric_text)
-        results.append({"category": category_name, **metrics})
+        results.append({"category": category_name, "peak_gpu_mem_mb": round(peak_gpu_mem_mb, 2), **metrics})
         del model
         if device.type == "cuda":
             torch.cuda.empty_cache()
@@ -275,6 +284,7 @@ def train(args) -> List[Dict[str, object]]:
     result_path = output_root / "results.csv"
     fields = [
         "category",
+        "peak_gpu_mem_mb",
         "I-AUROC",
         "I-AP",
         "I-F1",
@@ -287,6 +297,11 @@ def train(args) -> List[Dict[str, object]]:
         writer = csv.DictWriter(result_file, fieldnames=fields)
         writer.writeheader()
         writer.writerows(results)
+
+    import json
+    with (output_root / "metrics.json").open("w", encoding="utf-8") as f:
+        json.dump(results[0] if results else {}, f, indent=2)
+
     return results
 
 
@@ -335,6 +350,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "-imgsz",
+        "--resize",
         dest="resize",
         type=int,
         default=256,
@@ -342,6 +358,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-csz",
+        "--imagesize",
         dest="imagesize",
         type=int,
         default=224,
