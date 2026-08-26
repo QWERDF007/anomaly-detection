@@ -632,6 +632,12 @@ def generate_report(results, args, outs_dir, report_path, total_elapsed):
     report_path.write_text("\n".join(md), encoding="utf-8")
     print(f"[REPORT] -> {report_path} ({len(md)} lines)")
 
+    # Run automated evaluation chart generation
+    chart_dir = outs_dir / "charts"
+    print(f"[PLOTS] Generating all benchmark charts into {chart_dir} ...")
+    plot_cmd = [str(PYTHON), str(ROOT / "plot_evaluation_charts.py"), "--chart_dir", str(chart_dir), "--full_benchmark"]
+    run_cmd(plot_cmd, cwd=str(ROOT))
+
 def torch_version():
     try:
         import torch
