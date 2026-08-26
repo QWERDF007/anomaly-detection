@@ -62,15 +62,21 @@ def setup_seed(seed: int, device: torch.device) -> None:
 
 
 def select_device(gpu: int) -> torch.device:
-    """Return the requested CUDA device required by GPU FAISS."""
+    """Return the requested CUDA device; 4060 8G 单卡适配：GPU 不可用时自动回退 CPU，兼容 faiss-cpu。
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("GPU FAISS is required, but CUDA is not available.")
-    if gpu < 0 or gpu >= torch.cuda.device_count():
-        raise ValueError(
-            f"GPU {gpu} is not available; {torch.cuda.device_count()} device(s) found."
-        )
-    return torch.device(f"cuda:{gpu}")
+    原实现强制要求 GPU FAISS，已改为：若 torch.cuda 不可用或 gpu<0 则回退 cpu；
+    faiss-cpu 场景下使用 CPU 索引，避免 faiss-gpu 的 cu12 与 OOM 问题。
+    """
+    if gpu is not None and int(gpu) >= 0 and torch.cuda.is_available():
+        gpu = int(gpu)
+        if 0 <= gpu < torch.cuda.device_count():
+            return torch.device(f"cuda:{gpu}")
+        LOGGER.warning("GPU %d unavailable (%d found), fallback to CPU", gpu, torch.cuda.device_count())
+    if torch.cuda.is_available() and (gpu is None or int(gpu) < 0):
+        # 未指定 gpu 但有 cuda：默认 cuda:0
+        return torch.device("cuda:0")
+    LOGGER.info("Using CPU (faiss-cpu mode) - 4060 8G 推荐")
+    return torch.device("cpu")
 
 
 def _split_categories(values: Optional[Sequence[str]]) -> List[Optional[str]]:
@@ -93,8 +99,77 @@ def _dataset_class(dataset_name: str):
 
 def make_dataset(args, category: Optional[str], split: DatasetSplit):
     dataset_cls = _dataset_class(args.dataset)
+    # 4060 单卡：支持 data_path 为 txt 列表（中文/空格需 ""），自动处理 test/train 切分 txt 的 test sibling
+    source = args.data_path
+    if isinstance(source, (str, Path)) and str(source).lower().endswith(".txt"):
+        src_path = Path(source).expanduser()
+        # 若是 test split 且 source 是 train_*.txt，尝试定位 test_*.txt
+        if split == DatasetSplit.TEST and "train" in src_path.name:
+            cand = src_path.parent / src_path.name.replace("train", "test")
+            if cand.is_file():
+                source = str(cand)
+                LOGGER.info("PatchCore txt split: train %s -> test %s", src_path, cand)
+            else:
+                LOGGER.warning("PatchCore txt test sibling not found: %s, using train txt for TEST split", cand)
     kwargs = {
-        "source": args.data_path,
+        "source": source,
+        "classname": category,
+        "resize": args.resize,
+        "imagesize": args.imagesize,
+        "split": split,
+        "train_val_split": args.train_val_split,
+        "seed": args.seed,
+    }
+    if dataset_cls is CustomDataset and args.mask_dir:
+        kwargs["mask_dir"] = args.mask_dir
+    return dataset_cls(**kwargs)
+
+
+def make_sampler(
+    args, device: torch.device, number_of_features: Optional[int] = None
+):
+    if args.sampler == "identity" or args.sampling_percentage >= 1.0:
+        return patchcore.sampler.IdentitySampler()
+    if number_of_features is not None and int(number_of_features * args.sampling_percentage) < 1:
+        LOGGER.warning(
+            "Sampling percentage would select no features; using identity sampling."
+        )
+
+
+def _split_categories(values: Optional[Sequence[str]]) -> List[Optional[str]]:
+    if not values:
+        return [None]
+    categories: List[Optional[str]] = []
+    for value in values:
+        categories.extend(item.strip() for item in value.split(",") if item.strip())
+    return categories or [None]
+
+
+def _dataset_class(dataset_name: str):
+    dataset_name = dataset_name.lower()
+    if dataset_name in {"mvtec", "mvtec-ad", "mvtec_ad"}:
+        return MVTecDataset
+    if dataset_name in {"custom", "folder", "imagefolder"}:
+        return CustomDataset
+    raise ValueError(f"Unsupported dataset type: {dataset_name}")
+
+
+def make_dataset(args, category: Optional[str], split: DatasetSplit):
+    dataset_cls = _dataset_class(args.dataset)
+    # 4060 单卡：支持 data_path 为 txt 列表（中文/空格需 ""），自动处理 test/train 切分 txt 的 test sibling
+    source = args.data_path
+    if isinstance(source, (str, Path)) and str(source).lower().endswith(".txt"):
+        src_path = Path(source).expanduser()
+        # 若是 test split 且 source 是 train_*.txt，尝试定位 test_*.txt
+        if split == DatasetSplit.TEST and "train" in src_path.name:
+            cand = src_path.parent / src_path.name.replace("train", "test")
+            if cand.is_file():
+                source = str(cand)
+                LOGGER.info("PatchCore txt split: train %s -> test %s", src_path, cand)
+            else:
+                LOGGER.warning("PatchCore txt test sibling not found: %s, using train txt for TEST split", cand)
+    kwargs = {
+        "source": source,
         "classname": category,
         "resize": args.resize,
         "imagesize": args.imagesize,
@@ -119,13 +194,24 @@ def make_sampler(
         return patchcore.sampler.IdentitySampler()
     if args.sampling_percentage <= 0:
         raise ValueError("sampling_percentage must be greater than zero.")
+    # 4060 8G 单卡：672 大图 + 大 N 时 FAISS 采样在 GPU 易 OOM (10.77 GiB)，自动切 CPU 采样 + 降低比例
+    sampler_device = device
+    eff_percentage = float(args.sampling_percentage)
+    if getattr(args, "imagesize", 0) >= 672 and number_of_features is not None and number_of_features > 80000:
+        LOGGER.warning("672 large feature bank (%d patches) -> switch sampler to CPU and reduce percentage to 0.05 to avoid OOM", number_of_features)
+        sampler_device = torch.device("cpu")
+        eff_percentage = min(eff_percentage, 0.05)
+    elif getattr(args, "imagesize", 0) >= 672 and device.type == "cuda":
+        # 672 即使中等也建议 CPU 采样，避免显存峰值
+        sampler_device = torch.device("cpu")
+        LOGGER.info("672 uses CPU sampler to save VRAM (4060 8G)")
     if args.sampler == "identity":
         return patchcore.sampler.IdentitySampler()
     if args.sampler == "greedy_coreset":
-        return patchcore.sampler.GreedyCoresetSampler(args.sampling_percentage, device)
+        return patchcore.sampler.GreedyCoresetSampler(eff_percentage, sampler_device)
     if args.sampler == "approx_greedy_coreset":
         return patchcore.sampler.ApproximateGreedyCoresetSampler(
-            args.sampling_percentage, device
+            eff_percentage, sampler_device
         )
     raise ValueError(f"Unsupported sampler: {args.sampler}")
 
@@ -143,6 +229,7 @@ def build_patchcore(
     backbone.name = args.backbone
     backbone.seed = args.seed
 
+    device_id = device.index if device.type == "cuda" and device.index is not None else 0
     model = patchcore.patchcore.PatchCore(device)
     model.load(
         backbone=backbone,
@@ -156,15 +243,12 @@ def build_patchcore(
         featuresampler=make_sampler(args, device, number_of_features),
         anomaly_score_num_nn=args.anomaly_scorer_num_nn,
         nn_method=patchcore.common.FaissNN(
-            on_gpu=True,
+            on_gpu=None if device.type == "cuda" else False,
             num_workers=args.faiss_num_workers,
+            device_id=device_id,
         ),
     )
     return model
-
-
-# Backward-compatible private aliases.  The implementations live in the
-# shared module so offline score-map evaluation cannot drift from training.
 _safe_auroc = safe_auroc
 _safe_average_precision = safe_average_precision
 _safe_f1_max = safe_f1_max
@@ -335,6 +419,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "-imgsz",
+        "--resize",
         dest="resize",
         type=int,
         default=256,
@@ -342,6 +427,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-csz",
+        "--imagesize",
+        "--image_size",
         dest="imagesize",
         type=int,
         default=224,

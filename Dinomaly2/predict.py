@@ -80,7 +80,8 @@ def predict_one(model, img_path, transform, device, threshold=None):
     t_data = time.time() - t0
 
     model.eval()
-    with torch.no_grad():
+    use_cuda = "cuda" in str(device)
+    with torch.no_grad(), torch.cuda.amp.autocast(enabled=use_cuda, dtype=torch.float16):
         en, de = model(img_tensor)
         anomaly_map, _ = cal_anomaly_maps(en, de, orig.shape[:2])
         anomaly_map = get_gaussian_kernel(kernel_size=5, sigma=4).to(device)(anomaly_map)

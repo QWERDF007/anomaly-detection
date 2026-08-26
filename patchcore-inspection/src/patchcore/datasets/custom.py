@@ -171,7 +171,10 @@ class CustomDataset(torch.utils.data.Dataset):
         del kwargs  # Keep compatibility with the MVTec command-line adapter.
 
         self.source = Path(source).expanduser()
-        if not self.source.is_dir():
+        # 4060 8G 单卡适配：支持 .txt 列表（PowerShell 中文/空格路径需 ""），如 F:\tmp\outs\data_splits\train_*.txt
+        self._is_txt_list = self.source.is_file() and self.source.suffix.lower() == ".txt"
+        # 若是 txt 列表，split 无需目录校验，稍后 get_image_data 会直接读取
+        if not self._is_txt_list and not self.source.is_dir():
             raise FileNotFoundError(f"Dataset directory does not exist: {self.source}")
 
         self.split = _split_value(split)
@@ -193,8 +196,14 @@ class CustomDataset(torch.utils.data.Dataset):
             resize, imagesize, self.transform_mean, self.transform_std
         )
 
-        self._category_roots = self._resolve_category_roots(classname)
-        self.classnames_to_use = [name for name, _ in self._category_roots]
+        # txt 列表模式：直接将 source 视为单类别，绕过目录解析
+        if self._is_txt_list:
+            self._category_roots = [(self.source.stem, self.source.parent)]
+            # 占位，随后 get_image_data 会特殊处理
+            self.classnames_to_use = [self.source.stem]
+        else:
+            self._category_roots = self._resolve_category_roots(classname)
+            self.classnames_to_use = [name for name, _ in self._category_roots]
         self.imgpaths_per_class, self.data_to_iterate = self.get_image_data()
 
     def _resolve_category_roots(self, classname: Optional[str]):
@@ -317,8 +326,52 @@ class CustomDataset(torch.utils.data.Dataset):
                 )
         return items
 
+    def _load_txt_items(self) -> List[List]:
+        """从 txt 列表加载，train 全部 good，test 按父目录推断好/坏（无 mask）。"""
+        lines = [l.strip() for l in self.source.read_text(encoding="utf-8").splitlines() if l.strip()]
+        paths = []
+        for line in lines:
+            p = Path(line).expanduser()
+            if not p.is_file():
+                alt = (self.source.parent / p)
+                if alt.is_file():
+                    p = alt
+            if p.is_file():
+                paths.append(p)
+            else:
+                print(f"[CustomDataset txt] Warning: not found {line}")
+        category = self._category_roots[0][0] if self._category_roots else self.source.stem
+        items = []
+        for p in sorted(paths, key=lambda x: str(x).lower()):
+            anomaly = "good"
+            if self.split == DatasetSplit.TEST:
+                parent = p.parent.name.lower()
+                is_normal = parent in self.normal_names or parent == "ok" or parent == "good"
+                # 兼容铜色数据：NG 目录下即异常
+                anomaly = "good" if is_normal else p.parent.name
+            items.append([category, anomaly, str(p), None])
+        # train_val_split 逻辑复用
+        if self.split in (DatasetSplit.TRAIN, DatasetSplit.VAL) and self.train_val_split < 1.0:
+            split_index = int(len(items) * self.train_val_split)
+            split_index = max(1, min(len(items), split_index)) if items else 0
+            if self.split == DatasetSplit.TRAIN:
+                items = items[:split_index]
+            else:
+                items = items[split_index:]
+        return items
+
     def get_image_data(self):
         """Return the same data structures as the original MVTec adapter."""
+        # txt 列表优先
+        if getattr(self, "_is_txt_list", False):
+            items = self._load_txt_items()
+            category = self._category_roots[0][0] if self._category_roots else self.source.stem
+            imgpaths_per_class = {category: {}}
+            for _, anomaly, image_path, _ in items:
+                imgpaths_per_class[category].setdefault(anomaly, []).append(image_path)
+            if not items:
+                raise RuntimeError(f"No images found in txt list {self.source} for split {self.split.value!r}.")
+            return imgpaths_per_class, items
 
         imgpaths_per_class = {}
         data_to_iterate = []
