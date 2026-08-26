@@ -3,6 +3,12 @@
 # Press ⌃R to execute it or replace it with your code.
 # Press Double ⇧ to search everywhere for classes, files, tool windows, actions, and settings.
 
+import os
+import sys
+_dinomaly_dir = os.path.dirname(os.path.abspath(__file__))
+if _dinomaly_dir not in sys.path:
+    sys.path.insert(0, _dinomaly_dir)
+
 import torch
 import torch.nn as nn
 from dataset import get_data_transforms, get_strong_transforms

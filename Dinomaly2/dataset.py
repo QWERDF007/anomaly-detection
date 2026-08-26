@@ -173,27 +173,6 @@ class CustomDataset(torch.utils.data.Dataset):
         if phase not in {'train', 'test'}:
             raise ValueError("phase must be 'train' or 'test'")
 
-<<<<<<< HEAD
-=======
-        self.root = Path(root).expanduser()
-        # 4060单卡适配：支持 txt 列表路径（路径含空格/中文需 ""），兼容 F:\tmp\outs\data_splits\train_*.txt
-        # 若 root 是 .txt 文件，则按行读取图像路径，train 视为 normal，test 按缺省无 mask 的图像级评估
-        self._is_txt_list = self.root.is_file() and self.root.suffix.lower() == ".txt"
-        if self._is_txt_list:
-            # txt 列表模式：直接读取，Path 自动处理中文/空格
-            self.transform = transform
-            self.gt_transform = gt_transform
-            self.phase = phase
-            self.img_path = self.root  # txt 本身
-            self.gt_path = self.root.parent / "ground_truth"
-            self.img_paths, self.gt_paths, self.labels, self.types = self._load_from_txt()
-            self.cls_idx = 0
-            return
-
-        if not self.root.is_dir():
-            raise FileNotFoundError(f'Custom dataset directory does not exist: {self.root}')
-
->>>>>>> 87cdbcb1e9d186d775c4ad605b9985dd34db9269
         self.transform = transform
         self.gt_transform = gt_transform
         self.phase = phase
