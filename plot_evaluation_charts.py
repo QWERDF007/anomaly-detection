@@ -64,7 +64,7 @@ def plot_single_run_charts(
         1 if (str(l).lower() in {"anomaly", "ng", "defect", "1"}) else 0
         for l in df["true_label"]
     ])
-    y_score = df["final_score"].to_numpy(dtype=np.float64)
+    y_score = np.nan_to_num(df["final_score"].to_numpy(dtype=np.float64), nan=0.0)
     has_anomaly = np.any(y_true == 1)
     has_good = np.any(y_true == 0)
 

@@ -227,7 +227,8 @@ def train_dinomaly_stage1(
         img = batch[0].to(device)
         optimizer.zero_grad()
 
-        with torch.amp.autocast("cuda", enabled=(device.type == "cuda"), dtype=torch.float16):
+        amp_dtype = torch.bfloat16 if (device.type == "cuda" and torch.cuda.is_bf16_supported()) else torch.float32
+        with torch.amp.autocast("cuda", enabled=(device.type == "cuda" and amp_dtype != torch.float32), dtype=amp_dtype):
             en, de = model(img)
             loss = global_cosine(en, de)
 
@@ -385,7 +386,8 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     results = []
     t_infer_start = time.perf_counter()
-    with torch.no_grad(), torch.amp.autocast("cuda", enabled=(device.type == "cuda"), dtype=torch.float16):
+    amp_dtype = torch.bfloat16 if (device.type == "cuda" and torch.cuda.is_bf16_supported()) else torch.float32
+    with torch.no_grad(), torch.amp.autocast("cuda", enabled=(device.type == "cuda" and amp_dtype != torch.float32), dtype=amp_dtype):
         for idx in tqdm(range(0, len(test_paths), batch_size), desc=f"[{device}] Inference"):
             batch_paths = test_paths[idx:idx + batch_size]
             imgs = [transform(Image.open(p).convert("RGB")) for p in batch_paths]
@@ -393,14 +395,15 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
             enc_out, dec_out = model(batch_t)
 
             try:
-                from utils import cal_anomaly_maps
+                from Dinomaly2.utils import cal_anomaly_maps
                 anomaly_maps, _ = cal_anomaly_maps(enc_out, dec_out, batch_t.shape[-1])
                 flat_maps = anomaly_maps.flatten(1)
                 k_top = max(1, int(flat_maps.shape[1] * 0.01))
                 batch_raw_scores = torch.topk(flat_maps, k=k_top, dim=1)[0].mean(dim=1).cpu().numpy()
-            except Exception:
-                cos_sim = nn.CosineSimilarity(dim=-1)(enc_out[-1], dec_out[-1])
-                batch_raw_scores = (1.0 - cos_sim).mean(dim=1).cpu().numpy()
+            except Exception as err:
+                print(f"[{device}] cal_anomaly_maps error: {err}")
+                cos_sim = nn.CosineSimilarity(dim=1)(enc_out[-1].mean(dim=(2, 3)), dec_out[-1].mean(dim=(2, 3)))
+                batch_raw_scores = (1.0 - cos_sim).cpu().numpy()
 
             for j, p in enumerate(batch_paths):
                 raw_score = float(batch_raw_scores[j])
