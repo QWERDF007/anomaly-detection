@@ -1,0 +1,91 @@
+{
+  "query_image": "/data/wt/ramdisk/leishi_026/test/bad/Pro0711_A-734-0_small_2_.923_734_7062811583968572929_良品.jpg",
+  "region_source": "gui_lookup_results/query_20260807_173956_045745/query_mask.png",
+  "top_k": 1,
+  "results": [
+    {
+      "query_image_id": "img_cc02fb298e9963a1",
+      "query_image_name": "Pro0711_A-734-0_small_2_.923_734_7062811583968572929_良品.jpg",
+      "query_image_path": "/data/wt/ramdisk/leishi_026/test/bad/Pro0711_A-734-0_small_2_.923_734_7062811583968572929_良品.jpg",
+      "query_region_id": 1,
+      "query_region_area": 29747,
+      "query_region_bbox": [
+        1857.0,
+        2.0,
+        2113.0,
+        269.0
+      ],
+      "region_source": "gui_lookup_results/query_20260807_173956_045745/query_mask.png",
+      "library_type": "good",
+      "library_path": "/data/wt/two_stages/base_patch/good",
+      "rank": 1,
+      "distance": 0.08709809929132462,
+      "vector_id": 6,
+      "image_id": "img_023e3bbbc5f0b1f0",
+      "roi_id": "img_023e3bbbc5f0b1f0_roi_0001_p6",
+      "image_name": "0722-2.jpg",
+      "image_path": "/data/wt/ramdisk/test_export_03/images/0722-2.jpg",
+      "image_relative": "0722-2.jpg",
+      "mask_path": "/data/wt/ramdisk/test_export_03/annotations/0722-2.json",
+      "component_id": 1,
+      "area": 1,
+      "bbox_original": [
+        1916.0,
+        21.0,
+        2148.0,
+        278.0
+      ],
+      "bbox_feature": [
+        45.0,
+        1.0,
+        46.0,
+        2.0
+      ],
+      "query_patch_index": 0,
+      "patch_row": 1,
+      "patch_col": 44
+    },
+    {
+      "query_image_id": "img_cc02fb298e9963a1",
+      "query_image_name": "Pro0711_A-734-0_small_2_.923_734_7062811583968572929_良品.jpg",
+      "query_image_path": "/data/wt/ramdisk/leishi_026/test/bad/Pro0711_A-734-0_small_2_.923_734_7062811583968572929_良品.jpg",
+      "query_region_id": 1,
+      "query_region_area": 29747,
+      "query_region_bbox": [
+        1857.0,
+        2.0,
+        2113.0,
+        269.0
+      ],
+      "region_source": "gui_lookup_results/query_20260807_173956_045745/query_mask.png",
+      "library_type": "anomaly",
+      "library_path": "/data/wt/two_stages/base_patch/anomaly",
+      "rank": 1,
+      "distance": 0.145592600107193,
+      "vector_id": 92,
+      "image_id": "img_537da0f7d44e544b",
+      "roi_id": "img_537da0f7d44e544b_roi_0001_p1",
+      "image_name": "picture_14_2025_07_23_14_34_47_058.jpg",
+      "image_path": "/data/wt/ramdisk/test_export_03/images/picture_14_2025_07_23_14_34_47_058.jpg",
+      "image_relative": "picture_14_2025_07_23_14_34_47_058.jpg",
+      "mask_path": "/data/wt/ramdisk/test_export_03/annotations/picture_14_2025_07_23_14_34_47_058.json",
+      "component_id": 1,
+      "area": 1,
+      "bbox_original": [
+        1886.0,
+        31.0,
+        1966.0,
+        388.0
+      ],
+      "bbox_feature": [
+        43.0,
+        1.0,
+        44.0,
+        2.0
+      ],
+      "query_patch_index": 0,
+      "patch_row": 1,
+      "patch_col": 44
+    }
+  ]
+}

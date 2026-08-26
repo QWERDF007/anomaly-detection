@@ -1,0 +1,217 @@
+{
+  "query_image": "/data/wt/ramdisk/leishi_026/test/good/Pro0711_A-4338-0_small_2_.459_4338_2162895108998067713_异物.jpg",
+  "region_source": "gui_lookup_results/query_20260820_101945_045129/query_mask.png",
+  "top_k": 3,
+  "library_mode": "patch",
+  "feature_shape": [
+    48,
+    48
+  ],
+  "image_size": 672,
+  "crop_size": 672,
+  "patch_selection_rule": "top_ratio_by_score_among_feature_cells_whose_centre_is_inside_polygon(pointPolygonTest, centre mapped linearly back to the original image)",
+  "results": [
+    {
+      "query_image_id": "img_814da41abcae9766",
+      "query_image_name": "Pro0711_A-4338-0_small_2_.459_4338_2162895108998067713_异物.jpg",
+      "query_image_path": "/data/wt/ramdisk/leishi_026/test/good/Pro0711_A-4338-0_small_2_.459_4338_2162895108998067713_异物.jpg",
+      "query_region_id": 1,
+      "query_region_area": 139605,
+      "query_region_bbox": [
+        66.0,
+        436.0,
+        405.0,
+        1302.0
+      ],
+      "region_source": "gui_lookup_results/query_20260820_101945_045129/query_mask.png",
+      "library_type": "good",
+      "library_path": "/data/wt/two_stages/base_672_15k/good",
+      "rank": 1,
+      "distance": 0.296026349067688,
+      "vector_id": 504,
+      "image_id": "img_eb36da54ee420c13",
+      "roi_id": "img_eb36da54ee420c13_roi_0015_p14",
+      "image_name": "picture_15_2025_07_23_14_35_57_870.jpg",
+      "image_path": "/data/wt/ramdisk/test_export_03/images/picture_15_2025_07_23_14_35_57_870.jpg",
+      "image_relative": "picture_15_2025_07_23_14_35_57_870.jpg",
+      "mask_path": "/data/wt/ramdisk/test_export_03/annotations/picture_15_2025_07_23_14_35_57_870.json",
+      "component_id": 15,
+      "area": 1,
+      "bbox_original": [
+        57.33650588989258,
+        8.81093978881836,
+        885.5648193359375,
+        560.963134765625
+      ],
+      "bbox_feature": [
+        15.0,
+        2.0,
+        16.0,
+        3.0
+      ],
+      "patch_bbox_original": [
+        671.875,
+        102.91666666666667,
+        716.6666666666666,
+        154.375
+      ],
+      "patch_center_original": [
+        694.2708333333333,
+        128.64583333333334
+      ],
+      "patch_center_inside_mask": true,
+      "patch_bbox_resized": [
+        671.875,
+        102.91666666666667,
+        716.6666666666666,
+        154.375
+      ],
+      "patch_center_resized": [
+        694.2708333333333,
+        128.64583333333334
+      ],
+      "feature_shape": [
+        48,
+        48
+      ],
+      "query_patch_index": 0,
+      "patch_row": 11,
+      "patch_col": 5,
+      "query_feature_shape": [
+        48,
+        48
+      ],
+      "query_patch_bbox_feature": [
+        5.0,
+        11.0,
+        6.0,
+        12.0
+      ],
+      "query_patch_center_feature": [
+        5.5,
+        11.5
+      ],
+      "query_patch_bbox_resized": [
+        223.95833333333331,
+        566.0416666666667,
+        268.75,
+        617.5
+      ],
+      "query_patch_center_resized": [
+        246.35416666666666,
+        591.7708333333334
+      ],
+      "query_patch_bbox_original": [
+        223.95833333333331,
+        566.0416666666667,
+        268.75,
+        617.5
+      ],
+      "query_patch_center_original": [
+        246.35416666666666,
+        591.7708333333334
+      ]
+    },
+    {
+      "query_image_id": "img_814da41abcae9766",
+      "query_image_name": "Pro0711_A-4338-0_small_2_.459_4338_2162895108998067713_异物.jpg",
+      "query_image_path": "/data/wt/ramdisk/leishi_026/test/good/Pro0711_A-4338-0_small_2_.459_4338_2162895108998067713_异物.jpg",
+      "query_region_id": 1,
+      "query_region_area": 139605,
+      "query_region_bbox": [
+        66.0,
+        436.0,
+        405.0,
+        1302.0
+      ],
+      "region_source": "gui_lookup_results/query_20260820_101945_045129/query_mask.png",
+      "library_type": "anomaly",
+      "library_path": "/data/wt/two_stages/base_672_15k/anomaly",
+      "rank": 1,
+      "distance": 0.3547234535217285,
+      "vector_id": 95,
+      "image_id": "img_7dc32a8e77458a27",
+      "roi_id": "img_7dc32a8e77458a27_roi_0001_p13",
+      "image_name": "picture_0_2025_07_23_14_04_23_439.jpg",
+      "image_path": "/data/wt/ramdisk/test_export_03/images/picture_0_2025_07_23_14_04_23_439.jpg",
+      "image_relative": "picture_0_2025_07_23_14_04_23_439.jpg",
+      "mask_path": "/data/wt/ramdisk/test_export_03/annotations/picture_0_2025_07_23_14_04_23_439.json",
+      "component_id": 1,
+      "area": 1,
+      "bbox_original": [
+        110.70963287353516,
+        660.4686889648438,
+        1960.0174560546875,
+        752.6132202148438
+      ],
+      "bbox_feature": [
+        39.0,
+        13.0,
+        40.0,
+        14.0
+      ],
+      "patch_bbox_original": [
+        1746.875,
+        668.9583333333334,
+        1791.6666666666665,
+        720.4166666666667
+      ],
+      "patch_center_original": [
+        1769.2708333333333,
+        694.6875
+      ],
+      "patch_center_inside_mask": true,
+      "patch_bbox_resized": [
+        1746.875,
+        668.9583333333334,
+        1791.6666666666665,
+        720.4166666666667
+      ],
+      "patch_center_resized": [
+        1769.2708333333333,
+        694.6875
+      ],
+      "feature_shape": [
+        48,
+        48
+      ],
+      "query_patch_index": 0,
+      "patch_row": 11,
+      "patch_col": 5,
+      "query_feature_shape": [
+        48,
+        48
+      ],
+      "query_patch_bbox_feature": [
+        5.0,
+        11.0,
+        6.0,
+        12.0
+      ],
+      "query_patch_center_feature": [
+        5.5,
+        11.5
+      ],
+      "query_patch_bbox_resized": [
+        223.95833333333331,
+        566.0416666666667,
+        268.75,
+        617.5
+      ],
+      "query_patch_center_resized": [
+        246.35416666666666,
+        591.7708333333334
+      ],
+      "query_patch_bbox_original": [
+        223.95833333333331,
+        566.0416666666667,
+        268.75,
+        617.5
+      ],
+      "query_patch_center_original": [
+        246.35416666666666,
+        591.7708333333334
+      ]
+    }
+  ]
+}

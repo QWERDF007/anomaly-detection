@@ -1,0 +1,217 @@
+{
+  "query_image": "/data/wt/ramdisk/leishi_026/test/bad/Pro0711_A-734-0_small_2_.923_734_7062811583968572929_良品.jpg",
+  "region_source": "gui_lookup_results/query_20260811_094839_909735/query_mask.png",
+  "top_k": 1,
+  "library_mode": "patch",
+  "feature_shape": [
+    48,
+    48
+  ],
+  "image_size": 672,
+  "crop_size": 672,
+  "patch_selection_rule": "top_ratio_by_score_among_feature_cells_whose_centre_is_inside_polygon(pointPolygonTest, centre mapped linearly back to the original image)",
+  "results": [
+    {
+      "query_image_id": "img_cc02fb298e9963a1",
+      "query_image_name": "Pro0711_A-734-0_small_2_.923_734_7062811583968572929_良品.jpg",
+      "query_image_path": "/data/wt/ramdisk/leishi_026/test/bad/Pro0711_A-734-0_small_2_.923_734_7062811583968572929_良品.jpg",
+      "query_region_id": 1,
+      "query_region_area": 36195,
+      "query_region_bbox": [
+        0.0,
+        2.0,
+        155.0,
+        415.0
+      ],
+      "region_source": "gui_lookup_results/query_20260811_094839_909735/query_mask.png",
+      "library_type": "good",
+      "library_path": "/data/wt/two_stages/base_patch2/good",
+      "rank": 1,
+      "distance": 0.17043638229370117,
+      "vector_id": 1008,
+      "image_id": "img_eb36da54ee420c13",
+      "roi_id": "img_eb36da54ee420c13_roi_0015_p26",
+      "image_name": "picture_15_2025_07_23_14_35_57_870.jpg",
+      "image_path": "/data/wt/ramdisk/test_export_03/images/picture_15_2025_07_23_14_35_57_870.jpg",
+      "image_relative": "picture_15_2025_07_23_14_35_57_870.jpg",
+      "mask_path": "/data/wt/ramdisk/test_export_03/annotations/picture_15_2025_07_23_14_35_57_870.json",
+      "component_id": 15,
+      "area": 1,
+      "bbox_original": [
+        57.33650588989258,
+        8.81093978881836,
+        885.5648193359375,
+        560.963134765625
+      ],
+      "bbox_feature": [
+        1.0,
+        0.0,
+        2.0,
+        1.0
+      ],
+      "patch_bbox_original": [
+        44.791666666666664,
+        0.0,
+        89.58333333333333,
+        51.458333333333336
+      ],
+      "patch_center_original": [
+        67.1875,
+        25.729166666666668
+      ],
+      "patch_center_inside_mask": true,
+      "patch_bbox_resized": [
+        44.791666666666664,
+        0.0,
+        89.58333333333333,
+        51.458333333333336
+      ],
+      "patch_center_resized": [
+        67.1875,
+        25.729166666666668
+      ],
+      "feature_shape": [
+        48,
+        48
+      ],
+      "query_patch_index": 0,
+      "patch_row": 1,
+      "patch_col": 0,
+      "query_feature_shape": [
+        48,
+        48
+      ],
+      "query_patch_bbox_feature": [
+        0.0,
+        1.0,
+        1.0,
+        2.0
+      ],
+      "query_patch_center_feature": [
+        0.5,
+        1.5
+      ],
+      "query_patch_bbox_resized": [
+        0.0,
+        51.458333333333336,
+        44.791666666666664,
+        102.91666666666667
+      ],
+      "query_patch_center_resized": [
+        22.395833333333332,
+        77.1875
+      ],
+      "query_patch_bbox_original": [
+        0.0,
+        51.458333333333336,
+        44.791666666666664,
+        102.91666666666667
+      ],
+      "query_patch_center_original": [
+        22.395833333333332,
+        77.1875
+      ]
+    },
+    {
+      "query_image_id": "img_cc02fb298e9963a1",
+      "query_image_name": "Pro0711_A-734-0_small_2_.923_734_7062811583968572929_良品.jpg",
+      "query_image_path": "/data/wt/ramdisk/leishi_026/test/bad/Pro0711_A-734-0_small_2_.923_734_7062811583968572929_良品.jpg",
+      "query_region_id": 1,
+      "query_region_area": 36195,
+      "query_region_bbox": [
+        0.0,
+        2.0,
+        155.0,
+        415.0
+      ],
+      "region_source": "gui_lookup_results/query_20260811_094839_909735/query_mask.png",
+      "library_type": "anomaly",
+      "library_path": "/data/wt/two_stages/base_patch2/anomaly",
+      "rank": 1,
+      "distance": 0.17552047967910767,
+      "vector_id": 180,
+      "image_id": "img_707fef54615411c4",
+      "roi_id": "img_707fef54615411c4_roi_0000_p0",
+      "image_name": "picture_23_2025_07_23_14_50_01_896.jpg",
+      "image_path": "/data/wt/ramdisk/test_export_03/images/picture_23_2025_07_23_14_50_01_896.jpg",
+      "image_relative": "picture_23_2025_07_23_14_50_01_896.jpg",
+      "mask_path": "/data/wt/ramdisk/test_export_03/annotations/picture_23_2025_07_23_14_50_01_896.json",
+      "component_id": 0,
+      "area": 1,
+      "bbox_original": [
+        22.07520866394043,
+        10.766016960144043,
+        166.92201232910156,
+        108.2590560913086
+      ],
+      "bbox_feature": [
+        1.0,
+        0.0,
+        2.0,
+        1.0
+      ],
+      "patch_bbox_original": [
+        44.791666666666664,
+        0.0,
+        89.58333333333333,
+        51.458333333333336
+      ],
+      "patch_center_original": [
+        67.1875,
+        25.729166666666668
+      ],
+      "patch_center_inside_mask": true,
+      "patch_bbox_resized": [
+        44.791666666666664,
+        0.0,
+        89.58333333333333,
+        51.458333333333336
+      ],
+      "patch_center_resized": [
+        67.1875,
+        25.729166666666668
+      ],
+      "feature_shape": [
+        48,
+        48
+      ],
+      "query_patch_index": 0,
+      "patch_row": 1,
+      "patch_col": 0,
+      "query_feature_shape": [
+        48,
+        48
+      ],
+      "query_patch_bbox_feature": [
+        0.0,
+        1.0,
+        1.0,
+        2.0
+      ],
+      "query_patch_center_feature": [
+        0.5,
+        1.5
+      ],
+      "query_patch_bbox_resized": [
+        0.0,
+        51.458333333333336,
+        44.791666666666664,
+        102.91666666666667
+      ],
+      "query_patch_center_resized": [
+        22.395833333333332,
+        77.1875
+      ],
+      "query_patch_bbox_original": [
+        0.0,
+        51.458333333333336,
+        44.791666666666664,
+        102.91666666666667
+      ],
+      "query_patch_center_original": [
+        22.395833333333332,
+        77.1875
+      ]
+    }
+  ]
+}

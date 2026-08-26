@@ -1,0 +1,91 @@
+{
+  "query_image": "/data/wt/ramdisk/leishi_026/test/bad/Pro0711_A-734-0_small_2_.923_734_7062811583968572929_良品.jpg",
+  "region_source": "gui_lookup_results/query_20260807_173553_919089/query_mask.png",
+  "top_k": 1,
+  "results": [
+    {
+      "query_image_id": "img_cc02fb298e9963a1",
+      "query_image_name": "Pro0711_A-734-0_small_2_.923_734_7062811583968572929_良品.jpg",
+      "query_image_path": "/data/wt/ramdisk/leishi_026/test/bad/Pro0711_A-734-0_small_2_.923_734_7062811583968572929_良品.jpg",
+      "query_region_id": 1,
+      "query_region_area": 359,
+      "query_region_bbox": [
+        1951.0,
+        979.0,
+        1972.0,
+        1006.0
+      ],
+      "region_source": "gui_lookup_results/query_20260807_173553_919089/query_mask.png",
+      "library_type": "good",
+      "library_path": "/data/wt/two_stages/base_patch/good",
+      "rank": 1,
+      "distance": 0.1108120009303093,
+      "vector_id": 1247,
+      "image_id": "img_34658875a176aea9",
+      "roi_id": "img_34658875a176aea9_roi_0005_p30",
+      "image_name": "Pro0711_A-10-0_small_2_.783_10_7134870919956893185_接头.jpg",
+      "image_path": "/data/wt/ramdisk/test_export_03/images/Pro0711_A-10-0_small_2_.783_10_7134870919956893185_接头.jpg",
+      "image_relative": "Pro0711_A-10-0_small_2_.783_10_7134870919956893185_接头.jpg",
+      "mask_path": "/data/wt/ramdisk/test_export_03/annotations/Pro0711_A-10-0_small_2_.783_10_7134870919956893185_接头.json",
+      "component_id": 5,
+      "area": 1,
+      "bbox_original": [
+        89.0,
+        1760.0,
+        1944.0,
+        1865.0
+      ],
+      "bbox_feature": [
+        43.0,
+        35.0,
+        44.0,
+        36.0
+      ],
+      "query_patch_index": 0,
+      "patch_row": 19,
+      "patch_col": 43
+    },
+    {
+      "query_image_id": "img_cc02fb298e9963a1",
+      "query_image_name": "Pro0711_A-734-0_small_2_.923_734_7062811583968572929_良品.jpg",
+      "query_image_path": "/data/wt/ramdisk/leishi_026/test/bad/Pro0711_A-734-0_small_2_.923_734_7062811583968572929_良品.jpg",
+      "query_region_id": 1,
+      "query_region_area": 359,
+      "query_region_bbox": [
+        1951.0,
+        979.0,
+        1972.0,
+        1006.0
+      ],
+      "region_source": "gui_lookup_results/query_20260807_173553_919089/query_mask.png",
+      "library_type": "anomaly",
+      "library_path": "/data/wt/two_stages/base_patch/anomaly",
+      "rank": 1,
+      "distance": 0.16227173805236816,
+      "vector_id": 273,
+      "image_id": "img_faa1450427d20394",
+      "roi_id": "img_faa1450427d20394_roi_0001_p3",
+      "image_name": "Pro0711_A-2414-0_small_2_.937_2414_6270179302820364801_良品.jpg",
+      "image_path": "/data/wt/ramdisk/test_export_03/images/Pro0711_A-2414-0_small_2_.937_2414_6270179302820364801_良品.jpg",
+      "image_relative": "Pro0711_A-2414-0_small_2_.937_2414_6270179302820364801_良品.jpg",
+      "mask_path": "/data/wt/ramdisk/test_export_03/annotations/Pro0711_A-2414-0_small_2_.937_2414_6270179302820364801_良品.json",
+      "component_id": 1,
+      "area": 1,
+      "bbox_original": [
+        1135.0,
+        1381.0,
+        1911.0,
+        1520.0
+      ],
+      "bbox_feature": [
+        42.0,
+        27.0,
+        43.0,
+        28.0
+      ],
+      "query_patch_index": 0,
+      "patch_row": 19,
+      "patch_col": 43
+    }
+  ]
+}

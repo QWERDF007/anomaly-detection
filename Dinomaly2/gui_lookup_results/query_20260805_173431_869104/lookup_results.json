@@ -1,0 +1,85 @@
+{
+  "query_image": "/data/wt/ramdisk/leishi_026/test/bad/Pro0711_A-43-0_small_2_.633_43_1082032475235381761_良品.jpg",
+  "region_source": "gui_lookup_results/query_20260805_173431_869104/query_mask.png",
+  "top_k": 1,
+  "results": [
+    {
+      "query_image_id": "img_582a329f9f536503",
+      "query_image_name": "Pro0711_A-43-0_small_2_.633_43_1082032475235381761_良品.jpg",
+      "query_image_path": "/data/wt/ramdisk/leishi_026/test/bad/Pro0711_A-43-0_small_2_.633_43_1082032475235381761_良品.jpg",
+      "query_region_id": 1,
+      "query_region_area": 6529,
+      "query_region_bbox": [
+        1950.0,
+        474.0,
+        1984.0,
+        746.0
+      ],
+      "region_source": "gui_lookup_results/query_20260805_173431_869104/query_mask.png",
+      "library_type": "good",
+      "library_path": "/data/wt/two_stages/dinomaly/good",
+      "rank": 1,
+      "distance": 0.05234578251838684,
+      "vector_id": 123,
+      "image_id": "img_34658875a176aea9",
+      "roi_id": "img_34658875a176aea9_roi_0001",
+      "image_name": "Pro0711_A-10-0_small_2_.783_10_7134870919956893185_接头.jpg",
+      "image_path": "/data/wt/ramdisk/test_export_03/images/Pro0711_A-10-0_small_2_.783_10_7134870919956893185_接头.jpg",
+      "image_relative": "Pro0711_A-10-0_small_2_.783_10_7134870919956893185_接头.jpg",
+      "mask_path": "/data/wt/ramdisk/test_export_03/annotations/Pro0711_A-10-0_small_2_.783_10_7134870919956893185_接头.json",
+      "component_id": 1,
+      "area": 127875,
+      "bbox_original": [
+        1875.0,
+        0.0,
+        2150.0,
+        465.0
+      ],
+      "bbox_feature": [
+        42.0,
+        0.0,
+        48.0,
+        10.0
+      ]
+    },
+    {
+      "query_image_id": "img_582a329f9f536503",
+      "query_image_name": "Pro0711_A-43-0_small_2_.633_43_1082032475235381761_良品.jpg",
+      "query_image_path": "/data/wt/ramdisk/leishi_026/test/bad/Pro0711_A-43-0_small_2_.633_43_1082032475235381761_良品.jpg",
+      "query_region_id": 1,
+      "query_region_area": 6529,
+      "query_region_bbox": [
+        1950.0,
+        474.0,
+        1984.0,
+        746.0
+      ],
+      "region_source": "gui_lookup_results/query_20260805_173431_869104/query_mask.png",
+      "library_type": "anomaly",
+      "library_path": "/data/wt/two_stages/dinomaly/anomaly",
+      "rank": 1,
+      "distance": 0.08393433690071106,
+      "vector_id": 10,
+      "image_id": "img_7dc32a8e77458a27",
+      "roi_id": "img_7dc32a8e77458a27_roi_0002",
+      "image_name": "picture_0_2025_07_23_14_04_23_439.jpg",
+      "image_path": "/data/wt/ramdisk/test_export_03/images/picture_0_2025_07_23_14_04_23_439.jpg",
+      "image_relative": "picture_0_2025_07_23_14_04_23_439.jpg",
+      "mask_path": "/data/wt/ramdisk/test_export_03/annotations/picture_0_2025_07_23_14_04_23_439.json",
+      "component_id": 2,
+      "area": 6317,
+      "bbox_original": [
+        1670.0,
+        831.0,
+        1947.0,
+        882.0
+      ],
+      "bbox_feature": [
+        42.0,
+        17.0,
+        44.0,
+        18.0
+      ]
+    }
+  ]
+}

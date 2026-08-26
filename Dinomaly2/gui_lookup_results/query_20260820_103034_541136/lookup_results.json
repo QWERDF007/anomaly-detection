@@ -1,0 +1,217 @@
+{
+  "query_image": "/data/wt/ramdisk/leishi_026/test/bad/Pro0711_A-3384-0_small_2_.587_3384_4180508849718867457_异物.jpg",
+  "region_source": "gui_lookup_results/query_20260820_103034_541136/query_mask.png",
+  "top_k": 1,
+  "library_mode": "patch",
+  "feature_shape": [
+    48,
+    48
+  ],
+  "image_size": 672,
+  "crop_size": 672,
+  "patch_selection_rule": "top_ratio_by_score_among_feature_cells_whose_centre_is_inside_polygon(pointPolygonTest, centre mapped linearly back to the original image)",
+  "results": [
+    {
+      "query_image_id": "img_3695e502e7de6d98",
+      "query_image_name": "Pro0711_A-3384-0_small_2_.587_3384_4180508849718867457_异物.jpg",
+      "query_image_path": "/data/wt/ramdisk/leishi_026/test/bad/Pro0711_A-3384-0_small_2_.587_3384_4180508849718867457_异物.jpg",
+      "query_region_id": 1,
+      "query_region_area": 7191,
+      "query_region_bbox": [
+        1007.0,
+        1695.0,
+        1106.0,
+        1805.0
+      ],
+      "region_source": "gui_lookup_results/query_20260820_103034_541136/query_mask.png",
+      "library_type": "good",
+      "library_path": "/data/wt/two_stages/base_672_15k/good",
+      "rank": 1,
+      "distance": 0.287492573261261,
+      "vector_id": 1291,
+      "image_id": "img_34658875a176aea9",
+      "roi_id": "img_34658875a176aea9_roi_0001_p14",
+      "image_name": "Pro0711_A-10-0_small_2_.783_10_7134870919956893185_接头.jpg",
+      "image_path": "/data/wt/ramdisk/test_export_03/images/Pro0711_A-10-0_small_2_.783_10_7134870919956893185_接头.jpg",
+      "image_relative": "Pro0711_A-10-0_small_2_.783_10_7134870919956893185_接头.jpg",
+      "mask_path": "/data/wt/ramdisk/test_export_03/annotations/Pro0711_A-10-0_small_2_.783_10_7134870919956893185_接头.json",
+      "component_id": 1,
+      "area": 1,
+      "bbox_original": [
+        89.23607635498047,
+        1759.7354736328125,
+        1942.9757080078125,
+        1864.1715087890625
+      ],
+      "bbox_feature": [
+        17.0,
+        35.0,
+        18.0,
+        36.0
+      ],
+      "patch_bbox_original": [
+        761.4583333333333,
+        1801.0416666666667,
+        806.25,
+        1852.5
+      ],
+      "patch_center_original": [
+        783.8541666666666,
+        1826.7708333333335
+      ],
+      "patch_center_inside_mask": true,
+      "patch_bbox_resized": [
+        761.4583333333333,
+        1801.0416666666667,
+        806.25,
+        1852.5
+      ],
+      "patch_center_resized": [
+        783.8541666666666,
+        1826.7708333333335
+      ],
+      "feature_shape": [
+        48,
+        48
+      ],
+      "query_patch_index": 0,
+      "patch_row": 34,
+      "patch_col": 23,
+      "query_feature_shape": [
+        48,
+        48
+      ],
+      "query_patch_bbox_feature": [
+        23.0,
+        34.0,
+        24.0,
+        35.0
+      ],
+      "query_patch_center_feature": [
+        23.5,
+        34.5
+      ],
+      "query_patch_bbox_resized": [
+        1030.2083333333333,
+        1749.5833333333335,
+        1075.0,
+        1801.0416666666667
+      ],
+      "query_patch_center_resized": [
+        1052.6041666666665,
+        1775.3125
+      ],
+      "query_patch_bbox_original": [
+        1030.2083333333333,
+        1749.5833333333335,
+        1075.0,
+        1801.0416666666667
+      ],
+      "query_patch_center_original": [
+        1052.6041666666665,
+        1775.3125
+      ]
+    },
+    {
+      "query_image_id": "img_3695e502e7de6d98",
+      "query_image_name": "Pro0711_A-3384-0_small_2_.587_3384_4180508849718867457_异物.jpg",
+      "query_image_path": "/data/wt/ramdisk/leishi_026/test/bad/Pro0711_A-3384-0_small_2_.587_3384_4180508849718867457_异物.jpg",
+      "query_region_id": 1,
+      "query_region_area": 7191,
+      "query_region_bbox": [
+        1007.0,
+        1695.0,
+        1106.0,
+        1805.0
+      ],
+      "region_source": "gui_lookup_results/query_20260820_103034_541136/query_mask.png",
+      "library_type": "anomaly",
+      "library_path": "/data/wt/two_stages/base_672_15k/anomaly",
+      "rank": 1,
+      "distance": 0.12040330469608307,
+      "vector_id": 345,
+      "image_id": "img_9b66aab5a4779349",
+      "roi_id": "img_9b66aab5a4779349_roi_0000_p0",
+      "image_name": "Pro0711_A-1975-0_small_2_.778_1975_5333430354002740225_异物.jpg",
+      "image_path": "/data/wt/ramdisk/test_export_03/images/Pro0711_A-1975-0_small_2_.778_1975_5333430354002740225_异物.jpg",
+      "image_relative": "Pro0711_A-1975-0_small_2_.778_1975_5333430354002740225_异物.jpg",
+      "mask_path": "/data/wt/ramdisk/test_export_03/annotations/Pro0711_A-1975-0_small_2_.778_1975_5333430354002740225_异物.json",
+      "component_id": 0,
+      "area": 1,
+      "bbox_original": [
+        958.0083618164062,
+        1762.8551025390625,
+        1094.4986572265625,
+        1860.34814453125
+      ],
+      "bbox_feature": [
+        22.0,
+        35.0,
+        23.0,
+        36.0
+      ],
+      "patch_bbox_original": [
+        985.4166666666666,
+        1801.0416666666667,
+        1030.2083333333333,
+        1852.5
+      ],
+      "patch_center_original": [
+        1007.8125,
+        1826.7708333333335
+      ],
+      "patch_center_inside_mask": true,
+      "patch_bbox_resized": [
+        985.4166666666666,
+        1801.0416666666667,
+        1030.2083333333333,
+        1852.5
+      ],
+      "patch_center_resized": [
+        1007.8125,
+        1826.7708333333335
+      ],
+      "feature_shape": [
+        48,
+        48
+      ],
+      "query_patch_index": 0,
+      "patch_row": 34,
+      "patch_col": 23,
+      "query_feature_shape": [
+        48,
+        48
+      ],
+      "query_patch_bbox_feature": [
+        23.0,
+        34.0,
+        24.0,
+        35.0
+      ],
+      "query_patch_center_feature": [
+        23.5,
+        34.5
+      ],
+      "query_patch_bbox_resized": [
+        1030.2083333333333,
+        1749.5833333333335,
+        1075.0,
+        1801.0416666666667
+      ],
+      "query_patch_center_resized": [
+        1052.6041666666665,
+        1775.3125
+      ],
+      "query_patch_bbox_original": [
+        1030.2083333333333,
+        1749.5833333333335,
+        1075.0,
+        1801.0416666666667
+      ],
+      "query_patch_center_original": [
+        1052.6041666666665,
+        1775.3125
+      ]
+    }
+  ]
+}

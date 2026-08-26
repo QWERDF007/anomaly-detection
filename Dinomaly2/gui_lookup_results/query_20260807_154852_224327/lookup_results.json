@@ -1,0 +1,175 @@
+{
+  "query_image": "/data/wt/ramdisk/leishi_026/test/bad/picture_4_2025_07_28_09_52_00_279.jpg",
+  "region_source": "gui_lookup_results/query_20260807_154852_224327/query_mask.png",
+  "top_k": 1,
+  "results": [
+    {
+      "query_image_id": "img_7db979cdc486917a",
+      "query_image_name": "picture_4_2025_07_28_09_52_00_279.jpg",
+      "query_image_path": "/data/wt/ramdisk/leishi_026/test/bad/picture_4_2025_07_28_09_52_00_279.jpg",
+      "query_region_id": 1,
+      "query_region_area": 9966,
+      "query_region_bbox": [
+        714.0,
+        1971.0,
+        813.0,
+        2433.0
+      ],
+      "region_source": "gui_lookup_results/query_20260807_154852_224327/query_mask.png",
+      "library_type": "good",
+      "library_path": "/data/wt/two_stages/base_patch/good",
+      "rank": 1,
+      "distance": 0.19508355855941772,
+      "vector_id": 264,
+      "image_id": "img_8aac19963b4fb17b",
+      "roi_id": "img_8aac19963b4fb17b_roi_0011_p0",
+      "image_name": "picture_0_2025_07_23_11_44_04_659.jpg",
+      "image_path": "/data/wt/ramdisk/test_export_03/images/picture_0_2025_07_23_11_44_04_659.jpg",
+      "image_relative": "picture_0_2025_07_23_11_44_04_659.jpg",
+      "mask_path": "/data/wt/ramdisk/test_export_03/annotations/picture_0_2025_07_23_11_44_04_659.json",
+      "component_id": 11,
+      "area": 1,
+      "bbox_original": [
+        655.0,
+        1204.0,
+        1010.0,
+        1847.0
+      ],
+      "bbox_feature": [
+        15.0,
+        32.0,
+        16.0,
+        33.0
+      ],
+      "query_patch_index": 0,
+      "patch_row": 46,
+      "patch_col": 17
+    },
+    {
+      "query_image_id": "img_7db979cdc486917a",
+      "query_image_name": "picture_4_2025_07_28_09_52_00_279.jpg",
+      "query_image_path": "/data/wt/ramdisk/leishi_026/test/bad/picture_4_2025_07_28_09_52_00_279.jpg",
+      "query_region_id": 1,
+      "query_region_area": 9966,
+      "query_region_bbox": [
+        714.0,
+        1971.0,
+        813.0,
+        2433.0
+      ],
+      "region_source": "gui_lookup_results/query_20260807_154852_224327/query_mask.png",
+      "library_type": "anomaly",
+      "library_path": "/data/wt/two_stages/base_patch/anomaly",
+      "rank": 1,
+      "distance": 0.14274469017982483,
+      "vector_id": 126,
+      "image_id": "img_223a4f629697f2ab",
+      "roi_id": "img_223a4f629697f2ab_roi_0001_p1",
+      "image_name": "picture_6_2025_07_21_20_07_24_156.jpg",
+      "image_path": "/data/wt/ramdisk/test_export_03/images/picture_6_2025_07_21_20_07_24_156.jpg",
+      "image_relative": "picture_6_2025_07_21_20_07_24_156.jpg",
+      "mask_path": "/data/wt/ramdisk/test_export_03/annotations/picture_6_2025_07_21_20_07_24_156.json",
+      "component_id": 1,
+      "area": 1,
+      "bbox_original": [
+        187.0,
+        1900.0,
+        385.0,
+        2379.0
+      ],
+      "bbox_feature": [
+        8.0,
+        45.0,
+        9.0,
+        46.0
+      ],
+      "query_patch_index": 0,
+      "patch_row": 46,
+      "patch_col": 17
+    },
+    {
+      "query_image_id": "img_7db979cdc486917a",
+      "query_image_name": "picture_4_2025_07_28_09_52_00_279.jpg",
+      "query_image_path": "/data/wt/ramdisk/leishi_026/test/bad/picture_4_2025_07_28_09_52_00_279.jpg",
+      "query_region_id": 1,
+      "query_region_area": 9966,
+      "query_region_bbox": [
+        714.0,
+        1971.0,
+        813.0,
+        2433.0
+      ],
+      "region_source": "gui_lookup_results/query_20260807_154852_224327/query_mask.png",
+      "library_type": "good",
+      "library_path": "/data/wt/two_stages/base_patch/good",
+      "rank": 1,
+      "distance": 0.1372126340866089,
+      "vector_id": 270,
+      "image_id": "img_8aac19963b4fb17b",
+      "roi_id": "img_8aac19963b4fb17b_roi_0011_p6",
+      "image_name": "picture_0_2025_07_23_11_44_04_659.jpg",
+      "image_path": "/data/wt/ramdisk/test_export_03/images/picture_0_2025_07_23_11_44_04_659.jpg",
+      "image_relative": "picture_0_2025_07_23_11_44_04_659.jpg",
+      "mask_path": "/data/wt/ramdisk/test_export_03/annotations/picture_0_2025_07_23_11_44_04_659.json",
+      "component_id": 11,
+      "area": 1,
+      "bbox_original": [
+        655.0,
+        1204.0,
+        1010.0,
+        1847.0
+      ],
+      "bbox_feature": [
+        16.0,
+        32.0,
+        17.0,
+        33.0
+      ],
+      "query_patch_index": 1,
+      "patch_row": 42,
+      "patch_col": 16
+    },
+    {
+      "query_image_id": "img_7db979cdc486917a",
+      "query_image_name": "picture_4_2025_07_28_09_52_00_279.jpg",
+      "query_image_path": "/data/wt/ramdisk/leishi_026/test/bad/picture_4_2025_07_28_09_52_00_279.jpg",
+      "query_region_id": 1,
+      "query_region_area": 9966,
+      "query_region_bbox": [
+        714.0,
+        1971.0,
+        813.0,
+        2433.0
+      ],
+      "region_source": "gui_lookup_results/query_20260807_154852_224327/query_mask.png",
+      "library_type": "anomaly",
+      "library_path": "/data/wt/two_stages/base_patch/anomaly",
+      "rank": 1,
+      "distance": 0.18291963636875153,
+      "vector_id": 115,
+      "image_id": "img_5d1ee1dd14744005",
+      "roi_id": "img_5d1ee1dd14744005_roi_0004_p0",
+      "image_name": "picture_2_2025_07_28_09_50_54_413.jpg",
+      "image_path": "/data/wt/ramdisk/test_export_03/images/picture_2_2025_07_28_09_50_54_413.jpg",
+      "image_relative": "picture_2_2025_07_28_09_50_54_413.jpg",
+      "mask_path": "/data/wt/ramdisk/test_export_03/annotations/picture_2_2025_07_28_09_50_54_413.json",
+      "component_id": 4,
+      "area": 1,
+      "bbox_original": [
+        500.0,
+        1284.0,
+        566.0,
+        1945.0
+      ],
+      "bbox_feature": [
+        12.0,
+        27.0,
+        13.0,
+        28.0
+      ],
+      "query_patch_index": 1,
+      "patch_row": 42,
+      "patch_col": 16
+    }
+  ]
+}

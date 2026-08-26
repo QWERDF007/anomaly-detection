@@ -1,0 +1,217 @@
+{
+  "query_image": "/data/wt/ramdisk/leishi_026/test/bad/Pro0711_A-5588-0_small_2_.728_5588_1442319250380718081_良品.jpg",
+  "region_source": "gui_lookup_results/query_20260810_132053_259683/query_mask.png",
+  "top_k": 1,
+  "library_mode": "patch",
+  "feature_shape": [
+    48,
+    48
+  ],
+  "image_size": 672,
+  "crop_size": 672,
+  "patch_selection_rule": "top_ratio_by_score_among_feature_cells_whose_center_is_inside_mask",
+  "results": [
+    {
+      "query_image_id": "img_030852461b6fae44",
+      "query_image_name": "Pro0711_A-5588-0_small_2_.728_5588_1442319250380718081_良品.jpg",
+      "query_image_path": "/data/wt/ramdisk/leishi_026/test/bad/Pro0711_A-5588-0_small_2_.728_5588_1442319250380718081_良品.jpg",
+      "query_region_id": 1,
+      "query_region_area": 21665,
+      "query_region_bbox": [
+        506.0,
+        6.0,
+        634.0,
+        278.0
+      ],
+      "region_source": "gui_lookup_results/query_20260810_132053_259683/query_mask.png",
+      "library_type": "good",
+      "library_path": "/data/wt/two_stages/base_patch/good",
+      "rank": 1,
+      "distance": 0.20604673027992249,
+      "vector_id": 1376,
+      "image_id": "img_34658875a176aea9",
+      "roi_id": "img_34658875a176aea9_roi_0002_p0",
+      "image_name": "Pro0711_A-10-0_small_2_.783_10_7134870919956893185_接头.jpg",
+      "image_path": "/data/wt/ramdisk/test_export_03/images/Pro0711_A-10-0_small_2_.783_10_7134870919956893185_接头.jpg",
+      "image_relative": "Pro0711_A-10-0_small_2_.783_10_7134870919956893185_接头.jpg",
+      "mask_path": "/data/wt/ramdisk/test_export_03/annotations/Pro0711_A-10-0_small_2_.783_10_7134870919956893185_接头.json",
+      "component_id": 2,
+      "area": 1,
+      "bbox_original": [
+        170.0,
+        245.0,
+        355.0,
+        374.0
+      ],
+      "bbox_feature": [
+        5.0,
+        6.0,
+        6.0,
+        7.0
+      ],
+      "patch_bbox_original": [
+        223.95833333333334,
+        308.75,
+        268.75,
+        360.2083333333333
+      ],
+      "patch_center_original": [
+        246.35416666666666,
+        334.4791666666667
+      ],
+      "patch_center_inside_mask": true,
+      "patch_bbox_resized": [
+        70.0,
+        84.0,
+        84.0,
+        98.0
+      ],
+      "patch_center_resized": [
+        77.0,
+        91.0
+      ],
+      "feature_shape": [
+        48,
+        48
+      ],
+      "query_patch_index": 0,
+      "patch_row": 1,
+      "patch_col": 13,
+      "query_feature_shape": [
+        48,
+        48
+      ],
+      "query_patch_bbox_feature": [
+        13.0,
+        1.0,
+        14.0,
+        2.0
+      ],
+      "query_patch_center_feature": [
+        13.5,
+        1.5
+      ],
+      "query_patch_bbox_resized": [
+        182.0,
+        14.0,
+        196.0,
+        28.0
+      ],
+      "query_patch_center_resized": [
+        189.0,
+        21.0
+      ],
+      "query_patch_bbox_original": [
+        582.2916666666666,
+        51.458333333333336,
+        627.0833333333334,
+        102.91666666666667
+      ],
+      "query_patch_center_original": [
+        604.6875,
+        77.1875
+      ]
+    },
+    {
+      "query_image_id": "img_030852461b6fae44",
+      "query_image_name": "Pro0711_A-5588-0_small_2_.728_5588_1442319250380718081_良品.jpg",
+      "query_image_path": "/data/wt/ramdisk/leishi_026/test/bad/Pro0711_A-5588-0_small_2_.728_5588_1442319250380718081_良品.jpg",
+      "query_region_id": 1,
+      "query_region_area": 21665,
+      "query_region_bbox": [
+        506.0,
+        6.0,
+        634.0,
+        278.0
+      ],
+      "region_source": "gui_lookup_results/query_20260810_132053_259683/query_mask.png",
+      "library_type": "anomaly",
+      "library_path": "/data/wt/two_stages/base_patch/anomaly",
+      "rank": 1,
+      "distance": 0.20762516558170319,
+      "vector_id": 111,
+      "image_id": "img_02fb8cbe99b6da89",
+      "roi_id": "img_02fb8cbe99b6da89_roi_0001_p8",
+      "image_name": "picture_0_2025_07_28_10_20_55_103.jpg",
+      "image_path": "/data/wt/ramdisk/test_export_03/images/picture_0_2025_07_28_10_20_55_103.jpg",
+      "image_relative": "picture_0_2025_07_28_10_20_55_103.jpg",
+      "mask_path": "/data/wt/ramdisk/test_export_03/annotations/picture_0_2025_07_28_10_20_55_103.json",
+      "component_id": 1,
+      "area": 1,
+      "bbox_original": [
+        1368.0,
+        58.0,
+        1526.0,
+        936.0
+      ],
+      "bbox_feature": [
+        33.0,
+        2.0,
+        34.0,
+        3.0
+      ],
+      "patch_bbox_original": [
+        1478.125,
+        102.91666666666667,
+        1522.9166666666667,
+        154.375
+      ],
+      "patch_center_original": [
+        1500.5208333333333,
+        128.64583333333334
+      ],
+      "patch_center_inside_mask": true,
+      "patch_bbox_resized": [
+        462.0,
+        28.0,
+        476.0,
+        42.0
+      ],
+      "patch_center_resized": [
+        469.0,
+        35.0
+      ],
+      "feature_shape": [
+        48,
+        48
+      ],
+      "query_patch_index": 0,
+      "patch_row": 1,
+      "patch_col": 13,
+      "query_feature_shape": [
+        48,
+        48
+      ],
+      "query_patch_bbox_feature": [
+        13.0,
+        1.0,
+        14.0,
+        2.0
+      ],
+      "query_patch_center_feature": [
+        13.5,
+        1.5
+      ],
+      "query_patch_bbox_resized": [
+        182.0,
+        14.0,
+        196.0,
+        28.0
+      ],
+      "query_patch_center_resized": [
+        189.0,
+        21.0
+      ],
+      "query_patch_bbox_original": [
+        582.2916666666666,
+        51.458333333333336,
+        627.0833333333334,
+        102.91666666666667
+      ],
+      "query_patch_center_original": [
+        604.6875,
+        77.1875
+      ]
+    }
+  ]
+}
