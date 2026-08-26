@@ -73,7 +73,16 @@
 
 ---
 
-### 5. 推理性能与显存占用图表
+### 5. 模型训练与推理时间对比图表
+#### (1) 模型训练与建库耗时随样本量 N 变化对比 (448x448)
+![05_training_time_comparison](file:///F:/Projects/anomaly-detection/charts/05_training_time_comparison.png)
+
+#### (2) 各方法单图端到端推理时延随样本量 N 变化对比 (448x448)
+![06_inference_latency_comparison](file:///F:/Projects/anomaly-detection/charts/06_inference_latency_comparison.png)
+
+---
+
+### 6. 推理性能与显存占用图表
 #### (1) Dinomaly2 单张纯前向推理时延 (FP32 vs FP16 加速)
 ![03_inference_latency_fp32_vs_fp16](file:///F:/Projects/anomaly-detection/charts/03_inference_latency_fp32_vs_fp16.png)
 

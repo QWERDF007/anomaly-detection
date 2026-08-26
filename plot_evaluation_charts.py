@@ -313,19 +313,57 @@ def plot_all_benchmark_charts(chart_dir: Union[str, Path]) -> None:
         fig.savefig(chart_dir / f"04_false_alarms_fp_s{s}.png")
         plt.close(fig)
 
-    # VRAM Charts (Training vs Inference)
+    # 5. Throughput and Latency Charts
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    sizes_str = ["224x224", "448x448", "672x672"]
+    x = np.arange(len(sizes_str))
+    w = 0.35
+    fp32_lat = [10.9, 51.1, 153.9]
+    fp16_lat = [4.88, 33.56, 101.50]
+    ax.bar(x - w/2, fp32_lat, width=w, label="FP32 纯前向时延 (ms)", color="#1f77b4", alpha=0.85)
+    ax.bar(x + w/2, fp16_lat, width=w, label="FP16 (AMP) 加速时延 (ms)", color="#ff7f0e", alpha=0.85)
+    for i in range(len(sizes_str)):
+        speedup = fp32_lat[i] / fp16_lat[i]
+        ax.text(x[i] + w/2, fp16_lat[i] + 3, f"{speedup:.2f}x", ha="center", va="bottom", fontsize=10, fontweight="bold", color="#d62728")
+    ax.set_title("Dinomaly2 单张纯前向推理时延 (FP32 vs FP16 加速)", fontsize=12, fontweight="bold", pad=10)
+    ax.set_ylabel("单图时延 (ms)", fontsize=10)
+    ax.set_xticks(x)
+    ax.set_xticklabels(sizes_str, fontsize=10)
+    ax.grid(True, linestyle=":", alpha=0.6, axis="y")
+    ax.legend(loc="upper left", fontsize=9.5)
+    plt.tight_layout()
+    fig.savefig(chart_dir / "03_inference_latency_fp32_vs_fp16.png")
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    two_stage_fps = [196.1, 29.2, 9.8]
+    ax.bar(x, two_stage_fps, width=0.45, color="#2ca02c", alpha=0.85, label="Two-Stage 端到端吞吐率")
+    for i, v in enumerate(two_stage_fps):
+        ax.text(x[i], v + 3, f"{v:.1f} FPS", ha="center", va="bottom", fontsize=10, fontweight="bold")
+    ax.set_title("Two-Stage 全流程端到端吞吐率对比 (FPS)", fontsize=12, fontweight="bold", pad=10)
+    ax.set_ylabel("吞吐率 (FPS)", fontsize=10)
+    ax.set_xticks(x)
+    ax.set_xticklabels(sizes_str, fontsize=10)
+    ax.set_ylim([0, 230])
+    ax.grid(True, linestyle=":", alpha=0.6, axis="y")
+    ax.legend(loc="upper right", fontsize=9.5)
+    plt.tight_layout()
+    fig.savefig(chart_dir / "04_inference_throughput_fps.png")
+    plt.close(fig)
+
+    # 6. VRAM Charts (Training vs Inference)
     fig, ax = plt.subplots(figsize=(8, 5.5))
     categories = ["Dinomaly2\n(Size 224, B8)", "Dinomaly2\n(Size 448, B4)", "Dinomaly2\n(Size 672, B2)", "PatchCore\n(Size 448, N400)"]
     vram_alloc = [2.27, 4.41, 6.78, 5.89]
     vram_resv = [2.95, 5.20, 7.42, 6.45]
-    x = np.arange(len(categories))
-    w = 0.35
-    ax.bar(x - w/2, vram_alloc, width=w, label="活跃分配显存 (Allocated)", color="#1f77b4", alpha=0.85)
-    ax.bar(x + w/2, vram_resv, width=w, label="PyTorch 预留显存 (Reserved)", color="#aec7e8", alpha=0.85)
+    x_v = np.arange(len(categories))
+    w_v = 0.35
+    ax.bar(x_v - w_v/2, vram_alloc, width=w_v, label="活跃分配显存 (Allocated)", color="#1f77b4", alpha=0.85)
+    ax.bar(x_v + w_v/2, vram_resv, width=w_v, label="PyTorch 预留显存 (Reserved)", color="#aec7e8", alpha=0.85)
     ax.axhline(8.0, color="#d62728", linestyle="--", lw=1.8, label="RTX 4060 硬件显存上限 (8.0 GB)")
     ax.set_title("不同网络与尺寸下的训练/建库峰值显存占用对比", fontsize=12, fontweight="bold", pad=12)
     ax.set_ylabel("显存占用 VRAM (GB)", fontsize=10)
-    ax.set_xticks(x)
+    ax.set_xticks(x_v)
     ax.set_xticklabels(categories, fontsize=9.5)
     ax.set_ylim([0, 9.2])
     ax.grid(True, linestyle=":", alpha=0.6, axis="y")
@@ -336,22 +374,78 @@ def plot_all_benchmark_charts(chart_dir: Union[str, Path]) -> None:
 
     fig, ax = plt.subplots(figsize=(8.5, 5.5))
     res_labels = ["224x224", "448x448", "672x672"]
-    x = np.arange(len(res_labels))
-    w = 0.2
-    ax.bar(x - 1.5*w, [1.35, 1.82, 2.54], width=w, label="Dinomaly2 (FP32)", color="#1f77b4", alpha=0.85)
-    ax.bar(x - 0.5*w, [1.38, 1.85, 2.58], width=w, label="Two-Stage (FP32)", color="#2ca02c", alpha=0.85)
-    ax.bar(x + 0.5*w, [0.88, 1.15, 1.62], width=w, label="Two-Stage (FP16 AMP)", color="#ff7f0e", alpha=0.85)
-    ax.bar(x + 1.5*w, [0.72, 1.25, 2.10], width=w, label="PatchCore (GPU FAISS)", color="#d62728", alpha=0.85)
+    x_i = np.arange(len(res_labels))
+    w_i = 0.2
+    ax.bar(x_i - 1.5*w_i, [1.35, 1.82, 2.54], width=w_i, label="Dinomaly2 (FP32)", color="#1f77b4", alpha=0.85)
+    ax.bar(x_i - 0.5*w_i, [1.38, 1.85, 2.58], width=w_i, label="Two-Stage (FP32)", color="#2ca02c", alpha=0.85)
+    ax.bar(x_i + 0.5*w_i, [0.88, 1.15, 1.62], width=w_i, label="Two-Stage (FP16 AMP)", color="#ff7f0e", alpha=0.85)
+    ax.bar(x_i + 1.5*w_i, [0.72, 1.25, 2.10], width=w_i, label="PatchCore (GPU FAISS)", color="#d62728", alpha=0.85)
     ax.axhline(8.0, color="#d62728", linestyle="--", lw=1.8, label="RTX 4060 硬件显存上限 (8.0 GB)")
     ax.set_title("各方法在不同输入分辨率下的单张推理显存占用", fontsize=12, fontweight="bold", pad=12)
     ax.set_ylabel("显存占用 VRAM (GB)", fontsize=10)
-    ax.set_xticks(x)
+    ax.set_xticks(x_i)
     ax.set_xticklabels(res_labels, fontsize=10)
     ax.set_ylim([0, 9.2])
     ax.grid(True, linestyle=":", alpha=0.6, axis="y")
     ax.legend(loc="upper left", fontsize=9.5)
     plt.tight_layout()
     fig.savefig(chart_dir / "07_inference_vram_usage.png")
+    plt.close(fig)
+
+    # 7. NEW: Training Time Comparison (训练时间对比图表)
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    x_n = np.arange(len(n_samples))
+    w_t = 0.25
+    # Data for 448x448
+    dino_train_448 = [1032.5/60, 1046.8/60, 1024.2/60, 1006.9/60] # min
+    patch_train_448 = [26.6/60, 76.8/60, 276.1/60, 964.9/60] # min
+    bank_train_448 = [6.1/60, 6.2/60, 6.5/60, 6.3/60] # min
+    ax.bar(x_n - w_t, dino_train_448, width=w_t, label="Dinomaly2 深度训练 (2000 iters)", color="#1f77b4", alpha=0.85)
+    ax.bar(x_n, patch_train_448, width=w_t, label="PatchCore Coreset 拟合采样 (实测)", color="#d62728", alpha=0.85)
+    ax.bar(x_n + w_t, bank_train_448, width=w_t, label="Two-Stage 二阶段建库", color="#2ca02c", alpha=0.85)
+    for i in range(len(n_samples)):
+        ax.text(x_n[i] - w_t, dino_train_448[i] + 0.3, f"{dino_train_448[i]:.1f}m", ha="center", va="bottom", fontsize=8.5)
+        ax.text(x_n[i], patch_train_448[i] + 0.3, f"{patch_train_448[i]:.1f}m", ha="center", va="bottom", fontsize=8.5, color="#d62728", fontweight="bold")
+        ax.text(x_n[i] + w_t, bank_train_448[i] + 0.3, f"{bank_train_448[i]*60:.0f}s", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
+    ax.set_title("模型训练与建库耗时随样本量 N 变化对比 (448x448)", fontsize=12, fontweight="bold", pad=12)
+    ax.set_xlabel("良品训练样本量 (N)", fontsize=10)
+    ax.set_ylabel("训练耗时 (分钟 min)", fontsize=10)
+    ax.set_xticks(x_n)
+    ax.set_xticklabels(n_samples)
+    ax.set_ylim([0, 20])
+    ax.grid(True, linestyle=":", alpha=0.6, axis="y")
+    ax.legend(loc="upper left", fontsize=9.5)
+    plt.tight_layout()
+    fig.savefig(chart_dir / "05_training_time_comparison.png")
+    fig.savefig(chart_dir / "08_training_time_comparison.png")
+    plt.close(fig)
+
+    # 8. NEW: Inference Latency Comparison (推理时间对比图表)
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    x_n = np.arange(len(n_samples))
+    w_l = 0.25
+    # Latency for 448x448 (ms)
+    two_stage_lat = [34.2, 34.2, 34.2, 34.2]
+    dino_lat = [51.1, 51.1, 51.1, 51.1]
+    patch_lat = [225.8, 449.4, 1067.7, 2118.0]
+    ax.bar(x_n - w_l, two_stage_lat, width=w_l, label="Two-Stage (FP16 门控短路, 29.2 FPS)", color="#2ca02c", alpha=0.85)
+    ax.bar(x_n, dino_lat, width=w_l, label="Dinomaly2 (纯重构 FP32, 19.6 FPS)", color="#1f77b4", alpha=0.85)
+    ax.bar(x_n + w_l, patch_lat, width=w_l, label="PatchCore (实测 CPU FAISS, 0.47~4.4 FPS)", color="#d62728", alpha=0.85)
+    for i in range(len(n_samples)):
+        ax.text(x_n[i] - w_l, two_stage_lat[i] + 30, f"{two_stage_lat[i]:.0f}ms", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+        ax.text(x_n[i], dino_lat[i] + 30, f"{dino_lat[i]:.0f}ms", ha="center", va="bottom", fontsize=8.5)
+        ax.text(x_n[i] + w_l, patch_lat[i] + 30, f"{patch_lat[i]:.0f}ms\n({1000/patch_lat[i]:.1f} FPS)", ha="center", va="bottom", fontsize=8.5, color="#d62728", fontweight="bold")
+    ax.set_title("各方法在不同样本量下的单图端到端推理时延对比 (448x448)", fontsize=12, fontweight="bold", pad=12)
+    ax.set_xlabel("良品训练样本量 (N)", fontsize=10)
+    ax.set_ylabel("单图端到端耗时 (毫秒 ms)", fontsize=10)
+    ax.set_xticks(x_n)
+    ax.set_xticklabels(n_samples)
+    ax.set_ylim([0, 2500])
+    ax.grid(True, linestyle=":", alpha=0.6, axis="y")
+    ax.legend(loc="upper left", fontsize=9.5)
+    plt.tight_layout()
+    fig.savefig(chart_dir / "06_inference_latency_comparison.png")
+    fig.savefig(chart_dir / "09_inference_latency_comparison.png")
     plt.close(fig)
 
     print(f"[plot_charts] full suite generated in -> {chart_dir}")
@@ -372,3 +466,4 @@ if __name__ == "__main__":
         plot_single_run_charts(args.results, out_dir, low_thr=args.low, high_thr=args.high)
     if args.full_benchmark or not args.results:
         plot_all_benchmark_charts(out_dir)
+

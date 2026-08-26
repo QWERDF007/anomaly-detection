@@ -2,15 +2,20 @@
 """Generate comprehensive benchmark report for 50/100/200/400 × 224/448/672 with VRAM, max_iters 2000.
 Uses measured VRAM from vram_measure.json and estimated timings.
 """
-import json, time
+import argparse, json, time
 from pathlib import Path
 from datetime import datetime
 
-outs_dir = Path(r"F:\tmp\outs")
+parser = argparse.ArgumentParser(description="Generate multisize benchmark report")
+parser.add_argument("--outs_dir", type=str, default=r"F:\tmp\0826", help="Outputs directory")
+args = parser.parse_args()
+
+outs_dir = Path(args.outs_dir).expanduser().resolve()
 vram_path = outs_dir / "vram_measure.json"
+if not vram_path.is_file() and (Path(r"F:\tmp\outs\vram_measure.json")).is_file():
+    vram_path = Path(r"F:\tmp\outs\vram_measure.json")
 report_path = outs_dir / "BENCHMARK_DETAILED_REPORT_224_448_672.md"
 project_report = Path(r"F:\Projects\anomaly-detection\BENCHMARK_DETAILED_REPORT.md")
-# also update BENCHMARK_REPORT.md copy
 project_report2 = Path(r"F:\Projects\anomaly-detection\BENCHMARK_REPORT.md")
 
 # Load VRAM
