@@ -144,8 +144,8 @@ class RandomRotate90(object):
 class CustomDataset(torch.utils.data.Dataset):
     """Dataset adapter for one custom anomaly-detection dataset.
 
-    Expected layout::
-
+    Supports two modes:
+    1. Directory layout:
         dataset/
         ├── train/
         │   └── good/                 # good is optional; flat train is OK
@@ -155,38 +155,82 @@ class CustomDataset(torch.utils.data.Dataset):
         └── ground_truth/
             └── scratch/
 
-    root is treated as one dataset. It is never enumerated as a list of
-    categories, so a top-level train directory cannot become train/train.
+    2. Text file / list file (e.g. ``train.txt`` or ``--data_path train_list.txt``):
+        Each line can be:
+        - ``<image_path>`` (normal image for training or testing)
+        - ``<image_path> <label_or_type_or_mask>`` (e.g. ``path/001.png 0`` or ``path/002.png crack`` or ``path/002.png mask.png``)
+        - ``<image_path> <mask_path> <label_or_type>``
+
+        Relative paths in the text file are resolved relative to the text file directory,
+        or current working directory.
     """
 
     IMAGE_EXTENSIONS = {'.bmp', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp'}
+    LIST_EXTENSIONS = {'.txt', '.list', '.csv', '.tsv'}
     NORMAL_NAMES = {'good', 'normal', 'normals', 'ok', 'positive'}
 
-    def __init__(self, root, transform, gt_transform, phase):
+    def __init__(self, root, transform, gt_transform, phase, txt_file=None):
         if phase not in {'train', 'test'}:
             raise ValueError("phase must be 'train' or 'test'")
-
-        self.root = Path(root).expanduser()
-        # 4060单卡适配：支持 txt 列表路径（路径含空格/中文需 ""），兼容 F:\tmp\outs\data_splits\train_*.txt
-        # 若 root 是 .txt 文件，则按行读取图像路径，train 视为 normal，test 按缺省无 mask 的图像级评估
-        self._is_txt_list = self.root.is_file() and self.root.suffix.lower() == ".txt"
-        if self._is_txt_list:
-            # txt 列表模式：直接读取，Path 自动处理中文/空格
-            self.transform = transform
-            self.gt_transform = gt_transform
-            self.phase = phase
-            self.img_path = self.root  # txt 本身
-            self.gt_path = self.root.parent / "ground_truth"
-            self.img_paths, self.gt_paths, self.labels, self.types = self._load_from_txt()
-            self.cls_idx = 0
-            return
-
-        if not self.root.is_dir():
-            raise FileNotFoundError(f'Custom dataset directory does not exist: {self.root}')
 
         self.transform = transform
         self.gt_transform = gt_transform
         self.phase = phase
+        self.cls_idx = 0
+
+        target_path = Path(txt_file).expanduser() if txt_file else Path(root).expanduser()
+
+        # Mode 1: root or txt_file is directly a list file (.txt, .list, etc.)
+        if target_path.is_file() and (target_path.suffix.lower() in self.LIST_EXTENSIONS or txt_file is not None):
+            self.root = target_path.parent if txt_file is None else Path(root).expanduser()
+            file_to_load = target_path
+
+            if txt_file is None and phase == 'test':
+                stem_lower = target_path.stem.lower()
+                if 'train' in stem_lower:
+                    # Look for corresponding test list file in the same directory
+                    test_name = target_path.name.replace('train', 'test').replace('Train', 'Test')
+                    test_cand = target_path.parent / test_name
+                    if test_cand.is_file():
+                        file_to_load = test_cand
+                    elif (target_path.parent / 'test.txt').is_file():
+                        file_to_load = target_path.parent / 'test.txt'
+                    elif (target_path.parent / 'test_list.txt').is_file():
+                        file_to_load = target_path.parent / 'test_list.txt'
+                    else:
+                        raise FileNotFoundError(
+                            f"Custom test split file list not found for {target_path}. "
+                            f"(Checked {test_cand} and {target_path.parent / 'test.txt'})"
+                        )
+
+            self.img_path = file_to_load
+            self.gt_path = None
+            self.img_paths, self.gt_paths, self.labels, self.types = self._load_from_txt_file(file_to_load)
+            return
+
+        self.root = Path(root).expanduser()
+        if not self.root.exists():
+            raise FileNotFoundError(f'Custom dataset directory or file does not exist: {self.root}')
+
+        # Mode 2: root directory contains phase.txt (e.g. root/train.txt or root/test.txt)
+        if self.root.is_dir():
+            phase_txt = self.root / f"{phase}.txt"
+            phase_list_txt = self.root / f"{phase}_list.txt"
+            if phase_txt.is_file():
+                self.img_path = phase_txt
+                self.gt_path = None
+                self.img_paths, self.gt_paths, self.labels, self.types = self._load_from_txt_file(phase_txt)
+                return
+            elif phase_list_txt.is_file():
+                self.img_path = phase_list_txt
+                self.gt_path = None
+                self.img_paths, self.gt_paths, self.labels, self.types = self._load_from_txt_file(phase_list_txt)
+                return
+
+        # Mode 3: Standard directory layout (root/train and root/test)
+        if not self.root.is_dir():
+            raise FileNotFoundError(f'Custom dataset directory does not exist: {self.root}')
+
         self.img_path = next(
             (
                 child
@@ -207,11 +251,118 @@ class CustomDataset(torch.utils.data.Dataset):
         if not self.img_path.is_dir():
             raise FileNotFoundError(
                 f'Custom {phase} directory does not exist: {self.img_path}. '
-                "Expected a dataset root containing 'train' and 'test'."
+                "Expected a dataset root containing 'train' and 'test', or a valid .txt image list."
             )
 
         self.img_paths, self.gt_paths, self.labels, self.types = self.load_dataset()
-        self.cls_idx = 0
+
+    def _load_from_txt_file(self, file_path: Path):
+        file_path = Path(file_path).expanduser().resolve()
+        if not file_path.is_file():
+            raise FileNotFoundError(f"File list does not exist: {file_path}")
+
+        img_tot_paths = []
+        gt_tot_paths = []
+        tot_labels = []
+        tot_types = []
+
+        base_dir = file_path.parent
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
+
+        for line in lines:
+            if ',' in line and not os.path.exists(line):
+                parts = [p.strip().strip('\'"') for p in line.split(',') if p.strip()]
+            else:
+                parts = [p.strip().strip('\'"') for p in line.split() if p.strip()]
+
+            if not parts:
+                continue
+
+            raw_img = parts[0]
+            img_p = Path(raw_img)
+            if not img_p.is_absolute():
+                if (base_dir / img_p).is_file():
+                    img_p = (base_dir / img_p).resolve()
+                elif (Path.cwd() / img_p).is_file():
+                    img_p = (Path.cwd() / img_p).resolve()
+                elif hasattr(self, 'root') and (self.root / img_p).is_file():
+                    img_p = (self.root / img_p).resolve()
+                else:
+                    img_p = (base_dir / img_p).resolve()
+
+            gt_p = None
+            label = 0
+            img_type = 'good'
+
+            if len(parts) == 1:
+                label = 0
+                img_type = 'good'
+                gt_p = None
+            elif len(parts) == 2:
+                second = parts[1]
+                if second.isdigit() or second in {'0', '1'}:
+                    label = int(second)
+                    img_type = 'good' if label == 0 else 'anomaly'
+                    gt_p = None
+                elif second.lower() in self.NORMAL_NAMES:
+                    label = 0
+                    img_type = 'good'
+                    gt_p = None
+                elif any(second.lower().endswith(ext) for ext in self.IMAGE_EXTENSIONS):
+                    mask_candidate = Path(second)
+                    if not mask_candidate.is_absolute():
+                        if (base_dir / mask_candidate).is_file():
+                            mask_candidate = (base_dir / mask_candidate).resolve()
+                        else:
+                            mask_candidate = (Path.cwd() / mask_candidate).resolve()
+                    gt_p = str(mask_candidate)
+                    label = 1
+                    img_type = 'anomaly'
+                else:
+                    img_type = second
+                    label = 0 if img_type.lower() in self.NORMAL_NAMES else 1
+                    gt_p = None
+            else:
+                p1, p2 = parts[1], parts[2]
+                if any(p1.lower().endswith(ext) for ext in self.IMAGE_EXTENSIONS):
+                    mask_str, type_or_label = p1, p2
+                else:
+                    type_or_label, mask_str = p1, p2
+
+                mask_candidate = Path(mask_str)
+                if not mask_candidate.is_absolute():
+                    if (base_dir / mask_candidate).is_file():
+                        mask_candidate = (base_dir / mask_candidate).resolve()
+                    else:
+                        mask_candidate = (Path.cwd() / mask_candidate).resolve()
+                gt_p = str(mask_candidate)
+
+                if type_or_label.isdigit():
+                    label = int(type_or_label)
+                    img_type = 'good' if label == 0 else 'anomaly'
+                elif type_or_label.lower() in self.NORMAL_NAMES:
+                    label = 0
+                    img_type = 'good'
+                else:
+                    img_type = type_or_label
+                    label = 1
+
+            img_tot_paths.append(str(img_p))
+            gt_tot_paths.append(gt_p)
+            tot_labels.append(label)
+            tot_types.append(img_type)
+
+        if not img_tot_paths:
+            raise RuntimeError(f"No valid image entries found in file list: {file_path}")
+
+        return (
+            np.asarray(img_tot_paths, dtype=object),
+            np.asarray(gt_tot_paths, dtype=object),
+            np.asarray(tot_labels, dtype=np.int64),
+            np.asarray(tot_types, dtype=object),
+        )
 
     def _load_from_txt(self):
         """从 txt 列表加载；兼容 train/test 语义与无 GT 的 4060 测试场景。"""
@@ -396,8 +547,7 @@ class CustomDataset(torch.utils.data.Dataset):
 
         gt = self.gt_paths[idx]
         label = int(self.labels[idx])
-        # 4060单卡+无像素掩码场景：txt 列表的 anomaly 也无 GT，直接返回全0掩码，避免 None 导致崩溃
-        if gt is None or (isinstance(gt, float) and str(gt) == 'nan') or (isinstance(gt, str) and gt.lower() == 'none') or label == 0:
+        if label == 0 or gt is None or (isinstance(gt, float) and str(gt) == 'nan') or (isinstance(gt, str) and gt.lower() in {'none', '0', ''}):
             gt = torch.zeros((1, img.size(-2), img.size(-1)), dtype=torch.float32)
         else:
             try:
@@ -413,8 +563,8 @@ class CustomDataset(torch.utils.data.Dataset):
 class CustomRAMDataset(CustomDataset):
     """RAM-cached version of CustomDataset."""
 
-    def __init__(self, root, transform, gt_transform, phase):
-        super().__init__(root, transform, gt_transform, phase)
+    def __init__(self, root, transform, gt_transform, phase, txt_file=None):
+        super().__init__(root, transform, gt_transform, phase, txt_file=txt_file)
         self.cached_items = [
             CustomDataset.__getitem__(self, idx) for idx in range(len(self))
         ]

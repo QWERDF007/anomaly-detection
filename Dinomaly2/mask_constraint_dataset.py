@@ -81,23 +81,16 @@ class MaskConstraintTrainDataset(Dataset):
         joint_transform=None,
     ) -> None:
         self.root = Path(root).expanduser()
-        self.train_root = _find_child(self.root, "train")
-        if self.train_root is None:
-            raise FileNotFoundError(
-                f"Cannot find Train/ directory under {self.root}."
-            )
         self.image_transform = image_transform
         self.mask_resize = transforms.Resize(
             (image_size, image_size),
             interpolation=transforms.InterpolationMode.NEAREST,
         )
         self.mask_crop = transforms.CenterCrop(crop_size)
-        # Training masks are isolated from evaluation ground-truth masks.
-        # A missing mask_dir means exactly root/masks.
         self.mask_dir = (
             Path(mask_dir).expanduser()
             if mask_dir is not None
-            else self.root / "masks"
+            else (self.root if self.root.is_dir() else self.root.parent) / "masks"
         )
         self.good_value = int(good_value)
         self.anomaly_value = int(anomaly_value)
@@ -117,15 +110,49 @@ class MaskConstraintTrainDataset(Dataset):
                 "good_value, anomaly_value and ignore_value must be different."
             )
 
-        self.samples = [
-            {
-                "image_path": image_path,
-                "mask_path": self._find_mask(image_path),
-            }
-            for image_path in _iter_images(self.train_root)
-        ]
+        if self.root.is_file() and self.root.suffix.lower() in {".txt", ".list", ".csv", ".tsv"}:
+            self.train_root = self.root.parent
+            base_dir = self.root.parent
+            with open(self.root, "r", encoding="utf-8") as f:
+                lines = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+            self.samples = []
+            for line in lines:
+                parts = [p.strip().strip("'\"") for p in (line.split(",") if "," in line and not os.path.exists(line) else line.split()) if p.strip()]
+                if not parts:
+                    continue
+                raw_img = parts[0]
+                img_p = Path(raw_img)
+                if not img_p.is_absolute():
+                    img_p = (base_dir / img_p).resolve() if (base_dir / img_p).is_file() else (Path.cwd() / img_p).resolve()
+
+                mask_p = None
+                if len(parts) >= 2 and any(parts[1].lower().endswith(ext) for ext in MASK_EXTENSIONS):
+                    m_cand = Path(parts[1])
+                    if not m_cand.is_absolute():
+                        m_cand = (base_dir / m_cand).resolve() if (base_dir / m_cand).is_file() else (Path.cwd() / m_cand).resolve()
+                    mask_p = m_cand if m_cand.is_file() else None
+                else:
+                    mask_p = self._find_mask(img_p)
+
+                self.samples.append({
+                    "image_path": img_p,
+                    "mask_path": mask_p,
+                })
+        else:
+            self.train_root = _find_child(self.root, "train")
+            if self.train_root is None:
+                raise FileNotFoundError(
+                    f"Cannot find Train/ directory under {self.root}."
+                )
+            self.samples = [
+                {
+                    "image_path": image_path,
+                    "mask_path": self._find_mask(image_path),
+                }
+                for image_path in _iter_images(self.train_root)
+            ]
         if not self.samples:
-            raise RuntimeError(f"No training images found under {self.train_root}.")
+            raise RuntimeError(f"No training images found under {self.root}.")
 
     def _candidate_mask_paths(self, image_path: Path):
         relative = image_path.relative_to(self.train_root)

@@ -129,21 +129,25 @@ def _safe_relative_path(path: Path, root: Path) -> str:
         return path.as_posix()
 
 
+LIST_EXTENSIONS = frozenset({".txt", ".list", ".csv", ".tsv"})
+
+
 class CustomDataset(torch.utils.data.Dataset):
-    """A directory-based image anomaly dataset.
+    """A directory or file-list based image anomaly dataset.
 
     Args:
-        source: Dataset root, or a directory containing category directories.
-        classname: Optional category name.  If omitted and ``source`` itself
-            has ``train``/``test`` directories, it is treated as one category;
-            otherwise all category directories below ``source`` are used.
+        source: Dataset root directory, or a path to a .txt image list file,
+            or a directory containing category directories.
+        classname: Optional category name. If omitted and ``source`` itself
+            has ``train``/``test`` directories or is a .txt file, it is treated
+            as one category; otherwise all category directories below ``source`` are used.
         resize: Initial resize passed to :class:`torchvision.transforms.Resize`.
-        imagesize: Final center-crop size.  PatchCore expects a square input in
+        imagesize: Final center-crop size. PatchCore expects a square input in
             its command line tools, but a two-element size is also accepted.
         split: ``DatasetSplit.TRAIN``, ``VAL`` or ``TEST`` (or the string form).
         train_val_split: Fraction of normal training images used for TRAIN.
             The remaining images are exposed by VAL.
-        mask_dir: Optional root directory containing anomaly masks.  By default
+        mask_dir: Optional root directory containing anomaly masks. By default
             ``ground_truth`` below each category root is used.
         normal_names: Names of directories that represent normal images.
         recursive: Recursively discover images inside each split directory.
@@ -171,11 +175,9 @@ class CustomDataset(torch.utils.data.Dataset):
         del kwargs  # Keep compatibility with the MVTec command-line adapter.
 
         self.source = Path(source).expanduser()
-        # 4060 8G 单卡适配：支持 .txt 列表（PowerShell 中文/空格路径需 ""），如 F:\tmp\outs\data_splits\train_*.txt
         self._is_txt_list = self.source.is_file() and self.source.suffix.lower() == ".txt"
-        # 若是 txt 列表，split 无需目录校验，稍后 get_image_data 会直接读取
-        if not self._is_txt_list and not self.source.is_dir():
-            raise FileNotFoundError(f"Dataset directory does not exist: {self.source}")
+        if not self.source.exists():
+            raise FileNotFoundError(f"Dataset directory or file does not exist: {self.source}")
 
         self.split = _split_value(split)
         self.train_val_split = float(train_val_split)
@@ -207,8 +209,18 @@ class CustomDataset(torch.utils.data.Dataset):
         self.imgpaths_per_class, self.data_to_iterate = self.get_image_data()
 
     def _resolve_category_roots(self, classname: Optional[str]):
+        if self.source.is_file():
+            cat = str(classname) if classname is not None else self.source.stem
+            return [(cat, self.source)]
+
+        if (self.source / f"{self.split.value}.txt").is_file() or (self.source / "train.txt").is_file():
+            cat = str(classname) if classname is not None else self.source.name
+            return [(cat, self.source)]
+
         if classname is not None:
             candidate = self.source / classname
+            if candidate.is_file():
+                return [(str(classname), candidate)]
             if (candidate / "train").is_dir() or (candidate / "test").is_dir():
                 return [(str(classname), candidate)]
             if (self.source / "train").is_dir() or (self.source / "test").is_dir():
@@ -231,8 +243,8 @@ class CustomDataset(torch.utils.data.Dataset):
         if categories:
             return [(child.name, child) for child in categories]
         raise FileNotFoundError(
-            f"No train/test directory found below {self.source}. Expected a "
-            "train/good and test/<anomaly> style dataset."
+            f"No train/test directory or .txt list found below {self.source}. Expected a "
+            "train/good and test/<anomaly> style dataset, or a .txt image list."
         )
 
     def _mask_root(self, category_root: Path, classname: str) -> Path:
@@ -274,7 +286,7 @@ class CustomDataset(torch.utils.data.Dataset):
         if normal_root is not None:
             return _iter_images(normal_root, self.recursive)
 
-        # A flat train directory is a convenient custom-dataset shorthand.  If
+        # A flat train directory is a convenient custom-dataset shorthand. If
         # it has no explicit normal folder, every image in it is a normal sample.
         return _iter_images(train_root, self.recursive)
 
@@ -327,30 +339,54 @@ class CustomDataset(torch.utils.data.Dataset):
         return items
 
     def _load_txt_items(self) -> List[List]:
-        """从 txt 列表加载，train 全部 good，test 按父目录推断好/坏（无 mask）。"""
-        lines = [l.strip() for l in self.source.read_text(encoding="utf-8").splitlines() if l.strip()]
-        paths = []
-        for line in lines:
-            p = Path(line).expanduser()
-            if not p.is_file():
-                alt = (self.source.parent / p)
-                if alt.is_file():
-                    p = alt
-            if p.is_file():
-                paths.append(p)
-            else:
-                print(f"[CustomDataset txt] Warning: not found {line}")
+        """Load items from txt file; supports single path per line or multi-column with labels/masks."""
+        file_path = self.source.resolve()
+        if not file_path.is_file():
+            raise FileNotFoundError(f"File list does not exist: {file_path}")
+
+        base_dir = file_path.parent
         category = self._category_roots[0][0] if self._category_roots else self.source.stem
         items = []
-        for p in sorted(paths, key=lambda x: str(x).lower()):
+
+        with open(file_path, "r", encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+
+        for line in lines:
+            if "," in line and not os.path.exists(line):
+                parts = [p.strip().strip("'\"") for p in line.split(",") if p.strip()]
+            else:
+                parts = [p.strip().strip("'\"") for p in line.split() if p.strip()]
+
+            if not parts:
+                continue
+
+            raw_img = parts[0]
+            img_p = Path(raw_img).expanduser()
+            if not img_p.is_file():
+                alt = (base_dir / img_p)
+                if alt.is_file():
+                    img_p = alt
+
+            mask_path = None
             anomaly = "good"
-            if self.split == DatasetSplit.TEST:
-                parent = p.parent.name.lower()
-                is_normal = parent in self.normal_names or parent == "ok" or parent == "good"
-                # 兼容铜色数据：NG 目录下即异常
-                anomaly = "good" if is_normal else p.parent.name
-            items.append([category, anomaly, str(p), None])
-        # train_val_split 逻辑复用
+
+            if self.split == DatasetSplit.TRAIN:
+                anomaly = "good"
+            elif len(parts) == 1:
+                parent = img_p.parent.name.lower()
+                is_normal = parent in self.normal_names or "ok" in parent or "good" in parent
+                anomaly = "good" if is_normal else img_p.parent.name
+            elif len(parts) >= 2:
+                second = parts[1]
+                if second.isdigit() or second in {"0", "1"}:
+                    anomaly = "good" if int(second) == 0 else "anomaly"
+                elif second.lower() in self.normal_names:
+                    anomaly = "good"
+                else:
+                    anomaly = second
+
+            items.append([category, anomaly, str(img_p), mask_path])
+
         if self.split in (DatasetSplit.TRAIN, DatasetSplit.VAL) and self.train_val_split < 1.0:
             split_index = int(len(items) * self.train_val_split)
             split_index = max(1, min(len(items), split_index)) if items else 0
@@ -358,6 +394,7 @@ class CustomDataset(torch.utils.data.Dataset):
                 items = items[:split_index]
             else:
                 items = items[split_index:]
+
         return items
 
     def get_image_data(self):
@@ -376,10 +413,44 @@ class CustomDataset(torch.utils.data.Dataset):
         imgpaths_per_class = {}
         data_to_iterate = []
         for category, category_root in self._category_roots:
-            if self.split in (DatasetSplit.TRAIN, DatasetSplit.VAL):
-                items = self._get_train_items(category, category_root)
+            if category_root.is_file():
+                file_to_load = category_root
+                if self.split == DatasetSplit.TEST and "train" in category_root.stem.lower():
+                    test_name = category_root.name.replace("train", "test").replace("Train", "Test")
+                    test_cand = category_root.parent / test_name
+                    if test_cand.is_file():
+                        file_to_load = test_cand
+                    elif (category_root.parent / "test.txt").is_file():
+                        file_to_load = category_root.parent / "test.txt"
+                    elif (category_root.parent / "test_list.txt").is_file():
+                        file_to_load = category_root.parent / "test_list.txt"
+                    else:
+                        raise FileNotFoundError(
+                            f"Custom test split file list not found for {category_root}. "
+                            f"(Checked {test_cand} and {category_root.parent / 'test.txt'})"
+                        )
+                all_items = self._load_from_txt_file(file_to_load, category)
+                if self.split in (DatasetSplit.TRAIN, DatasetSplit.VAL):
+                    items = [it for it in all_items if it[1] == "good"]
+                    if not items:
+                        items = [[it[0], "good", it[2], None] for it in all_items]
+                    split_index = int(len(items) * self.train_val_split)
+                    if items:
+                        split_index = max(1, min(len(items), split_index))
+                    if self.split == DatasetSplit.TRAIN:
+                        items = items[:split_index]
+                    else:
+                        items = items[split_index:]
+                else:
+                    items = all_items
+            elif (category_root / f"{self.split.value}.txt").is_file():
+                items = self._load_from_txt_file(category_root / f"{self.split.value}.txt", category)
             else:
-                items = self._get_test_items(category, category_root)
+                if self.split in (DatasetSplit.TRAIN, DatasetSplit.VAL):
+                    items = self._get_train_items(category, category_root)
+                else:
+                    items = self._get_test_items(category, category_root)
+
             imgpaths_per_class[category] = {}
             for item in items:
                 _, anomaly, image_path, _ = item
@@ -398,7 +469,7 @@ class CustomDataset(torch.utils.data.Dataset):
         image = PIL.Image.open(image_path).convert("RGB")
         image = self.transform_img(image)
 
-        if self.split == DatasetSplit.TEST and mask_path is not None:
+        if self.split == DatasetSplit.TEST and mask_path is not None and os.path.isfile(mask_path):
             mask = PIL.Image.open(mask_path).convert("L")
             mask = self.transform_mask(mask)
             mask = (mask > 0).to(torch.float32)
@@ -417,7 +488,7 @@ class CustomDataset(torch.utils.data.Dataset):
 
 
 class ImageInferenceDataset(torch.utils.data.Dataset):
-    """Dataset used by ``predict.py`` for a single image or an image folder."""
+    """Dataset used by ``predict.py`` for a single image, an image folder, or a .txt image list."""
 
     def __init__(
         self,
@@ -426,7 +497,20 @@ class ImageInferenceDataset(torch.utils.data.Dataset):
         recursive: bool = True,
     ):
         self.source = Path(source).expanduser()
-        if self.source.is_file():
+        if self.source.is_file() and self.source.suffix.lower() in LIST_EXTENSIONS:
+            base_dir = self.source.parent
+            with open(self.source, "r", encoding="utf-8") as f:
+                lines = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+            self.image_paths = []
+            for line in lines:
+                parts = [p.strip().strip("'\"") for p in (line.split(",") if "," in line and not os.path.exists(line) else line.split()) if p.strip()]
+                if not parts:
+                    continue
+                p = Path(parts[0])
+                if not p.is_absolute():
+                    p = (base_dir / p).resolve() if (base_dir / p).is_file() else (Path.cwd() / p).resolve()
+                self.image_paths.append(p)
+        elif self.source.is_file():
             self.image_paths = [self.source]
         elif self.source.is_dir():
             self.image_paths = _iter_images(self.source, recursive=recursive)

@@ -3,6 +3,12 @@
 # Press ⌃R to execute it or replace it with your code.
 # Press Double ⇧ to search everywhere for classes, files, tool windows, actions, and settings.
 
+import os
+import sys
+_dinomaly_dir = os.path.dirname(os.path.abspath(__file__))
+if _dinomaly_dir not in sys.path:
+    sys.path.insert(0, _dinomaly_dir)
+
 import torch
 import torch.nn as nn
 from dataset import get_data_transforms, get_strong_transforms
@@ -10,6 +16,7 @@ from torchvision.datasets import ImageFolder
 import numpy as np
 import random
 import os
+import json
 from torch.utils.data import DataLoader, ConcatDataset
 
 from models.uad import Dinomaly
@@ -208,7 +215,6 @@ def train(item_list, args):
             phase='train',
         )
         dataset_cls = CustomRAMDataset if args.cache else CustomDataset
-        # 若 test_root 与 train 相同且是 txt，CustomDataset 会按文件名父目录推断好/坏；若能找到 test txt 则更准
         try:
             test_data = dataset_cls(
                 root=str(test_root),
@@ -435,17 +441,45 @@ def train(item_list, args):
             print(f"[eval] final failed: {e} (跳过，不影响模型保存)", flush=True)
             import traceback; traceback.print_exc()
 
-    # 4060单卡: 确保即使评估失败也保存模型，避免 2000 迭代白跑
+    peak_gpu_mem_mb = torch.cuda.max_memory_allocated(device) / (1024 * 1024) if torch.cuda.is_available() else 0.0
+    print(f'Peak GPU Memory: {peak_gpu_mem_mb:.1f} MB', flush=True)
+
+    metrics_dict = {"peak_gpu_mem_mb": round(peak_gpu_mem_mb, 2)}
+    if args.eval_interval == -1:
+        try:
+            mean_metrics = evaluate_model(
+                model,
+                test_data_list,
+                item_list,
+                device,
+                batch_size,
+                total_epochs,
+                writer,
+            )
+            if mean_metrics is not None:
+                metric_names = ['I-AUROC', 'I-AP', 'I-F1', 'P-AUROC', 'P-AP', 'P-F1', 'P-AUPRO']
+                for name, val in zip(metric_names, mean_metrics):
+                    metrics_dict[name] = round(float(val), 6)
+        except Exception as e:
+            print(f"[eval] final failed: {e} (跳过，不影响模型保存)", flush=True)
+
     try:
         writer.close()
     except Exception:
         pass
+
     try:
         torch.save(model.state_dict(), os.path.join(args.save_dir, 'model.pth'))
         print(f"[save] model.pth saved to {os.path.join(args.save_dir, 'model.pth')}", flush=True)
     except Exception as e:
         print(f"[save] failed: {e}", flush=True)
         raise
+
+    try:
+        with open(os.path.join(args.save_dir, 'metrics.json'), 'w', encoding='utf-8') as f:
+            json.dump(metrics_dict, f, indent=2)
+    except Exception:
+        pass
 
     return
 
@@ -495,7 +529,7 @@ if __name__ == '__main__':
         dest='batch_size',
         help='Batch size for training and evaluation (default: 4).',
     )
-    parser.add_argument('--max-iters', type=int, default=40000)
+    parser.add_argument('--max-iters', '--max_iters', type=int, default=40000, dest='max_iters')
     parser.add_argument(
         '--eval_interval',
         type=int,
