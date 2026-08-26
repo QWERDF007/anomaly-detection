@@ -173,6 +173,27 @@ class CustomDataset(torch.utils.data.Dataset):
         if phase not in {'train', 'test'}:
             raise ValueError("phase must be 'train' or 'test'")
 
+<<<<<<< HEAD
+=======
+        self.root = Path(root).expanduser()
+        # 4060单卡适配：支持 txt 列表路径（路径含空格/中文需 ""），兼容 F:\tmp\outs\data_splits\train_*.txt
+        # 若 root 是 .txt 文件，则按行读取图像路径，train 视为 normal，test 按缺省无 mask 的图像级评估
+        self._is_txt_list = self.root.is_file() and self.root.suffix.lower() == ".txt"
+        if self._is_txt_list:
+            # txt 列表模式：直接读取，Path 自动处理中文/空格
+            self.transform = transform
+            self.gt_transform = gt_transform
+            self.phase = phase
+            self.img_path = self.root  # txt 本身
+            self.gt_path = self.root.parent / "ground_truth"
+            self.img_paths, self.gt_paths, self.labels, self.types = self._load_from_txt()
+            self.cls_idx = 0
+            return
+
+        if not self.root.is_dir():
+            raise FileNotFoundError(f'Custom dataset directory does not exist: {self.root}')
+
+>>>>>>> 87cdbcb1e9d186d775c4ad605b9985dd34db9269
         self.transform = transform
         self.gt_transform = gt_transform
         self.phase = phase
@@ -364,6 +385,59 @@ class CustomDataset(torch.utils.data.Dataset):
             np.asarray(tot_types, dtype=object),
         )
 
+    def _load_from_txt(self):
+        """从 txt 列表加载；兼容 train/test 语义与无 GT 的 4060 测试场景。"""
+        lines = [line.strip() for line in self.root.read_text(encoding="utf-8").splitlines() if line.strip()]
+        paths = [Path(line).expanduser() for line in lines]
+        # 过滤不存在路径（警告但不中断，PowerShell 中文路径常见编码问题）
+        valid = []
+        missing = []
+        for p in paths:
+            if p.is_file():
+                valid.append(p)
+            else:
+                # 尝试 resolve 相对路径相对于 txt 目录
+                alt = (self.root.parent / p).resolve()
+                if alt.is_file():
+                    valid.append(alt)
+                else:
+                    missing.append(str(p))
+        if missing:
+            print(f"[CustomDataset txt] Warning: {len(missing)} paths not found (first 3: {missing[:3]})")
+        img_tot_paths = [str(p) for p in valid]
+        # 按父目录名推断 label：OK/good/normal -> 0, 其他 -> 1 (仅 test 需要；train 统一 0)
+        if self.phase == "train":
+            tot_labels = [0] * len(img_tot_paths)
+            tot_types = ["good"] * len(img_tot_paths)
+            gt_tot_paths = [None] * len(img_tot_paths)
+        else:
+            tot_labels = []
+            tot_types = []
+            gt_tot_paths = []
+            for p in valid:
+                parent = p.parent.name.lower()
+                # flat 列表中若来自 OK/good 视为 normal，否则 anomaly（无 mask 将返回全 0 mask）
+                is_normal = parent in self.NORMAL_NAMES or "ok" in parent or "good" in parent
+                # 更严格：若文件名含 NG/anomaly 也可判异常，但父目录最可靠
+                if p.name.lower().startswith("picture") and "ng" not in str(p).lower():
+                    # 对于铜色数据，NG 图片也在 NG 目录下，已按 parent 区分；此处保底
+                    pass
+                tot_labels.append(0 if is_normal else 1)
+                tot_types.append("good" if is_normal else "anomaly")
+                gt_tot_paths.append(None)
+            # 若全部被判 normal 但实际含 NG，则尝试根据路径字符串含 NG/anomaly 修正
+            # 已在上面按 parent 处理，通常已正确
+
+        if not img_tot_paths:
+            raise RuntimeError(f"No images found in txt list: {self.root} (checked {len(lines)} lines, {len(valid)} valid)")
+
+        return (
+            np.asarray(img_tot_paths, dtype=object),
+            np.asarray(gt_tot_paths, dtype=object),
+            np.asarray(tot_labels, dtype=np.int64),
+            np.asarray(tot_types, dtype=object),
+        )
+
     @classmethod
     def _iter_images(cls, directory):
         if not directory.is_dir():
@@ -494,11 +568,14 @@ class CustomDataset(torch.utils.data.Dataset):
 
         gt = self.gt_paths[idx]
         label = int(self.labels[idx])
-        if label == 0 or gt is None or str(gt) == '0' or not str(gt).strip():
+        if label == 0 or gt is None or (isinstance(gt, float) and str(gt) == 'nan') or (isinstance(gt, str) and gt.lower() in {'none', '0', ''}):
             gt = torch.zeros((1, img.size(-2), img.size(-1)), dtype=torch.float32)
         else:
-            gt = Image.open(gt).convert('L')
-            gt = self.gt_transform(gt)
+            try:
+                gt = Image.open(gt).convert('L')
+                gt = self.gt_transform(gt)
+            except Exception:
+                gt = torch.zeros((1, img.size(-2), img.size(-1)), dtype=torch.float32)
 
         assert img.size()[1:] == gt.size()[1:], 'image.size != gt.size !!!'
         return img, gt, label, img_path

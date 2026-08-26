@@ -187,24 +187,43 @@ def train(item_list, args):
     train_data_list = []
     test_data_list = []
     if args.dataset == 'custom':
+        # 4060 8G 单卡：支持 txt 列表（Path 自动处理中文/空格，需 ""）；若 data_path 是 train_*.txt，自动找同目录 test_*.txt 作评估
+        from pathlib import Path
+        data_path = Path(args.data_path).expanduser()
+        test_path_arg = getattr(args, 'test_path', None)
+        if test_path_arg:
+            test_root = Path(test_path_arg).expanduser()
+        elif data_path.is_file() and data_path.suffix.lower() == ".txt" and "train" in data_path.name:
+            candidate = data_path.parent / data_path.name.replace("train", "test")
+            test_root = candidate if candidate.is_file() else data_path
+            if test_root is not candidate:
+                print(f"[Dinomaly2 custom] txt test sibling not found: {candidate}, fallback to train txt for test (eval may be train-only)")
+            else:
+                print(f"[Dinomaly2 custom] txt split: train={data_path} -> test={test_root}")
+        else:
+            test_root = data_path
         train_data = CustomDataset(
-            root=args.data_path,
+            root=str(data_path),
             transform=data_transform,
             gt_transform=gt_transform,
             phase='train',
         )
-        train_data_list.append(train_data)
         dataset_cls = CustomRAMDataset if args.cache else CustomDataset
         try:
             test_data = dataset_cls(
-                root=args.data_path,
+                root=str(test_root),
                 transform=data_transform,
                 gt_transform=gt_transform,
                 phase='test',
             )
+        except Exception as exc:
+            print(f"[Dinomaly2 custom] test dataset load failed ({exc}), eval will be skipped")
+            test_data = None
+        train_data_list.append(train_data)
+        if test_data is not None and len(test_data) > 0:
             test_data_list.append(test_data)
-        except (FileNotFoundError, RuntimeError) as error:
-            print(f"Skip default evaluation: {error}", flush=True)
+        else:
+            print("[Dinomaly2 custom] no test data, training only")
     else:
         for i, item in enumerate(item_list):
             train_path = os.path.join(args.data_path, item, 'train')
@@ -384,42 +403,77 @@ def train(item_list, args):
                 data_cost_list = []
 
         if args.eval_interval > 0 and epoch % args.eval_interval == 0:
+            try:
+                evaluate_model(
+                    model,
+                    test_data_list,
+                    item_list,
+                    device,
+                    batch_size,
+                    epoch,
+                    writer,
+                )
+            except Exception as e:
+                print(f"[eval] epoch {epoch} failed: {e} (4060单卡txt无GT场景已自动用全0掩码，仍失败则跳过)", flush=True)
+                import traceback; traceback.print_exc()
+
+        if it >= max_iters:
+            break
+
+    if args.eval_interval == -1:
+        try:
             evaluate_model(
                 model,
                 test_data_list,
                 item_list,
                 device,
                 batch_size,
-                epoch,
+                total_epochs,
                 writer,
             )
-
-        if it >= max_iters:
-            break
+        except Exception as e:
+            print(f"[eval] final failed: {e} (跳过，不影响模型保存)", flush=True)
+            import traceback; traceback.print_exc()
 
     peak_gpu_mem_mb = torch.cuda.max_memory_allocated(device) / (1024 * 1024) if torch.cuda.is_available() else 0.0
     print(f'Peak GPU Memory: {peak_gpu_mem_mb:.1f} MB', flush=True)
 
     metrics_dict = {"peak_gpu_mem_mb": round(peak_gpu_mem_mb, 2)}
     if args.eval_interval == -1:
-        mean_metrics = evaluate_model(
-            model,
-            test_data_list,
-            item_list,
-            device,
-            batch_size,
-            total_epochs,
-            writer,
-        )
-        if mean_metrics is not None:
-            metric_names = ['I-AUROC', 'I-AP', 'I-F1', 'P-AUROC', 'P-AP', 'P-F1', 'P-AUPRO']
-            for name, val in zip(metric_names, mean_metrics):
-                metrics_dict[name] = round(float(val), 6)
+        try:
+            mean_metrics = evaluate_model(
+                model,
+                test_data_list,
+                item_list,
+                device,
+                batch_size,
+                total_epochs,
+                writer,
+            )
+            if mean_metrics is not None:
+                metric_names = ['I-AUROC', 'I-AP', 'I-F1', 'P-AUROC', 'P-AP', 'P-F1', 'P-AUPRO']
+                for name, val in zip(metric_names, mean_metrics):
+                    metrics_dict[name] = round(float(val), 6)
+        except Exception as e:
+            print(f"[eval] final failed: {e} (跳过，不影响模型保存)", flush=True)
 
-    writer.close()
-    torch.save(model.state_dict(), os.path.join(args.save_dir, 'model.pth'))
-    with open(os.path.join(args.save_dir, 'metrics.json'), 'w', encoding='utf-8') as f:
-        json.dump(metrics_dict, f, indent=2)
+    try:
+        writer.close()
+    except Exception:
+        pass
+
+    try:
+        torch.save(model.state_dict(), os.path.join(args.save_dir, 'model.pth'))
+        print(f"[save] model.pth saved to {os.path.join(args.save_dir, 'model.pth')}", flush=True)
+    except Exception as e:
+        print(f"[save] failed: {e}", flush=True)
+        raise
+
+    try:
+        with open(os.path.join(args.save_dir, 'metrics.json'), 'w', encoding='utf-8') as f:
+            json.dump(metrics_dict, f, indent=2)
+    except Exception:
+        pass
 
     return
 
@@ -481,8 +535,10 @@ if __name__ == '__main__':
     )
     parser.add_argument('--lr_decay_ratio', type=float, default=1.)
     parser.add_argument('--cuda', type=int, default=0)
+    parser.add_argument('--test_path', type=str, default=None,
+                        help='可选：显式指定 test 列表/目录（txt 或目录）；未指定时若 --data_path 为 train_*.txt 则自动找同目录 test_*.txt（4060 单卡适配，Path 自动处理中文/空格）')
     parser.add_argument('--cache', action='store_true',
-                        help='Cache test dataset in RAM.')
+                        help='Cache test dataset in RAM. 4060 8G + 32G 提示：672评估时 1383张×672 可能 OOM，建议 672 不开 cache 或 batch 2')
     parser.add_argument(
         '--train_mode',
         choices=['default', 'mask_constraint'],

@@ -175,6 +175,7 @@ class CustomDataset(torch.utils.data.Dataset):
         del kwargs  # Keep compatibility with the MVTec command-line adapter.
 
         self.source = Path(source).expanduser()
+        self._is_txt_list = self.source.is_file() and self.source.suffix.lower() == ".txt"
         if not self.source.exists():
             raise FileNotFoundError(f"Dataset directory or file does not exist: {self.source}")
 
@@ -197,8 +198,14 @@ class CustomDataset(torch.utils.data.Dataset):
             resize, imagesize, self.transform_mean, self.transform_std
         )
 
-        self._category_roots = self._resolve_category_roots(classname)
-        self.classnames_to_use = [name for name, _ in self._category_roots]
+        # txt 列表模式：直接将 source 视为单类别，绕过目录解析
+        if self._is_txt_list:
+            self._category_roots = [(self.source.stem, self.source.parent)]
+            # 占位，随后 get_image_data 会特殊处理
+            self.classnames_to_use = [self.source.stem]
+        else:
+            self._category_roots = self._resolve_category_roots(classname)
+            self.classnames_to_use = [name for name, _ in self._category_roots]
         self.imgpaths_per_class, self.data_to_iterate = self.get_image_data()
 
     def _resolve_category_roots(self, classname: Optional[str]):
@@ -331,12 +338,14 @@ class CustomDataset(torch.utils.data.Dataset):
                 )
         return items
 
-    def _load_from_txt_file(self, file_path: Path, category: str):
-        file_path = Path(file_path).expanduser().resolve()
+    def _load_txt_items(self) -> List[List]:
+        """Load items from txt file; supports single path per line or multi-column with labels/masks."""
+        file_path = self.source.resolve()
         if not file_path.is_file():
             raise FileNotFoundError(f"File list does not exist: {file_path}")
 
         base_dir = file_path.parent
+        category = self._category_roots[0][0] if self._category_roots else self.source.stem
         items = []
 
         with open(file_path, "r", encoding="utf-8") as f:
@@ -352,66 +361,54 @@ class CustomDataset(torch.utils.data.Dataset):
                 continue
 
             raw_img = parts[0]
-            img_p = Path(raw_img)
-            if not img_p.is_absolute():
-                if (base_dir / img_p).is_file():
-                    img_p = (base_dir / img_p).resolve()
-                elif (Path.cwd() / img_p).is_file():
-                    img_p = (Path.cwd() / img_p).resolve()
-                elif hasattr(self, "source") and self.source.is_dir() and (self.source / img_p).is_file():
-                    img_p = (self.source / img_p).resolve()
-                else:
-                    img_p = (base_dir / img_p).resolve()
+            img_p = Path(raw_img).expanduser()
+            if not img_p.is_file():
+                alt = (base_dir / img_p)
+                if alt.is_file():
+                    img_p = alt
 
             mask_path = None
             anomaly = "good"
 
-            if len(parts) == 1:
+            if self.split == DatasetSplit.TRAIN:
                 anomaly = "good"
-                mask_path = None
-            elif len(parts) == 2:
+            elif len(parts) == 1:
+                parent = img_p.parent.name.lower()
+                is_normal = parent in self.normal_names or "ok" in parent or "good" in parent
+                anomaly = "good" if is_normal else img_p.parent.name
+            elif len(parts) >= 2:
                 second = parts[1]
                 if second.isdigit() or second in {"0", "1"}:
-                    label = int(second)
-                    anomaly = "good" if label == 0 else "anomaly"
-                    mask_path = None
+                    anomaly = "good" if int(second) == 0 else "anomaly"
                 elif second.lower() in self.normal_names:
                     anomaly = "good"
-                    mask_path = None
-                elif any(second.lower().endswith(ext) for ext in IMAGE_EXTENSIONS):
-                    mask_cand = Path(second)
-                    if not mask_cand.is_absolute():
-                        mask_cand = (base_dir / mask_cand).resolve() if (base_dir / mask_cand).is_file() else (Path.cwd() / mask_cand).resolve()
-                    mask_path = str(mask_cand)
-                    anomaly = "anomaly"
                 else:
                     anomaly = second
-                    mask_path = None
-            else:
-                p1, p2 = parts[1], parts[2]
-                if any(p1.lower().endswith(ext) for ext in IMAGE_EXTENSIONS):
-                    mask_str, type_or_label = p1, p2
-                else:
-                    type_or_label, mask_str = p1, p2
-
-                mask_cand = Path(mask_str)
-                if not mask_cand.is_absolute():
-                    mask_cand = (base_dir / mask_cand).resolve() if (base_dir / mask_cand).is_file() else (Path.cwd() / mask_cand).resolve()
-                mask_path = str(mask_cand)
-
-                if type_or_label.isdigit():
-                    anomaly = "good" if int(type_or_label) == 0 else "anomaly"
-                elif type_or_label.lower() in self.normal_names:
-                    anomaly = "good"
-                else:
-                    anomaly = type_or_label
 
             items.append([category, anomaly, str(img_p), mask_path])
+
+        if self.split in (DatasetSplit.TRAIN, DatasetSplit.VAL) and self.train_val_split < 1.0:
+            split_index = int(len(items) * self.train_val_split)
+            split_index = max(1, min(len(items), split_index)) if items else 0
+            if self.split == DatasetSplit.TRAIN:
+                items = items[:split_index]
+            else:
+                items = items[split_index:]
 
         return items
 
     def get_image_data(self):
         """Return the same data structures as the original MVTec adapter."""
+        # txt 列表优先
+        if getattr(self, "_is_txt_list", False):
+            items = self._load_txt_items()
+            category = self._category_roots[0][0] if self._category_roots else self.source.stem
+            imgpaths_per_class = {category: {}}
+            for _, anomaly, image_path, _ in items:
+                imgpaths_per_class[category].setdefault(anomaly, []).append(image_path)
+            if not items:
+                raise RuntimeError(f"No images found in txt list {self.source} for split {self.split.value!r}.")
+            return imgpaths_per_class, items
 
         imgpaths_per_class = {}
         data_to_iterate = []

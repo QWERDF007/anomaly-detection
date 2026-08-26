@@ -242,8 +242,8 @@ def evaluation_batch(model, dataloader, device, _class_=None, max_ratio=0, resiz
     gt_list_sp = []
     pr_list_sp = []
     gaussian_kernel = get_gaussian_kernel(kernel_size=5, sigma=4).to(device)
-
-    with torch.no_grad():
+    use_cuda = getattr(device, "type", "") == "cuda" or "cuda" in str(device)
+    with torch.no_grad(), torch.cuda.amp.autocast(enabled=use_cuda, dtype=torch.float16):
         for img, gt, label, img_path in dataloader:
             img = img.to(device)
             output = model(img)

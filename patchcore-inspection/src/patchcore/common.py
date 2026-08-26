@@ -1,50 +1,110 @@
 import copy
 import os
 import pickle
-from typing import List
-from typing import Union
+from typing import List, Optional, Union
 
 import faiss
 import numpy as np
 import scipy.ndimage as ndimage
+import logging
 import torch
 import torch.nn.functional as F
 
+LOGGER = logging.getLogger(__name__)
+
+
+def is_faiss_gpu_available(device_id: int = 0) -> bool:
+    """Dynamically probe whether the current Python environment supports FAISS GPU."""
+    if not torch.cuda.is_available():
+        return False
+    if not hasattr(faiss, "StandardGpuResources") or not hasattr(faiss, "get_num_gpus"):
+        return False
+    try:
+        if faiss.get_num_gpus() <= 0:
+            return False
+        res = faiss.StandardGpuResources()
+        cfg = faiss.GpuIndexFlatConfig()
+        cfg.device = int(device_id)
+        idx = faiss.GpuIndexFlatL2(res, 8, cfg)
+        idx.add(np.zeros((1, 8), dtype=np.float32))
+        _, _ = idx.search(np.zeros((1, 8), dtype=np.float32), 1)
+        return True
+    except Exception:
+        return False
+
 
 class FaissNN(object):
-    def __init__(self, on_gpu: bool = False, num_workers: int = 4) -> None:
-        """FAISS Nearest neighbourhood search.
+    def __init__(
+        self,
+        on_gpu: Optional[bool] = None,
+        num_workers: int = 4,
+        device_id: int = 0,
+    ) -> None:
+        """FAISS Nearest neighbourhood search with dynamic GPU capability probing.
 
         Args:
-            on_gpu: If set true, nearest neighbour searches are done on GPU.
-            num_workers: Number of workers to use with FAISS for similarity search.
+            on_gpu: If True, explicitly requests GPU FAISS. If False, forces CPU FAISS.
+                   If None (default), dynamically probes whether faiss-gpu is supported.
+            num_workers: Number of workers for CPU FAISS similarity search.
+            device_id: Target GPU device ID.
         """
         faiss.omp_set_num_threads(num_workers)
-        self.on_gpu = on_gpu
+        self.device_id = int(device_id)
+
+        # Dynamic probe
+        if on_gpu is None or on_gpu is True:
+            gpu_supported = is_faiss_gpu_available(self.device_id)
+            if on_gpu is True and not gpu_supported:
+                LOGGER.info(
+                    "Explicitly requested on_gpu=True, but current Python environment lacks faiss-gpu or GPU resources. Gracefully falling back to faiss-cpu."
+                )
+            self.on_gpu = gpu_supported
+        else:
+            self.on_gpu = False
+
+        mode_str = f"GPU (device {self.device_id})" if self.on_gpu else "CPU"
+        LOGGER.info("FaissNN initialized: using faiss-%s mode", mode_str.lower())
         self.search_index = None
 
     def _gpu_cloner_options(self):
-        return faiss.GpuClonerOptions()
+        if hasattr(faiss, "GpuClonerOptions"):
+            return faiss.GpuClonerOptions()
+        return None
 
     def _index_to_gpu(self, index):
-        if self.on_gpu:
-            # For the non-gpu faiss python package, there is no GpuClonerOptions
-            # so we can not make a default in the function header.
-            return faiss.index_cpu_to_gpu(
-                faiss.StandardGpuResources(), 0, index, self._gpu_cloner_options()
-            )
+        if self.on_gpu and hasattr(faiss, "index_cpu_to_gpu"):
+            try:
+                return faiss.index_cpu_to_gpu(
+                    faiss.StandardGpuResources(),
+                    self.device_id,
+                    index,
+                    self._gpu_cloner_options(),
+                )
+            except Exception as exc:
+                LOGGER.warning("index_cpu_to_gpu failed (%s), fallback to CPU index", exc)
+                self.on_gpu = False
+                return index
         return index
 
     def _index_to_cpu(self, index):
-        if self.on_gpu:
-            return faiss.index_gpu_to_cpu(index)
+        if self.on_gpu and hasattr(faiss, "index_gpu_to_cpu"):
+            try:
+                return faiss.index_gpu_to_cpu(index)
+            except Exception:
+                return index
         return index
 
     def _create_index(self, dimension):
-        if self.on_gpu:
-            return faiss.GpuIndexFlatL2(
-                faiss.StandardGpuResources(), dimension, faiss.GpuIndexFlatConfig()
-            )
+        if self.on_gpu and hasattr(faiss, "GpuIndexFlatL2"):
+            try:
+                res = faiss.StandardGpuResources()
+                cfg = faiss.GpuIndexFlatConfig()
+                cfg.device = self.device_id
+                return faiss.GpuIndexFlatL2(res, dimension, cfg)
+            except Exception as exc:
+                LOGGER.warning("GpuIndexFlatL2 creation failed (%s), falling back to faiss-cpu IndexFlatL2", exc)
+                self.on_gpu = False
+                return faiss.IndexFlatL2(dimension)
         return faiss.IndexFlatL2(dimension)
 
     def fit(self, features: np.ndarray) -> None:

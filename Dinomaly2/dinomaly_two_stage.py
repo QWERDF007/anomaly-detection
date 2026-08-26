@@ -1077,7 +1077,7 @@ def infer_image(
     """
 
     original, image_tensor = _load_image_tensor(image_path, transform, device)
-    with torch.no_grad():
+    with torch.no_grad(), torch.cuda.amp.autocast(enabled=(device.type == "cuda"), dtype=torch.float16):
         encoder_outputs, decoder_outputs = model(image_tensor)
         anomaly_map, _ = cal_anomaly_maps(
             encoder_outputs,

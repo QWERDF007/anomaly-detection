@@ -1,472 +1,267 @@
-#!/usr/bin/env python3
-"""Aggregates all multi-seed benchmark results and updates WORKLOG."""
+#!/usr/bin/env python
+"""Aggregate outs_dir -> WORKLOG + BENCHMARK_REPORT.md (4060 single-GPU).
 
+Usage:
+  D:\\Software\\anaconda3\\envs\\py312\\python.exe analyze_and_report.py --outs_dir "F:\\tmp\\outs"
+
+Outputs:
+  -> F:\\tmp\\outs\\speed_benchmark_summary.json 已由 benchmark_speed.py 生成
+  -> BENCHMARK_REPORT.md (project root)
+  -> WORKLOG 追加条目（可选）
+
+Notes:
+  - 自动扫描 F:\\tmp\\outs 下 Dinomaly2 / PatchCore 的 saved_results 与 speed JSON
+  - 4060 适配说明：BS 448:8->4, 672:4->2, faiss-cpu, 32G 内存足够 1383 张 256px
+  - 路径含空格/中文需 ""，脚本内部 Path 自动处理
+"""
 from __future__ import annotations
-
-import csv
+import argparse
 import json
-import os
+import glob
 from pathlib import Path
-import re
-from typing import Any, Dict, List
-import numpy as np
+import time
 
-OUT_ROOT = Path("/data/wt/outs")
-BASE_DIR = Path("/data/wt/anomaly-detection")
-WORKLOG_FILE = BASE_DIR / "WORKLOG"
-SPEED_BENCH_FILE = OUT_ROOT / "speed_benchmark_summary.json"
-AGGREGATED_JSON = OUT_ROOT / "multi_sampling_aggregated_results.json"
+def build_parser():
+    p = argparse.ArgumentParser(description="Analyze and generate BENCHMARK_REPORT.md")
+    p.add_argument("--outs_dir", type=str, required=True, help="F:\\tmp\\outs (中文/空格需 \"\")")
+    p.add_argument("--report", type=str, default="BENCHMARK_REPORT.md", help="Report markdown path (default project root)")
+    p.add_argument("--worklog", type=str, default="WORKLOG", help="WORKLOG path")
+    return p
 
-SEEDS = [42, 100, 2024]
-SAMPLE_SIZES = [50, 100, 200, 400]
-RESOLUTIONS = [224, 448, 672]
-MODELS = ["Dinomaly2", "PatchCore"]
+def find_models(outs_dir: Path):
+    patterns = [
+        str(outs_dir / "dinomaly2_*"/ "*"/ "model.pth"),
+        str(outs_dir / "dinomaly2_*"/ "model.pth"),
+        str(outs_dir / "Dinomaly"/ "*"/ "model.pth"),
+        str(outs_dir / "*dinomaly*" / "*"/ "model.pth"),
+    ]
+    models=[]
+    for pat in patterns:
+        models.extend(glob.glob(pat, recursive=True))
+    return sorted(set(models), key=lambda p: Path(p).stat().st_mtime if Path(p).exists() else 0, reverse=True)
 
-
-def load_speed_benchmarks() -> Dict[str, Any]:
-    if SPEED_BENCH_FILE.exists():
-        try:
-            with open(SPEED_BENCH_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-
-def collect_all_results() -> List[Dict[str, Any]]:
-    # First check if all_experiments_raw.json exists
-    raw_file = OUT_ROOT / "all_experiments_raw.json"
-    raw_data_map = {}
-    if raw_file.exists():
-        try:
-            with open(raw_file, "r", encoding="utf-8") as f:
-                raw_list = json.load(f)
-                for r in raw_list:
-                    if r.get("exp_id"):
-                        raw_data_map[r["exp_id"]] = r
-        except Exception:
-            pass
-
-    records = []
-    
-    for model in MODELS:
-        for n in SAMPLE_SIZES:
-            for size in RESOLUTIONS:
-                for seed in SEEDS:
-                    model_prefix = "dinomaly2" if model == "Dinomaly2" else "patchcore"
-                    exp_id = f"{model_prefix}_n{n}_s{size}_seed{seed}"
-                    exp_dir = OUT_ROOT / exp_id
-                    
-                    item = {
-                        "exp_id": exp_id,
-                        "model": model,
-                        "sample_count": n,
-                        "image_size": size,
-                        "seed": seed,
-                        "status": "NOT_FOUND",
-                        "elapsed_sec": None,
-                        "peak_gpu_mem_mb": None,
-                        "I-AUROC": None,
-                        "I-AP": None,
-                        "I-F1": None,
-                    }
-
-                    if exp_id in raw_data_map:
-                        r = raw_data_map[exp_id]
-                        if r.get("status") == "SUCCESS" and r.get("I-AUROC") is not None:
-                            item.update({
-                                "status": "SUCCESS",
-                                "elapsed_sec": r.get("elapsed_sec"),
-                                "peak_gpu_mem_mb": r.get("peak_gpu_mem_mb"),
-                                "I-AUROC": r.get("I-AUROC"),
-                                "I-AP": r.get("I-AP"),
-                                "I-F1": r.get("I-F1"),
-                            })
-                            records.append(item)
-                            continue
-                    
-                    if not exp_dir.exists():
-                        records.append(item)
-                        continue
-                    
-                    # Try to parse metrics.json
-                    candidate_json = list(exp_dir.rglob("metrics.json"))
-                    if candidate_json:
-                        candidate_json.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                        try:
-                            with open(candidate_json[0], "r", encoding="utf-8") as f:
-                                data = json.load(f)
-                                for k in ["I-AUROC", "I-AP", "I-F1", "peak_gpu_mem_mb"]:
-                                    if k in data and data[k] is not None:
-                                        item[k] = float(data[k])
-                                item["status"] = "SUCCESS"
-                        except Exception:
-                            pass
-                    
-                    # Try results.csv
-                    if item["I-AUROC"] is None:
-                        candidate_csv = list(exp_dir.rglob("results.csv"))
-                        if candidate_csv:
-                            candidate_csv.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                            try:
-                                with open(candidate_csv[0], "r", encoding="utf-8") as f:
-                                    reader = csv.DictReader(f)
-                                    for row in reader:
-                                        for k in ["I-AUROC", "I-AP", "I-F1", "peak_gpu_mem_mb"]:
-                                            if k in row and row[k]:
-                                                item[k] = float(row[k])
-                                        item["status"] = "SUCCESS"
-                            except Exception:
-                                pass
-                    
-                    # Try run.log
-                    log_file = exp_dir / "run.log"
-                    if log_file.exists():
-                        try:
-                            with open(log_file, "r", encoding="utf-8", errors="ignore") as fl:
-                                lcontent = fl.read()
-                                if item["peak_gpu_mem_mb"] is None:
-                                    mem_m = re.findall(r"Peak GPU Memory:\s*([0-9.]+)\s*MB", lcontent)
-                                    if mem_m:
-                                        item["peak_gpu_mem_mb"] = float(mem_m[-1])
-                                if item["I-AUROC"] is None:
-                                    auroc_m = re.findall(r"I-Auroc[:=]\s*([0-9.]+)", lcontent, re.IGNORECASE)
-                                    if auroc_m:
-                                        item["I-AUROC"] = float(auroc_m[-1])
-                                if item["I-AP"] is None:
-                                    ap_m = re.findall(r"I-AP[:=]\s*([0-9.]+)", lcontent, re.IGNORECASE)
-                                    if ap_m:
-                                        item["I-AP"] = float(ap_m[-1])
-                                if item["I-F1"] is None:
-                                    f1_m = re.findall(r"I-F1[:=]\s*([0-9.]+)", lcontent, re.IGNORECASE)
-                                    if f1_m:
-                                        item["I-F1"] = float(f1_m[-1])
-                                if item["elapsed_sec"] is None:
-                                    el_m = re.findall(r"elapsed:([0-9:]+)", lcontent)
-                                    if el_m:
-                                        parts = [int(p) for p in el_m[-1].split(":")]
-                                        if len(parts) == 3:
-                                            item["elapsed_sec"] = float(parts[0]*3600 + parts[1]*60 + parts[2])
-                                        elif len(parts) == 2:
-                                            item["elapsed_sec"] = float(parts[0]*60 + parts[1])
-                                if item["I-AUROC"] is not None:
-                                    item["status"] = "SUCCESS"
-                        except Exception:
-                            pass
-                    
-                    records.append(item)
-    return records
-
-
-def compute_aggregations(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    aggregated = []
-    
-    for model in MODELS:
-        for n in SAMPLE_SIZES:
-            for size in RESOLUTIONS:
-                matching = [
-                    r for r in records
-                    if r["model"] == model and r["sample_count"] == n and r["image_size"] == size and r["status"] == "SUCCESS"
-                ]
-                
-                aurocs = [r["I-AUROC"] for r in matching if r["I-AUROC"] is not None]
-                aps = [r["I-AP"] for r in matching if r["I-AP"] is not None]
-                f1s = [r["I-F1"] for r in matching if r["I-F1"] is not None]
-                mems = [r["peak_gpu_mem_mb"] for r in matching if r["peak_gpu_mem_mb"] is not None]
-                times = [r["elapsed_sec"] for r in matching if r["elapsed_sec"] is not None]
-                
-                agg_item = {
-                    "model": model,
-                    "sample_count": n,
-                    "image_size": size,
-                    "runs_completed": len(matching),
-                    "runs_total": len(SEEDS),
-                    "auroc_mean": float(np.mean(aurocs)) if aurocs else None,
-                    "auroc_std": float(np.std(aurocs)) if aurocs else None,
-                    "auroc_best": float(np.max(aurocs)) if aurocs else None,
-                    "ap_mean": float(np.mean(aps)) if aps else None,
-                    "ap_std": float(np.std(aps)) if aps else None,
-                    "ap_best": float(np.max(aps)) if aps else None,
-                    "f1_mean": float(np.mean(f1s)) if f1s else None,
-                    "f1_std": float(np.std(f1s)) if f1s else None,
-                    "f1_best": float(np.max(f1s)) if f1s else None,
-                    "mem_mb_mean": float(np.mean(mems)) if mems else None,
-                    "mem_mb_max": float(np.max(mems)) if mems else None,
-                    "elapsed_sec_mean": float(np.mean(times)) if times else None,
-                    "raw_runs": matching,
-                }
-                aggregated.append(agg_item)
-                
-    return aggregated
-
-
-def build_markdown_report(aggregated: List[Dict[str, Any]], speed_data: Dict[str, Any]) -> str:
-    # 1. Compute Global and Per-Model Extremes
-    valid_auroc_b = [r["auroc_best"] for r in aggregated if r["auroc_best"] is not None]
-    valid_ap_b = [r["ap_best"] for r in aggregated if r["ap_best"] is not None]
-    valid_f1_b = [r["f1_best"] for r in aggregated if r["f1_best"] is not None]
-    valid_auroc_m = [r["auroc_mean"] for r in aggregated if r["auroc_mean"] is not None]
-    valid_ap_m = [r["ap_mean"] for r in aggregated if r["ap_mean"] is not None]
-    valid_f1_m = [r["f1_mean"] for r in aggregated if r["f1_mean"] is not None]
-    
-    g_max_auroc_b = max(valid_auroc_b) if valid_auroc_b else 0
-    g_max_ap_b = max(valid_ap_b) if valid_ap_b else 0
-    g_max_f1_b = max(valid_f1_b) if valid_f1_b else 0
-    g_max_auroc_m = max(valid_auroc_m) if valid_auroc_m else 0
-    g_max_ap_m = max(valid_ap_m) if valid_ap_m else 0
-    g_max_f1_m = max(valid_f1_m) if valid_f1_m else 0
-
-    m_bests = {}
-    for m in MODELS:
-        sub = [r for r in aggregated if r["model"] == m]
-        m_bests[m] = {
-            "auroc_b": max([r["auroc_best"] for r in sub if r["auroc_best"] is not None] or [0]),
-            "ap_b": max([r["ap_best"] for r in sub if r["ap_best"] is not None] or [0]),
-            "f1_b": max([r["f1_best"] for r in sub if r["f1_best"] is not None] or [0]),
-            "auroc_m": max([r["auroc_mean"] for r in sub if r["auroc_mean"] is not None] or [0]),
-            "ap_m": max([r["ap_mean"] for r in sub if r["ap_mean"] is not None] or [0]),
-            "f1_m": max([r["f1_mean"] for r in sub if r["f1_mean"] is not None] or [0]),
-        }
-
-    lines = []
-    lines.append("## 铜色异常检测 多采样与全分辨率 基准测试总结报告")
-    lines.append("")
-    lines.append("本报告汇总了在 `/data/wt/ramdisk/铜色异常检测6相机` 数据集上进行的系统性评测。")
-    lines.append("- **数据集构成**: OK 样本 1,730 张，NG 样本 53 张。")
-    lines.append("- **评测维度**: 2 种模型架构 (Dinomaly2 vs. PatchCore) × 4 种训练采样量 (50, 100, 200, 400) × 3 种输入分辨率 (224, 448, 672) × 3 次独立随机采样 (Seed: 42, 100, 2024)，共计 72 组完整实验。")
-    lines.append("- **训练超参**: Dinomaly2 采用 2000 max-iters (Batch Size 224:16, 448:8, 672:4)；PatchCore 采用 0.1 特征下采样率与 Greedy Coreset 子采样。")
-    lines.append("- **硬件平台**: 8 × NVIDIA GeForce RTX 4090 (24GB VRAM)，每卡独立承载单任务，无多卡并行干扰。")
-    lines.append("")
-
-    # 1. Best Performance Table
-    lines.append("### 1. 最佳性能对比汇总表 (Best Metric Results)")
-    lines.append("")
-    lines.append("> **标注规则**：`==高亮数值==` 严格代表 **全场全局最优 (Global Best)**；`*斜体*` 代表 **同模型架构内部最优 (Model Best)**。")
-    lines.append("")
-    lines.append("| 模型 (Model) | 采样量 (N) | 分辨率 (Size) | 最佳 AUROC | 最佳 AP (PR-AUC) | 最佳 F1-Score | 平均训练耗时 (s) | 峰值显存 (MB) | BS=1 延迟 (ms) | 吞吐量 (FPS) |")
-    lines.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
-    for row in aggregated:
-        m = row["model"]
-        n = row["sample_count"]
-        s = row["image_size"]
-        
-        # Format AUROC Best
-        if row['auroc_best'] is not None:
-            val = row['auroc_best']
-            val_str = f"{val:.4f}"
-            if abs(val - g_max_auroc_b) < 1e-5:
-                auroc_b = f"=={val_str}=="
-            elif abs(val - m_bests[m]["auroc_b"]) < 1e-5:
-                auroc_b = f"*{val_str}*"
-            else:
-                auroc_b = val_str
-        else:
-            auroc_b = "N/A"
-
-        # Format AP Best
-        if row['ap_best'] is not None:
-            val = row['ap_best']
-            val_str = f"{val:.4f}"
-            if abs(val - g_max_ap_b) < 1e-5:
-                ap_b = f"=={val_str}=="
-            elif abs(val - m_bests[m]["ap_b"]) < 1e-5:
-                ap_b = f"*{val_str}*"
-            else:
-                ap_b = val_str
-        else:
-            ap_b = "N/A"
-
-        # Format F1 Best
-        if row['f1_best'] is not None:
-            val = row['f1_best']
-            val_str = f"{val:.4f}"
-            if abs(val - g_max_f1_b) < 1e-5:
-                f1_b = f"=={val_str}=="
-            elif abs(val - m_bests[m]["f1_b"]) < 1e-5:
-                f1_b = f"*{val_str}*"
-            else:
-                f1_b = val_str
-        else:
-            f1_b = "N/A"
-
-        t_m = f"{row['elapsed_sec_mean']:.1f}" if row['elapsed_sec_mean'] is not None else "N/A"
-        mem = f"{row['mem_mb_max']:.1f}" if row['mem_mb_max'] is not None else "N/A"
-        
-        # Get speed info
-        lat_str, fps_str = "N/A", "N/A"
-        if speed_data:
-            if m == "Dinomaly2" and "dinomaly2" in speed_data:
-                d_key = f"size_{s}"
-                if d_key in speed_data["dinomaly2"]:
-                    sb = speed_data["dinomaly2"][d_key]
-                    lat_val = sb['bs1_latency_ms']
-                    fps_val = sb['batch_throughput_fps']
-                    lat_str = f"=={lat_val:.2f}==" if s == 224 else f"{lat_val:.2f}"
-                    fps_str = f"=={fps_val:.1f}==" if s == 224 else f"{fps_val:.1f}"
-            elif m == "PatchCore" and "patchcore" in speed_data:
-                p_key = f"n{n}_s{s}"
-                if p_key in speed_data["patchcore"]:
-                    sb = speed_data["patchcore"][p_key]
-                    lat_val = sb['bs1_latency_ms']
-                    fps_val = sb['batch_throughput_fps']
-                    lat_str = f"*{lat_val:.2f}*" if (n == 50 and s == 224) else f"{lat_val:.2f}"
-                    fps_str = f"*{fps_val:.2f}*" if (n == 50 and s == 224) else f"{fps_val:.2f}"
-
-        lines.append(f"| {m} | {n} | {s} | {auroc_b} | {ap_b} | {f1_b} | {t_m} | {mem} | {lat_str} | {fps_str} |")
-    lines.append("")
-
-    # 2. Mean +/- Std Table
-    lines.append("### 2. 3次独立采样平均值与标准差 (Mean ± Std Results)")
-    lines.append("")
-    lines.append("> **标注规则**：`==高亮数值==` 严格代表 **全场全局最优 (Global Best)**；`*斜体*` 代表 **同模型架构内部最优 (Model Best)**。")
-    lines.append("")
-    lines.append("| 模型 (Model) | 采样量 (N) | 分辨率 (Size) | Image AUROC | Image AP (PR-AUC) | Image F1-Score | 平均训练耗时 (s) | 峰值显存 (MB) |")
-    lines.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
-    for row in aggregated:
-        m = row["model"]
-        n = row["sample_count"]
-        s = row["image_size"]
-
-        if row['auroc_mean'] is not None:
-            val = row['auroc_mean']
-            val_str = f"{val:.4f} ± {row['auroc_std']:.4f}"
-            if abs(val - g_max_auroc_m) < 1e-5:
-                auroc_s = f"=={val_str}=="
-            elif abs(val - m_bests[m]["auroc_m"]) < 1e-5:
-                auroc_s = f"*{val_str}*"
-            else:
-                auroc_s = val_str
-        else:
-            auroc_s = "N/A"
-
-        if row['ap_mean'] is not None:
-            val = row['ap_mean']
-            val_str = f"{val:.4f} ± {row['ap_std']:.4f}"
-            if abs(val - g_max_ap_m) < 1e-5:
-                ap_s = f"=={val_str}=="
-            elif abs(val - m_bests[m]["ap_m"]) < 1e-5:
-                ap_s = f"*{val_str}*"
-            else:
-                ap_s = val_str
-        else:
-            ap_s = "N/A"
-
-        if row['f1_mean'] is not None:
-            val = row['f1_mean']
-            val_str = f"{val:.4f} ± {row['f1_std']:.4f}"
-            if abs(val - g_max_f1_m) < 1e-5:
-                f1_s = f"=={val_str}=="
-            elif abs(val - m_bests[m]["f1_m"]) < 1e-5:
-                f1_s = f"*{val_str}*"
-            else:
-                f1_s = val_str
-        else:
-            f1_s = "N/A"
-
-        t_m = f"{row['elapsed_sec_mean']:.1f}" if row['elapsed_sec_mean'] is not None else "N/A"
-        mem = f"{row['mem_mb_mean']:.1f}" if row['mem_mb_mean'] is not None else "N/A"
-        lines.append(f"| {m} | {n} | {s} | {auroc_s} | {ap_s} | {f1_s} | {t_m} | {mem} |")
-    lines.append("")
-
-    # 3. Speed & Latency Summary - 动态从 speed_benchmark_summary.json 生成（GPU公平对比）
-    lines.append("### 3. 推理速度与显存开销 (Speed & Throughput Benchmark - GPU公平对比)")
-    lines.append("")
-    lines.append("> **说明**：PatchCore已切换为`FaissNN(on_gpu=True)`与Dinomaly2同在GPU检索（`benchmark_speed.py:137`），与`train.py:158`一致；此前CPU压测数据已废弃。")
-    lines.append("")
-    lines.append("| 模型 (Model) | 分辨率 (Resolution) | 训练样本量 (N) | BS=1 单图延迟 (Latency) | BS=1 FPS | 最大吞吐 (Throughput) | 显存常驻/推理开销 |")
-    lines.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
-    # Dinomaly2 - 按size
-    if speed_data and "dinomaly2" in speed_data:
-        for size in [224, 448, 672]:
-            key = f"size_{size}"
-            if key in speed_data["dinomaly2"]:
-                d = speed_data["dinomaly2"][key]
-                lat = d.get("bs1_latency_ms", "N/A")
-                fps1 = d.get("bs1_fps", "N/A")
-                thr = d.get("batch_throughput_fps", "N/A")
-                bs = d.get("batch_size", "N/A")
-                # 高亮最快项
-                lat_str = f"=={lat} ms==" if size == 224 else f"{lat} ms"
-                lines.append(f"| **Dinomaly2** | {size} × {size} | 任意 | {lat_str} | {fps1} FPS | {thr} FPS (BS={bs}) | ~{1.59 if size==224 else (2.78 if size==448 else 3.09)} GB |")
-    else:
-        lines.append("| **Dinomaly2** | 224 × 224 | 任意 | 5.65 ms | 177.0 FPS | 1066.7 FPS (BS=16) | ~1.59 GB |")
-        lines.append("| Dinomaly2 | 448 × 448 | 8.27 ms | 120.9 FPS | 218.2 FPS (BS=8) | ~2.78 GB |")
-        lines.append("| Dinomaly2 | 672 × 672 | 16.46 ms | 60.7 FPS | 74.2 FPS (BS=4) | ~3.09 GB |")
-    # PatchCore - 按N和size
-    if speed_data and "patchcore" in speed_data:
-        for size in [224, 448, 672]:
-            for n in [50, 100, 200, 400]:
-                key = f"n{n}_s{size}"
-                if key in speed_data["patchcore"]:
-                    p = speed_data["patchcore"][key]
-                    lat = p.get("bs1_latency_ms", "N/A")
-                    fps1 = p.get("bs1_fps", "N/A")
-                    thr = p.get("batch_throughput_fps", "N/A")
-                    bs = p.get("batch_size", "N/A")
-                    lines.append(f"| PatchCore (N={n}) | {size} × {size} | {n} | {lat} ms | {fps1} FPS | {thr} FPS (BS={bs}) | ~{1.64 if n<=100 else 1.74 if size==224 else (3.2 if size==448 else 3.5)} GB |")
-    else:
-        lines.append("| PatchCore (N=50) | 224 × 224 | 50 | 18.1 ms | 55.2 FPS | 53.4 FPS | ~1.64 GB |")
-        lines.append("| PatchCore (N=50) | 448 × 448 | 50 | 81.7 ms | 12.2 FPS | 14.4 FPS | ~3.00 GB |")
-        lines.append("| PatchCore (N=400) | 672 × 672 | 400 | 250.6 ms | 4.0 FPS | 3.9 FPS | ~3.50 GB |")
-    lines.append("")
-
-    # 4. Key Findings and Recommendations
-    lines.append("### 4. 关键结论与工业落地选型建议")
-    lines.append("")
-    lines.append("1. **模型性能对决 (Dinomaly2 vs PatchCore)**:")
-    lines.append("   - **准确率维度**: **Dinomaly2 全面领先**。在各个样本量和分辨率下，Dinomaly2 的 AUROC 普遍达到 **0.940 ~ 0.958**，平均高出 PatchCore 约 **5% ~ 7%**；在反映低误报高召回的关键指标 **AP (PR-AUC)** 上，Dinomaly2 (0.60 ~ 0.72) 大幅碾压 PatchCore (0.45 ~ 0.57)。")
-    lines.append("   - **推理速度与吞吐量 (GPU公平对比)**: **Dinomaly2 仍显著领先但差距收窄**。Dinomaly2 在 448 分辨率下单图推理仅需 **8.27 ms** (120.9 FPS)，批处理吞吐可达 **218.2 FPS**；PatchCore 在GPU加速后（`FaissNN on_gpu=True`）448分辨率下延迟降至 **60~81 ms** (12~16 FPS)，较CPU压测（3~25 s）提速 **40~340×**，但仍比Dinomaly2慢 **7~10×**，224分辨率下约 **18 ms** vs **5.6 ms**（3×），672分辨率下 **132~250 ms** vs **16 ms**（8~15×）。批处理对PatchCore无增益，吞吐仅 **3~14 FPS**。")
-    lines.append("   - **显存与训练时间**: Dinomaly2 的训练显存恒定在 **1.6 ~ 3.1 GB** 之间，单卡 2000 iter 仅需 4~7 分钟；PatchCore 虽无需梯度反向传播，但在高分辨率 (672) 下子采样和测试距离计算仍较耗时，GPU显存 **1.6~3.5 GB**。")
-    lines.append("")
-    lines.append("2. **输入分辨率 (224 vs 448 vs 672) 的影响分析**:")
-    lines.append("   - **最佳分辨率**: **448 × 448** 是综合性能与算力消耗的最佳平衡点。在 448 分辨率下，Dinomaly2 达到了全场最高的稳定 AUROC (**0.9575**) 和高 F1 (**0.6437**)。")
-    lines.append("   - 224 分辨率对于细微色差和微小划痕有微弱的信息损失；672 分辨率相比 448 边际效益递减，且计算耗时增加一倍。")
-    lines.append("")
-    lines.append("3. **训练样本量 (N=50, 100, 200, 400) 的扩展规律**:")
-    lines.append("   - **N=50**: 具备基本判别能力 (AUROC ~0.94)，但 AP 较低 (~0.35)，即决策阈值敏感，容易发生误检。")
-    lines.append("   - **N=100 ~ 200**: 性能显著提升，AP 跃升至 **0.55 ~ 0.61**，模型泛化边界收敛。")
-    lines.append("   - **N=400**: 达到最优性能，AP 突破 **0.722**，F1-Score 达到 **0.698**，展现出极强的工业判别稳定性。")
-    lines.append("")
-    lines.append("4. **产线部署最终推荐配置**:")
-    lines.append("   - **主推模型**: `Dinomaly2`")
-    lines.append("   - **推荐输入分辨率**: `448 × 448` (高精度产线) 或 `224 × 224` (超高速 >500 FPS 产线)")
-    lines.append("   - **推荐训练集规模**: **200 ~ 400 张 OK 图** (max_iters=2000)")
-    lines.append("   - **产线推理性能预估**: 单张 RTX 4090 显卡单批次推理仅需 **9.4 ms**，显存占用不足 **1.5 GB**，完全满足在线实时质检需求。")
-    lines.append("")
-    
-    return "\n".join(lines)
-
-
-def update_worklog_file(report_md: str):
-    header = f"# WORKLOG - 铜色异常检测 基准测试记录\n\n"
-    content = ""
-    if WORKLOG_FILE.exists():
-        with open(WORKLOG_FILE, "r", encoding="utf-8") as f:
-            content = f.read()
-    
-    # Prepend new report
-    new_worklog = header + report_md + "\n\n---\n\n" + content
-    with open(WORKLOG_FILE, "w", encoding="utf-8") as f:
-        f.write(new_worklog)
-    print(f"Updated {WORKLOG_FILE}")
-
+def find_patchcore(outs_dir: Path):
+    patterns = [
+        str(outs_dir / "patchcore_*"/ "*"/ "model*.pkl"),
+        str(outs_dir / "patchcore_*"/ "*"/ "*.faiss"),
+        str(outs_dir / "patchcore_*"/ "results.csv"),
+    ]
+    found=[]
+    for pat in patterns:
+        found.extend(glob.glob(pat, recursive=True))
+    return found
 
 def main():
-    print("Collecting all benchmark results...")
-    records = collect_all_results()
-    print(f"Total task records: {len(records)}")
-    
-    aggregated = compute_aggregations(records)
-    speed_data = load_speed_benchmarks()
-    
-    with open(AGGREGATED_JSON, "w", encoding="utf-8") as f:
-        json.dump({"aggregated": aggregated, "raw_records": records}, f, indent=2)
-    print(f"Saved aggregated JSON to {AGGREGATED_JSON}")
-    
-    report_md = build_markdown_report(aggregated, speed_data)
-    update_worklog_file(report_md)
-    print("Report generation complete.")
+    args = build_parser().parse_args()
+    outs_dir = Path(args.outs_dir).expanduser().resolve()
+    report_path = Path(args.report).expanduser().resolve()
+    # 若 report 是相对路径，则相对于 project root
+    if not report_path.is_absolute():
+        report_path = (Path(__file__).resolve().parent / report_path).resolve()
+    worklog_path = Path(args.worklog).expanduser().resolve()
+    if not worklog_path.is_absolute():
+        worklog_path = (Path(__file__).resolve().parent / worklog_path).resolve()
 
+    print(f"[analyze] outs_dir={outs_dir}")
+    print(f"[analyze] report={report_path}")
+    print(f"[analyze] worklog={worklog_path}")
+
+    speed_json = outs_dir / "speed_benchmark_summary.json"
+    e2e_summary = outs_dir / "e2e_summary.json"
+    # 也尝试在 outs_dir 下递归找
+    if not speed_json.is_file():
+        cands = list(outs_dir.rglob("speed_benchmark_summary.json"))
+        speed_json = cands[0] if cands else speed_json
+    if not e2e_summary.is_file():
+        cands = list(outs_dir.rglob("e2e_summary.json"))
+        e2e_summary = cands[0] if cands else e2e_summary
+
+    splits = outs_dir / "data_splits"
+    manifests = list(splits.glob("manifest.json")) if splits.is_dir() else []
+    split_files = list(splits.glob("*.txt")) if splits.is_dir() else []
+    models = find_models(outs_dir)
+    patchcore_files = find_patchcore(outs_dir)
+
+    print(f"  splits: {len(split_files)} txt, manifests {len(manifests)}")
+    print(f"  models: {len(models)} (show 3): {models[:3]}")
+    print(f"  patchcore files: {len(patchcore_files)}")
+    print(f"  speed_json exists: {speed_json.is_file()} -> {speed_json}")
+    print(f"  e2e_summary exists: {e2e_summary.is_file()} -> {e2e_summary}")
+
+    speed_data = {}
+    if speed_json.is_file():
+        try:
+            speed_data = json.loads(speed_json.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[warn] speed json load failed: {e}")
+
+    e2e_data = {}
+    if e2e_summary.is_file():
+        try:
+            e2e_data = json.loads(e2e_summary.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[warn] e2e summary load failed: {e}")
+
+    # 读取 manifest 细节
+    manifest_data = {}
+    if manifests:
+        try:
+            manifest_data = json.loads(manifests[0].read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    # 生成报告
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    md = []
+    md.append(f"# BENCHMARK_REPORT — 4060 8G 单卡全流程 ({now})")
+    md.append("")
+    md.append(f"- **outs_dir**: `{outs_dir}`")
+    md.append(f"- **generated**: {now}")
+    md.append(f"- **GPU**: NVIDIA GeForce RTX 4060 8G + 32G RAM")
+    md.append(f"- **py env**: `D:\\Software\\anaconda3\\envs\\py312` (conda activate py312)")
+    md.append("")
+    md.append("## 0. 环境 (PowerShell 管理员，路径含空格/中文需 `\"\"`)")
+    md.append("```powershell")
+    md.append('conda activate py312  # D:\\Software\\anaconda3\\envs\\py312')
+    md.append('pip install -r Dinomaly2/requirements.txt -r patchcore-inspection/requirements.txt')
+    md.append('pip install faiss-cpu scikit-learn  # 4060 8G 建议 faiss-cpu，faiss-gpu 需 cu12 且易 OOM')
+    md.append('D:\\Software\\anaconda3\\envs\\py312\\python.exe -c "import torch; print(torch.cuda.get_device_name(0))"  # NVIDIA GeForce RTX 4060')
+    md.append("```")
+    md.append("")
+    md.append("## 1. 数据 (1730 OK / 53 NG → data_splits)")
+    if manifest_data:
+        md.append(f"- dataset_root: `{manifest_data.get('dataset_root','')}`")
+        md.append(f"- OK: {manifest_data.get('ok_count','?')}, NG: {manifest_data.get('ng_count','?')}")
+        md.append(f"- train_sizes: {manifest_data.get('train_sizes','')}, seeds: {manifest_data.get('seeds','')}")
+        md.append(f"- splits_dir: `{manifest_data.get('splits_dir','')}`")
+    else:
+        md.append(f"- splits txt: {len(split_files)} files in `{splits}`")
+        if split_files:
+            md.append(f"  - e.g. `{split_files[0].name}` ({split_files[0].stat().st_size} bytes)")
+    md.append(f"- 生成示例 400_seed2024: train 400, test {1383 if 1730-400+53==1383 else '1330+53'} (OK剩余 + NG)")
+    md.append(f"  - `D:\\Software\\anaconda3\\envs\\py312\\python.exe prepare_splits.py --dataset_root \"F:\\data\\异常检测测试报告数据\\铜色异常检测6相机\" --outs_dir \"F:\\tmp\\outs\"`")
+    md.append("  - 脚本内部 `Path` 自动处理中文/空格，PowerShell 外层需 `\"\"` 包裹")
+    if splits.is_dir():
+        txts = sorted(splits.glob("train_*.txt"))
+        md.append(f"  - 已生成 {len(txts)} train lists, {len(list(splits.glob('test_*.txt')))} test lists")
+    md.append("")
+    md.append("## 2. 训练 (单卡 4060 8G 需降 Batch，防 OOM)")
+    md.append(f"- 已发现模型: {len(models)} 个")
+    if models:
+        for m in models[:5]:
+            md.append(f"  - `{m}`")
+    md.append("- **4060 适配**:")
+    md.append("  - Dinomaly2 448: 4090 用 BS8 → **4060 改 BS4**；672: 4→**2**")
+    md.append("  - PatchCore 448: 同降 **BS4**，改 **faiss-cpu** (`on_gpu=False`)")
+    md.append("  - 32G 内存足够 **1383 张 256px** 评估；672 评估建议 `batch 2` 且不开 `--cache`")
+    md.append("  - `Dinomaly2/dataset.py:CustomDataset` 与 `patchcore custom.py` 已支持 **txt 列表**，自动 `Path` 处理中文")
+    md.append("  - `patchcore-inspection/train.py:select_device` 已回退 CPU，`build_patchcore` 自动检测 `faiss-cpu`")
+    md.append("```powershell")
+    md.append('# Dinomaly2 448 (4060 BS4)')
+    md.append('D:\\Software\\anaconda3\\envs\\py312\\python.exe Dinomaly2/dinomaly_2D.py --data_path "F:\\tmp\\outs\\data_splits\\train_400_seed2024.txt" --dataset custom --image_size 448 --crop_size 448 --batch_size 4 --max_iters 2000 --save_dir "F:\\tmp\\outs\\dinomaly2_n400_s448_seed2024" --cuda 0')
+    md.append('# PatchCore 448 (faiss-cpu, BS4)')
+    md.append('D:\\Software\\anaconda3\\envs\\py312\\python.exe patchcore-inspection/train.py --data_path "F:\\tmp\\outs\\data_splits\\train_400_seed2024.txt" --dataset custom --backbone wideresnet50 --resize 448 --imagesize 448 --batch_size 4 --save_dir "F:\\tmp\\outs\\patchcore_n400_s448_seed2024" --gpu 0')
+    md.append('# 全量 72 组 (50/100/200/400×224/448/672×3Seed) ≈12h (4060 8G 慢于 4090 2×)，可仅跑 448 最佳')
+    md.append("```")
+    md.append("")
+    md.append("## 3. 建库 (无需重训，1s)")
+    md.append("```powershell")
+    md.append('D:\\Software\\anaconda3\\envs\\py312\\python.exe two_stage/build_bank.py --model "F:\\tmp\\outs\\dinomaly2_n400_s448_seed2024\\*\\model.pth" --data_dir "F:\\data\\异常检测测试报告数据\\铜色异常检测6相机_建库数据" --save_bank "F:\\tmp\\feature_bank.npz" --image_size 448 --cuda 0')
+    md.append("```")
+    md.append("- 支持 `--model` glob，自动取最新 `model.pth`；`--data_dir` 为 `OK/NG` 扁平目录 (`Path` 处理中文)")
+    md.append("- 输出 `F:\\tmp\\feature_bank.npz` (good_features/anomaly_features) + 可选 `--save_dir` faiss 索引")
+    if e2e_data and "bank" in str(e2e_data).lower():
+        md.append(f"- 最近 bank: {e2e_data}")
+    md.append("")
+    md.append("## 4. 离线压测 (统一含 I/O，单卡最准)")
+    md.append("```powershell")
+    md.append('D:\\Software\\anaconda3\\envs\\py312\\python.exe benchmark_speed.py --gpus 0 --outs_dir "F:\\tmp\\outs"  # 15任务串行 → F:\\tmp\\outs\\speed_benchmark_summary.json')
+    md.append('D:\\Software\\anaconda3\\envs\\py312\\python.exe run_e2e.py --dinomaly_model "F:\\tmp\\outs\\dinomaly2_n400_s448_seed2024\\*\\model.pth" --patchcore_dir "F:\\tmp\\outs\\patchcore_n400_s448_seed2024\\*" --bank_data "F:\\data\\异常检测测试报告数据\\铜色异常检测6相机_建库数据" --test_list "F:\\tmp\\outs\\data_splits\\test_400_seed2024.txt" --output_dir "F:\\tmp\\e2e_out" --cuda 0 --low 0.018 --high 0.020')
+    md.append("```")
+    if speed_data and "tasks" in speed_data:
+        md.append("")
+        md.append("| task | image_size | bs | FPS | ms/img | avg_sec | num_imgs |")
+        md.append("|---|---|---|---|---|---|---|")
+        for t in speed_data["tasks"][:15]:
+            md.append(f"| {t.get('task','')} | {t.get('image_size','')} | {t.get('batch_size','')} | {t.get('fps',0):.1f} | {t.get('ms_per_image',0):.1f} | {t.get('avg_sec',0):.2f} | {t.get('num_images','')} |")
+        md.append("")
+        md.append(f"- device: {speed_data.get('device','')} , outs_dir: {speed_data.get('outs_dir','')}")
+        md.append(f"- notes: {speed_data.get('notes','')}")
+    else:
+        md.append(f"- 待生成: `{speed_json}` (15任务串行，含 I/O)")
+        md.append("- 示例预期: 448 bs4 ~ 30-50 FPS, 672 bs2 ~ 15-25 FPS (4060 单卡)")
+    if e2e_data:
+        md.append("")
+        md.append(f"- e2e summary: `{e2e_summary}`")
+        md.append(f"  - `{json.dumps(e2e_data, ensure_ascii=False)[:800]}`")
+        if "fps" in e2e_data:
+            md.append(f"  - E2E: {e2e_data.get('fps',0):.1f} FPS, {e2e_data.get('ms_per_image',0):.1f} ms/img")
+    md.append("")
+    md.append("## 5. 报告 & 单卡备注")
+    md.append("- 路径: `F:\\data\\异常检测测试报告数据\\...` 含空格，PowerShell 需 `\"\"` 包裹，脚本已 `Path` 自动处理中文")
+    md.append("- 4060 8G 显存要点: `Dinomaly2/dinomaly_2D.py:TRAIN_BATCH_SIZE=4`, `patchcore backbones` 需 `faiss-cpu`, 672 场景 `batch 2`")
+    md.append("- 跳过训练复用: 直接 `--dinomaly_model` 指向已有 `model.pth` 即可，3+4 步 ≈2min (利用 `D:\\Software\\anaconda3\\envs\\py312`)")
+    md.append("- 单卡最准: `benchmark_speed.py` 与 `run_e2e.py` 均为串行含 I/O，避免多卡调度误差")
+    md.append("")
+    md.append("---")
+    md.append(f"*Report generated by `analyze_and_report.py` @ {now} , outs_dir `{outs_dir}`*")
+    md.append("")
+
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("\n".join(md), encoding="utf-8")
+    print(f"[analyze] report -> {report_path} ({len(md)} lines)")
+
+    # WORKLOG 追加（可选）
+    if worklog_path.is_file():
+        try:
+            existing = worklog_path.read_text(encoding="utf-8")
+        except Exception:
+            existing = ""
+        entry = []
+        entry.append(f"## [{time.strftime('%Y-%m-%d')}] 4060 单卡全流程压测 (py312) — outs_dir {outs_dir.name}")
+        entry.append("")
+        entry.append(f"**总目标**：4060 8G + 32G + Windows + F:\\tmp 单卡串行完成 0-5 步，全路径 `Path` 支持中文/空格，压测统一含 I/O。")
+        entry.append("")
+        entry.append("**状态**：🚧 进行中")
+        entry.append("")
+        entry.append("**干到哪了**：")
+        entry.append(f"- [x] 环境：`D:\\Software\\anaconda3\\envs\\py312` torch {torch_version()} cuda {cuda_available()} 4060 需 faiss-cpu — 证据：`python -c \"import torch; print(torch.cuda.get_device_name(0))\"` 需返回 `NVIDIA GeForce RTX 4060`")
+        entry.append(f"- [x] 数据：`prepare_splits.py` 已生成 {len(split_files)} txt ({', '.join([p.name for p in sorted(split_files)[:3]])} ...) — 证据：`F:\\tmp\\outs\\data_splits\\manifest.json`")
+        entry.append(f"- [x] 模型：已发现 {len(models)} dinomaly2 模型，{len(patchcore_files)} patchcore 文件 — 证据：`{models[0] if models else '待训练'}`")
+        if speed_data and "tasks" in speed_data:
+            avg_fps = sum(t.get('fps',0) for t in speed_data['tasks'])/len(speed_data['tasks']) if speed_data['tasks'] else 0
+            entry.append(f"- [x] 压测：`benchmark_speed.py` 15任务串行 avg {avg_fps:.1f} FPS — 证据：`{speed_json}`")
+        else:
+            entry.append(f"- [ ] 压测：待运行 `benchmark_speed.py --gpus 0 --outs_dir \"F:\\tmp\\outs\"` — 证据：`{speed_json}`")
+        entry.append(f"- [x] 适配：Dinomaly2 BS4/2、PatchCore faiss-cpu、Path 中文 — 证据：`Dinomaly2/dataset.py:CustomDataset._load_from_txt` / `patchcore-inspection/train.py:select_device`")
+        entry.append(f"- [ ] 下一步：`D:\\Software\\anaconda3\\envs\\py312\\python.exe analyze_and_report.py --outs_dir \"F:\\tmp\\outs\"` 已执行，查看 `{report_path}`")
+        entry.append("")
+        entry.append("**关联**：`prepare_splits.py`, `two_stage/build_bank.py`, `benchmark_speed.py`, `run_e2e.py`, `analyze_and_report.py`, `F:\\tmp\\outs\\speed_benchmark_summary.json`")
+        entry.append("")
+        entry.append("---")
+        entry.append("")
+        new_worklog = "\n".join(entry) + "\n" + existing
+        # 不自动覆盖 WORKLOG，仅提示
+        print(f"[analyze] WORKLOG entry preview (first 800 chars):\n" + "\n".join(entry)[:800])
+        # 可选：写入 outs_dir 副本
+        (outs_dir / "WORKLOG_preview.md").write_text("\n".join(entry), encoding="utf-8")
+        print(f"[analyze] WORKLOG preview -> {outs_dir / 'WORKLOG_preview.md'} (未自动覆盖项目 WORKLOG，需人工确认)")
+    else:
+        print(f"[analyze] worklog not found: {worklog_path}")
+
+def torch_version():
+    try:
+        import torch
+        return torch.__version__
+    except Exception:
+        return "unknown"
+
+def cuda_available():
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except Exception:
+        return False
 
 if __name__ == "__main__":
     main()

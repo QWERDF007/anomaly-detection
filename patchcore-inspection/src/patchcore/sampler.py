@@ -104,13 +104,10 @@ class GreedyCoresetSampler(BaseSampler):
             select_idx = torch.argmax(coreset_anchor_distances).item()
             coreset_indices.append(select_idx)
 
-            coreset_select_distance = distance_matrix[
-                :, select_idx : select_idx + 1  # noqa E203
-            ]
-            coreset_anchor_distances = torch.cat(
-                [coreset_anchor_distances.unsqueeze(-1), coreset_select_distance], dim=1
+            coreset_select_distance = distance_matrix[:, select_idx]
+            coreset_anchor_distances = torch.minimum(
+                coreset_anchor_distances, coreset_select_distance
             )
-            coreset_anchor_distances = torch.min(coreset_anchor_distances, dim=1).values
 
         return np.array(coreset_indices)
 
@@ -128,14 +125,9 @@ class ApproximateGreedyCoresetSampler(GreedyCoresetSampler):
         super().__init__(percentage, device, dimension_to_project_features_to)
 
     def _compute_greedy_coreset_indices(self, features: torch.Tensor) -> np.ndarray:
-        """Runs approximate iterative greedy coreset selection.
+        """Runs approximate iterative greedy coreset selection with in-place distance minimization.
 
-        This greedy coreset implementation does not require computation of the
-        full N x N distance matrix and thus requires a lot less memory, however
-        at the cost of increased sampling times.
-
-        Args:
-            features: [NxD] input feature bank to sample.
+        Optimized to avoid O(N*K) torch.cat memory reallocations and GPU sync overheads.
         """
         number_of_starting_points = np.clip(
             self.number_of_starting_points, None, len(features)
@@ -147,26 +139,22 @@ class ApproximateGreedyCoresetSampler(GreedyCoresetSampler):
         approximate_distance_matrix = self._compute_batchwise_differences(
             features, features[start_points]
         )
-        approximate_coreset_anchor_distances = torch.mean(
-            approximate_distance_matrix, axis=-1
-        ).reshape(-1, 1)
+        min_anchor_distances = torch.mean(
+            approximate_distance_matrix, dim=-1
+        )
         coreset_indices = []
         num_coreset_samples = int(len(features) * self.percentage)
 
         with torch.no_grad():
-            for _ in tqdm.tqdm(range(num_coreset_samples), desc="Subsampling..."):
-                select_idx = torch.argmax(approximate_coreset_anchor_distances).item()
+            for _ in tqdm.tqdm(range(num_coreset_samples), desc="Subsampling (Optimized)..."):
+                select_idx = torch.argmax(min_anchor_distances).item()
                 coreset_indices.append(select_idx)
                 coreset_select_distance = self._compute_batchwise_differences(
                     features, features[select_idx : select_idx + 1]  # noqa: E203
+                ).squeeze(-1)
+                min_anchor_distances = torch.minimum(
+                    min_anchor_distances, coreset_select_distance
                 )
-                approximate_coreset_anchor_distances = torch.cat(
-                    [approximate_coreset_anchor_distances, coreset_select_distance],
-                    dim=-1,
-                )
-                approximate_coreset_anchor_distances = torch.min(
-                    approximate_coreset_anchor_distances, dim=1
-                ).values.reshape(-1, 1)
 
         return np.array(coreset_indices)
 
