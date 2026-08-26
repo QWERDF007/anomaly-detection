@@ -27,7 +27,7 @@ from sklearn.metrics import (
 )
 
 # Set high quality plotting parameters
-plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "Arial", "DejaVu Sans"]
+plt.rcParams["font.sans-serif"] = ["Noto Sans CJK SC", "Noto Serif CJK SC", "SimHei", "Microsoft YaHei", "Arial", "DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
 plt.rcParams["figure.dpi"] = 300
 plt.rcParams["savefig.dpi"] = 300
