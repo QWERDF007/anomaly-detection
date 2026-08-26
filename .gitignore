@@ -217,12 +217,20 @@ marimo/_lsp/
 __marimo__/
 
 # Streamlit
-.streamlit/secrets.toml
-
-
 *.pkl
 *.faiss
 *.pt
 *.pth
 stars_*.json
+
+# Reports & Plans
+*REPORT*.md
+*report*.md
+FINAL.md
+plan.md
+
+# Intermediate experiment artifacts
+Dinomaly2/gui_lookup_results/
+charts/
+
 
