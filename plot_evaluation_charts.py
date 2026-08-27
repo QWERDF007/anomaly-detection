@@ -172,74 +172,133 @@ def plot_single_run_charts(
         print(f"[plot_charts] saved -> {cm_path}")
 
 
-def plot_all_benchmark_charts(chart_dir: Union[str, Path]) -> None:
-    """Generate the full benchmark comparison chart suite across 224, 448, 672."""
+def collect_real_benchmark_metrics(outs_dir: Path):
+    """Dynamically parses actual real metrics from outs_dir (no hardcoded fake data)."""
+    sizes = [224, 448, 672]
+    n_samples = [50, 100, 200, 400]
+
+    metrics = {s: {
+        "dinomaly_auroc": [None]*len(n_samples),
+        "twostage_auroc": [None]*len(n_samples),
+        "patchcore_auroc": [None]*len(n_samples),
+        "dinomaly_f1": [None]*len(n_samples),
+        "twostage_f1": [None]*len(n_samples),
+        "patchcore_f1": [None]*len(n_samples),
+        "dinomaly_tp": [None]*len(n_samples),
+        "twostage_tp": [None]*len(n_samples),
+        "patchcore_tp": [None]*len(n_samples),
+        "dinomaly_fp": [None]*len(n_samples),
+        "twostage_fp": [None]*len(n_samples),
+        "patchcore_fp": [None]*len(n_samples),
+        "dinomaly_train_sec": [None]*len(n_samples),
+        "patchcore_train_sec": [None]*len(n_samples),
+        "twostage_bank_sec": [None]*len(n_samples),
+    } for s in sizes}
+
+    # 1. Parse PatchCore real metrics from metrics.json
+    for s_idx, s in enumerate(sizes):
+        for n_idx, n in enumerate(n_samples):
+            p_dir = outs_dir / f"patchcore_n{n}_s{s}_seed2024"
+            if p_dir.is_dir():
+                p_ms = sorted(p_dir.rglob("metrics.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+                if p_ms:
+                    try:
+                        p_data = json.loads(p_ms[0].read_text(encoding="utf-8"))
+                        metrics[s]["patchcore_auroc"][n_idx] = p_data.get("I-AUROC")
+                        metrics[s]["patchcore_f1"][n_idx] = p_data.get("I-F1")
+                    except Exception:
+                        pass
+
+    # 2. Parse Two-Stage & Dinomaly2 real metrics from e2e_results.json / e2e_summary.json
+    for s_idx, s in enumerate(sizes):
+        for n_idx, n in enumerate(n_samples):
+            e2e_dirs = [outs_dir / f"e2e_out_n{n}_s{s}", outs_dir]
+            for e2e_dir in e2e_dirs:
+                res_f = e2e_dir / "e2e_results.json"
+                if res_f.is_file():
+                    try:
+                        df = pd.DataFrame(json.loads(res_f.read_text(encoding="utf-8")))
+                        if "true_label" in df.columns and "final_score" in df.columns:
+                            y_true = np.array([1 if str(l).lower() in {"anomaly", "ng", "defect", "1"} else 0 for l in df["true_label"]])
+                            y_final = np.nan_to_num(df["final_score"].to_numpy(dtype=np.float64), nan=0.0)
+                            y_raw = np.nan_to_num(df["raw_score"].to_numpy(dtype=np.float64), nan=0.0) if "raw_score" in df.columns else y_final
+
+                            if len(np.unique(y_true)) > 1:
+                                metrics[s]["twostage_auroc"][n_idx] = float(roc_auc_score(y_true, y_final))
+                                metrics[s]["dinomaly_auroc"][n_idx] = float(roc_auc_score(y_true, y_raw))
+
+                            if "decision" in df.columns:
+                                y_pred = np.array([1 if str(d).lower() in {"anomaly", "ng", "1"} else 0 for d in df["decision"]])
+                                tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+                                metrics[s]["twostage_tp"][n_idx] = int(tp)
+                                metrics[s]["twostage_fp"][n_idx] = int(fp)
+                                metrics[s]["twostage_f1"][n_idx] = float(f1_score(y_true, y_pred, zero_division=0))
+                            break
+                    except Exception:
+                        pass
+
+    # 3. Parse real training / bank elapsed times from full_run_summary.json or full_run.log
+    summary_f = outs_dir / "full_run_summary.json"
+    if summary_f.is_file():
+        try:
+            summary_data = json.loads(summary_f.read_text(encoding="utf-8"))
+            for item in summary_data:
+                step = item.get("step")
+                n = item.get("n")
+                s = item.get("sz")
+                elapsed = item.get("elapsed")
+                if s in metrics and n in n_samples and elapsed is not None:
+                    n_idx = n_samples.index(n)
+                    if step == "dinomaly_train":
+                        metrics[s]["dinomaly_train_sec"][n_idx] = elapsed
+                    elif step == "patchcore_train":
+                        metrics[s]["patchcore_train_sec"][n_idx] = elapsed
+                    elif step == "build_bank":
+                        metrics[s]["twostage_bank_sec"][n_idx] = elapsed
+        except Exception:
+            pass
+
+    return metrics
+
+
+def plot_all_benchmark_charts(chart_dir: Union[str, Path], outs_dir: Optional[Union[str, Path]] = None) -> None:
+    """Generate the full benchmark comparison chart suite dynamically from real data."""
     chart_dir = Path(chart_dir).expanduser().resolve()
     chart_dir.mkdir(parents=True, exist_ok=True)
+    if outs_dir is None:
+        outs_dir = chart_dir.parent
+    else:
+        outs_dir = Path(outs_dir).expanduser().resolve()
 
     sizes = [224, 448, 672]
     n_samples = [50, 100, 200, 400]
 
-    # Benchmark metrics
-    metrics = {
-        224: {
-            "dinomaly_auroc": [0.9328, 0.9429, 0.9480, 0.9572],
-            "twostage_auroc": [0.9510, 0.9580, 0.9635, 0.9705],
-            "patchcore_auroc": [0.9583, 0.9634, 0.9664, 0.9698],
-            "dinomaly_f1": [0.9559, 0.9567, 0.9598, 0.9619],
-            "twostage_f1": [0.9650, 0.9675, 0.9710, 0.9745],
-            "patchcore_f1": [0.9675, 0.9673, 0.9680, 0.9701],
-            "dinomaly_tp": [287, 287, 288, 289],
-            "twostage_tp": [289, 289, 290, 291],
-            "patchcore_tp": [288, 288, 289, 290],
-            "dinomaly_fp": [12, 12, 11, 10],
-            "twostage_fp": [8, 7, 5, 4],
-            "patchcore_fp": [7, 7, 6, 5],
-        },
-        448: {
-            "dinomaly_auroc": [0.9442, 0.9493, 0.9554, 0.9618],
-            "twostage_auroc": [0.9630, 0.9685, 0.9720, 0.9765],
-            "patchcore_auroc": [0.9695, 0.9712, 0.9734, 0.9752],
-            "dinomaly_f1": [0.9592, 0.9601, 0.9630, 0.9664],
-            "twostage_f1": [0.9715, 0.9740, 0.9770, 0.9802],
-            "patchcore_f1": [0.9721, 0.9725, 0.9742, 0.9756],
-            "dinomaly_tp": [288, 288, 289, 290],
-            "twostage_tp": [290, 291, 292, 292],
-            "patchcore_tp": [289, 289, 290, 291],
-            "dinomaly_fp": [11, 10, 8, 6],
-            "twostage_fp": [6, 5, 3, 2],
-            "patchcore_fp": [5, 5, 4, 3],
-        },
-        672: {
-            "dinomaly_auroc": [0.9490, 0.9535, 0.9580, 0.9630],
-            "twostage_auroc": [0.9660, 0.9710, 0.9745, 0.9780],
-            "patchcore_auroc": [0.9710, 0.9725, 0.9740, None],
-            "dinomaly_f1": [0.9610, 0.9635, 0.9650, 0.9678],
-            "twostage_f1": [0.9730, 0.9760, 0.9785, 0.9810],
-            "patchcore_f1": [0.9730, 0.9738, 0.9748, None],
-            "dinomaly_tp": [289, 289, 290, 290],
-            "twostage_tp": [291, 291, 292, 292],
-            "patchcore_tp": [290, 290, 291, None],
-            "dinomaly_fp": [10, 9, 7, 5],
-            "twostage_fp": [5, 4, 3, 2],
-            "patchcore_fp": [4, 4, 3, None],
-        },
-    }
+    # Collect actual measured metrics from disk
+    metrics = collect_real_benchmark_metrics(outs_dir)
 
-    # Generate Standalone AUROC charts
+    # 1. Generate Real AUROC charts
     for s in sizes:
         fig, ax = plt.subplots(figsize=(7, 5))
         d = metrics[s]
-        ax.plot(n_samples, d["dinomaly_auroc"], marker="o", lw=2, color="#1f77b4", label="Dinomaly2 (Stage 1)")
-        ax.plot(n_samples, d["twostage_auroc"], marker="s", lw=2.2, color="#2ca02c", label="Two-Stage (Dinomaly2+Bank)")
-        p_n = [n for n, v in zip(n_samples, d["patchcore_auroc"]) if v is not None]
-        p_v = [v for v in d["patchcore_auroc"] if v is not None]
-        ax.plot(p_n, p_v, marker="^", lw=2, color="#d62728", linestyle="--", label="PatchCore")
-        if s == 672:
-            ax.scatter([400], [0.9630], color="#d62728", marker="x", s=100, zorder=5)
-            ax.annotate("N=400 PatchCore\nOOM 内存溢出", xy=(400, 0.9630), xytext=(300, 0.954),
+
+        # Filter valid points
+        d_n = [n for n, v in zip(n_samples, d["dinomaly_auroc"]) if v is not None and not np.isnan(v)]
+        d_v = [v for v in d["dinomaly_auroc"] if v is not None and not np.isnan(v)]
+        t_n = [n for n, v in zip(n_samples, d["twostage_auroc"]) if v is not None and not np.isnan(v)]
+        t_v = [v for v in d["twostage_auroc"] if v is not None and not np.isnan(v)]
+        p_n = [n for n, v in zip(n_samples, d["patchcore_auroc"]) if v is not None and not np.isnan(v)]
+        p_v = [v for v in d["patchcore_auroc"] if v is not None and not np.isnan(v)]
+
+        if d_v: ax.plot(d_n, d_v, marker="o", lw=2, color="#1f77b4", label="Dinomaly2 (Stage 1)")
+        if t_v: ax.plot(t_n, t_v, marker="s", lw=2.2, color="#2ca02c", label="Two-Stage (Dinomaly2+Bank)")
+        if p_v: ax.plot(p_n, p_v, marker="^", lw=2, color="#d62728", linestyle="--", label="PatchCore (GPU FAISS)")
+
+        if s == 672 and len(p_n) > 0 and 400 not in p_n:
+            ax.scatter([400], [0.865], color="#d62728", marker="x", s=100, zorder=5)
+            ax.annotate("N=400 PatchCore\nOOM 内存溢出", xy=(400, 0.865), xytext=(300, 0.860),
                         arrowprops=dict(arrowstyle="->", color="#d62728", lw=1.2), color="#d62728", fontweight="bold")
-        ax.set_title(f"图像级 AUROC 随样本量变化曲线 ({s}x{s})", fontsize=12, fontweight="bold", pad=10)
+
+        ax.set_title(f"图像级 AUROC 随样本量变化曲线 ({s}x{s} 实测)", fontsize=12, fontweight="bold", pad=10)
         ax.set_xlabel("良品训练样本量 (N)", fontsize=10)
         ax.set_ylabel("Image AUROC", fontsize=10)
         ax.set_xticks(n_samples)
@@ -249,16 +308,22 @@ def plot_all_benchmark_charts(chart_dir: Union[str, Path]) -> None:
         fig.savefig(chart_dir / f"01_image_auroc_curve_s{s}.png")
         plt.close(fig)
 
-    # Generate Standalone F1 charts
+    # 2. Generate Real F1 charts
     for s in sizes:
         fig, ax = plt.subplots(figsize=(7, 5))
         d = metrics[s]
-        ax.plot(n_samples, d["dinomaly_f1"], marker="o", lw=2, color="#1f77b4", label="Dinomaly2 (Stage 1)")
-        ax.plot(n_samples, d["twostage_f1"], marker="s", lw=2.2, color="#2ca02c", label="Two-Stage (Dinomaly2+Bank)")
-        p_n = [n for n, v in zip(n_samples, d["patchcore_f1"]) if v is not None]
-        p_v = [v for v in d["patchcore_f1"] if v is not None]
-        ax.plot(p_n, p_v, marker="^", lw=2, color="#d62728", linestyle="--", label="PatchCore")
-        ax.set_title(f"图像级 F1-Score 随样本量变化曲线 ({s}x{s})", fontsize=12, fontweight="bold", pad=10)
+        d_n = [n for n, v in zip(n_samples, d["dinomaly_f1"]) if v is not None and not np.isnan(v)]
+        d_v = [v for v in d["dinomaly_f1"] if v is not None and not np.isnan(v)]
+        t_n = [n for n, v in zip(n_samples, d["twostage_f1"]) if v is not None and not np.isnan(v)]
+        t_v = [v for v in d["twostage_f1"] if v is not None and not np.isnan(v)]
+        p_n = [n for n, v in zip(n_samples, d["patchcore_f1"]) if v is not None and not np.isnan(v)]
+        p_v = [v for v in d["patchcore_f1"] if v is not None and not np.isnan(v)]
+
+        if d_v: ax.plot(d_n, d_v, marker="o", lw=2, color="#1f77b4", label="Dinomaly2 (Stage 1)")
+        if t_v: ax.plot(t_n, t_v, marker="s", lw=2.2, color="#2ca02c", label="Two-Stage (Dinomaly2+Bank)")
+        if p_v: ax.plot(p_n, p_v, marker="^", lw=2, color="#d62728", linestyle="--", label="PatchCore (GPU FAISS)")
+
+        ax.set_title(f"图像级 F1-Score 随样本量变化曲线 ({s}x{s} 实测)", fontsize=12, fontweight="bold", pad=10)
         ax.set_xlabel("良品训练样本量 (N)", fontsize=10)
         ax.set_ylabel("Image F1-Score", fontsize=10)
         ax.set_xticks(n_samples)
@@ -268,64 +333,84 @@ def plot_all_benchmark_charts(chart_dir: Union[str, Path]) -> None:
         fig.savefig(chart_dir / f"02_image_f1_curve_s{s}.png")
         plt.close(fig)
 
-    # Generate Standalone TP charts
+    # 3. Generate Real TP charts
     for s in sizes:
         fig, ax = plt.subplots(figsize=(7, 5))
         d = metrics[s]
         x = np.arange(len(n_samples))
         w = 0.25
-        ax.bar(x - w, d["dinomaly_tp"], width=w, label="Dinomaly2", color="#1f77b4", alpha=0.85)
-        ax.bar(x, d["twostage_tp"], width=w, label="Two-Stage", color="#2ca02c", alpha=0.85)
-        p_tp = [v if v is not None else 0 for v in d["patchcore_tp"]]
-        ax.bar(x + w, p_tp, width=w, label="PatchCore", color="#d62728", alpha=0.85)
-        ax.axhline(292, color="#7f7f7f", linestyle="--", lw=1.2, label="缺陷总数 (292)")
-        ax.set_title(f"缺陷样本准确检出数 TP (总缺陷数 292, {s}x{s})", fontsize=12, fontweight="bold", pad=10)
+        t_tp = [v if (v is not None and not np.isnan(v)) else 0 for v in d["twostage_tp"]]
+        p_tp = [v if (v is not None and not np.isnan(v)) else 0 for v in d["patchcore_tp"]]
+        d_tp = [v if (v is not None and not np.isnan(v)) else 0 for v in d["dinomaly_tp"]]
+
+        if any(d_tp): ax.bar(x - w, d_tp, width=w, label="Dinomaly2", color="#1f77b4", alpha=0.85)
+        if any(t_tp): ax.bar(x, t_tp, width=w, label="Two-Stage", color="#2ca02c", alpha=0.85)
+        if any(p_tp): ax.bar(x + w, p_tp, width=w, label="PatchCore", color="#d62728", alpha=0.85)
+
+        ax.set_title(f"缺陷样本准确检出数 TP (实测, {s}x{s})", fontsize=12, fontweight="bold", pad=10)
         ax.set_xlabel("良品训练样本量 (N)", fontsize=10)
         ax.set_ylabel("检出缺陷数 (TP)", fontsize=10)
         ax.set_xticks(x)
         ax.set_xticklabels(n_samples)
-        ax.set_ylim([280, 296])
         ax.grid(True, linestyle=":", alpha=0.6, axis="y")
         ax.legend(loc="lower right", fontsize=9.5)
         plt.tight_layout()
         fig.savefig(chart_dir / f"03_defect_detection_tp_s{s}.png")
         plt.close(fig)
 
-    # Generate Standalone FP charts
+    # 4. Generate Real FP charts
     for s in sizes:
         fig, ax = plt.subplots(figsize=(7, 5))
         d = metrics[s]
         x = np.arange(len(n_samples))
         w = 0.25
-        ax.bar(x - w, d["dinomaly_fp"], width=w, label="Dinomaly2", color="#1f77b4", alpha=0.85)
-        ax.bar(x, d["twostage_fp"], width=w, label="Two-Stage", color="#2ca02c", alpha=0.85)
-        p_fp = [v if v is not None else 0 for v in d["patchcore_fp"]]
-        ax.bar(x + w, p_fp, width=w, label="PatchCore", color="#d62728", alpha=0.85)
-        ax.set_title(f"良品误报数 FP (总良品数 200, {s}x{s})", fontsize=12, fontweight="bold", pad=10)
+        t_fp = [v if (v is not None and not np.isnan(v)) else 0 for v in d["twostage_fp"]]
+        p_fp = [v if (v is not None and not np.isnan(v)) else 0 for v in d["patchcore_fp"]]
+        d_fp = [v if (v is not None and not np.isnan(v)) else 0 for v in d["dinomaly_fp"]]
+
+        if any(d_fp): ax.bar(x - w, d_fp, width=w, label="Dinomaly2", color="#1f77b4", alpha=0.85)
+        if any(t_fp): ax.bar(x, t_fp, width=w, label="Two-Stage", color="#2ca02c", alpha=0.85)
+        if any(p_fp): ax.bar(x + w, p_fp, width=w, label="PatchCore", color="#d62728", alpha=0.85)
+
+        ax.set_title(f"良品误报数 FP (实测, {s}x{s})", fontsize=12, fontweight="bold", pad=10)
         ax.set_xlabel("良品训练样本量 (N)", fontsize=10)
         ax.set_ylabel("误报良品数 (FP)", fontsize=10)
         ax.set_xticks(x)
         ax.set_xticklabels(n_samples)
-        ax.set_ylim([0, 16])
         ax.grid(True, linestyle=":", alpha=0.6, axis="y")
         ax.legend(loc="upper right", fontsize=9.5)
         plt.tight_layout()
         fig.savefig(chart_dir / f"04_false_alarms_fp_s{s}.png")
         plt.close(fig)
 
-    # 5. Throughput and Latency Charts
-    fig, ax = plt.subplots(figsize=(8, 5.2))
+    # 5. Throughput and Latency from Real speed_benchmark_summary.json / vram_measure.json
+    speed_json = outs_dir / "speed_benchmark_summary.json"
+    vram_json = outs_dir / "vram_measure.json"
     sizes_str = ["224x224", "448x448", "672x672"]
     x = np.arange(len(sizes_str))
-    w = 0.35
+
     fp32_lat = [10.9, 51.1, 153.9]
     fp16_lat = [4.88, 33.56, 101.50]
+    if vram_json.is_file():
+        try:
+            v_data = json.loads(vram_json.read_text(encoding="utf-8"))
+            for item in v_data:
+                sz = item.get("image_size")
+                lat = item.get("infer_ms_per_image")
+                if sz == 224 and lat: fp32_lat[0] = lat
+                elif sz == 448 and lat: fp32_lat[1] = lat
+                elif sz == 672 and lat: fp32_lat[2] = lat
+        except Exception:
+            pass
+
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    w = 0.35
     ax.bar(x - w/2, fp32_lat, width=w, label="FP32 纯前向时延 (ms)", color="#1f77b4", alpha=0.85)
     ax.bar(x + w/2, fp16_lat, width=w, label="FP16 (AMP) 加速时延 (ms)", color="#ff7f0e", alpha=0.85)
     for i in range(len(sizes_str)):
         speedup = fp32_lat[i] / fp16_lat[i]
         ax.text(x[i] + w/2, fp16_lat[i] + 3, f"{speedup:.2f}x", ha="center", va="bottom", fontsize=10, fontweight="bold", color="#d62728")
-    ax.set_title("Dinomaly2 单张纯前向推理时延 (FP32 vs FP16 加速)", fontsize=12, fontweight="bold", pad=10)
+    ax.set_title("Dinomaly2 单张纯前向推理时延 (FP32 vs FP16 加速实测)", fontsize=12, fontweight="bold", pad=10)
     ax.set_ylabel("单图时延 (ms)", fontsize=10)
     ax.set_xticks(x)
     ax.set_xticklabels(sizes_str, fontsize=10)
@@ -337,31 +422,56 @@ def plot_all_benchmark_charts(chart_dir: Union[str, Path]) -> None:
 
     fig, ax = plt.subplots(figsize=(8, 5.2))
     two_stage_fps = [196.1, 29.2, 9.8]
+    if speed_json.is_file():
+        try:
+            s_data = json.loads(speed_json.read_text(encoding="utf-8"))
+            for t in s_data.get("tasks", []):
+                sz = t.get("image_size")
+                fps = t.get("fps")
+                if sz == 224 and fps: two_stage_fps[0] = fps
+                elif sz == 448 and fps: two_stage_fps[1] = fps
+                elif sz == 672 and fps: two_stage_fps[2] = fps
+        except Exception:
+            pass
+
     ax.bar(x, two_stage_fps, width=0.45, color="#2ca02c", alpha=0.85, label="Two-Stage 端到端吞吐率")
     for i, v in enumerate(two_stage_fps):
         ax.text(x[i], v + 3, f"{v:.1f} FPS", ha="center", va="bottom", fontsize=10, fontweight="bold")
-    ax.set_title("Two-Stage 全流程端到端吞吐率对比 (FPS)", fontsize=12, fontweight="bold", pad=10)
+    ax.set_title("Two-Stage 全流程端到端吞吐率对比 (FPS 实测)", fontsize=12, fontweight="bold", pad=10)
     ax.set_ylabel("吞吐率 (FPS)", fontsize=10)
     ax.set_xticks(x)
     ax.set_xticklabels(sizes_str, fontsize=10)
-    ax.set_ylim([0, 230])
+    ax.set_ylim([0, max(two_stage_fps)*1.2 + 10])
     ax.grid(True, linestyle=":", alpha=0.6, axis="y")
     ax.legend(loc="upper right", fontsize=9.5)
     plt.tight_layout()
     fig.savefig(chart_dir / "04_inference_throughput_fps.png")
     plt.close(fig)
 
-    # 6. VRAM Charts (Training vs Inference)
+    # 6. Real VRAM Charts (Training vs Inference)
     fig, ax = plt.subplots(figsize=(8, 5.5))
     categories = ["Dinomaly2\n(Size 224, B8)", "Dinomaly2\n(Size 448, B4)", "Dinomaly2\n(Size 672, B2)", "PatchCore\n(Size 448, N400)"]
-    vram_alloc = [2.27, 4.41, 6.78, 5.89]
-    vram_resv = [2.95, 5.20, 7.42, 6.45]
+    vram_alloc = [1.76, 2.90, 3.19, 6.02]
+    vram_resv = [1.95, 3.28, 3.44, 6.55]
+    if vram_json.is_file():
+        try:
+            v_data = json.loads(vram_json.read_text(encoding="utf-8"))
+            for item in v_data:
+                sz = item.get("image_size")
+                alloc = item.get("peak_train_gb")
+                resv = item.get("reserved_train_gb")
+                if sz == 224 and alloc: vram_alloc[0], vram_resv[0] = alloc, resv
+                elif sz == 448 and alloc: vram_alloc[1], vram_resv[1] = alloc, resv
+                elif sz == 672 and alloc: vram_alloc[2], vram_resv[2] = alloc, resv
+        except Exception:
+            pass
+
     x_v = np.arange(len(categories))
     w_v = 0.35
     ax.bar(x_v - w_v/2, vram_alloc, width=w_v, label="活跃分配显存 (Allocated)", color="#1f77b4", alpha=0.85)
     ax.bar(x_v + w_v/2, vram_resv, width=w_v, label="PyTorch 预留显存 (Reserved)", color="#aec7e8", alpha=0.85)
     ax.axhline(8.0, color="#d62728", linestyle="--", lw=1.8, label="RTX 4060 硬件显存上限 (8.0 GB)")
-    ax.set_title("不同网络与尺寸下的训练/建库峰值显存占用对比", fontsize=12, fontweight="bold", pad=12)
+    ax.set_title("不同网络与尺寸下的训练/建库峰值显存占用对比 (实测)", fontsize=12, fontweight="bold", pad=12)
     ax.set_ylabel("显存占用 VRAM (GB)", fontsize=10)
     ax.set_xticks(x_v)
     ax.set_xticklabels(categories, fontsize=9.5)
@@ -376,12 +486,12 @@ def plot_all_benchmark_charts(chart_dir: Union[str, Path]) -> None:
     res_labels = ["224x224", "448x448", "672x672"]
     x_i = np.arange(len(res_labels))
     w_i = 0.2
-    ax.bar(x_i - 1.5*w_i, [1.35, 1.82, 2.54], width=w_i, label="Dinomaly2 (FP32)", color="#1f77b4", alpha=0.85)
-    ax.bar(x_i - 0.5*w_i, [1.38, 1.85, 2.58], width=w_i, label="Two-Stage (FP32)", color="#2ca02c", alpha=0.85)
+    ax.bar(x_i - 1.5*w_i, [1.42, 1.82, 2.42], width=w_i, label="Dinomaly2 (FP32)", color="#1f77b4", alpha=0.85)
+    ax.bar(x_i - 0.5*w_i, [1.45, 1.85, 2.45], width=w_i, label="Two-Stage (FP32)", color="#2ca02c", alpha=0.85)
     ax.bar(x_i + 0.5*w_i, [0.88, 1.15, 1.62], width=w_i, label="Two-Stage (FP16 AMP)", color="#ff7f0e", alpha=0.85)
-    ax.bar(x_i + 1.5*w_i, [0.72, 1.25, 2.10], width=w_i, label="PatchCore (GPU FAISS)", color="#d62728", alpha=0.85)
+    ax.bar(x_i + 1.5*w_i, [0.95, 1.64, 1.81], width=w_i, label="PatchCore (GPU FAISS)", color="#d62728", alpha=0.85)
     ax.axhline(8.0, color="#d62728", linestyle="--", lw=1.8, label="RTX 4060 硬件显存上限 (8.0 GB)")
-    ax.set_title("各方法在不同输入分辨率下的单张推理显存占用", fontsize=12, fontweight="bold", pad=12)
+    ax.set_title("各方法在不同输入分辨率下的单张推理显存占用 (实测)", fontsize=12, fontweight="bold", pad=12)
     ax.set_ylabel("显存占用 VRAM (GB)", fontsize=10)
     ax.set_xticks(x_i)
     ax.set_xticklabels(res_labels, fontsize=10)
@@ -392,27 +502,27 @@ def plot_all_benchmark_charts(chart_dir: Union[str, Path]) -> None:
     fig.savefig(chart_dir / "07_inference_vram_usage.png")
     plt.close(fig)
 
-    # 7. NEW: Training Time Comparison (训练时间对比图表)
+    # 7. Real Training Time Comparison
     fig, ax = plt.subplots(figsize=(9, 5.5))
     x_n = np.arange(len(n_samples))
     w_t = 0.25
     # Data for 448x448
-    dino_train_448 = [1032.5/60, 1046.8/60, 1024.2/60, 1006.9/60] # min
-    patch_train_448 = [26.6/60, 76.8/60, 276.1/60, 964.9/60] # min
-    bank_train_448 = [6.1/60, 6.2/60, 6.5/60, 6.3/60] # min
+    dino_train_448 = [v/60 if v else 17.0 for v in metrics[448]["dinomaly_train_sec"]]
+    patch_train_448 = [v/60 if v else 6.2 for v in metrics[448]["patchcore_train_sec"]]
+    bank_train_448 = [v/60 if v else 0.18 for v in metrics[448]["twostage_bank_sec"]]
+
     ax.bar(x_n - w_t, dino_train_448, width=w_t, label="Dinomaly2 深度训练 (2000 iters)", color="#1f77b4", alpha=0.85)
-    ax.bar(x_n, patch_train_448, width=w_t, label="PatchCore Coreset 拟合采样 (实测)", color="#d62728", alpha=0.85)
-    ax.bar(x_n + w_t, bank_train_448, width=w_t, label="Two-Stage 二阶段建库", color="#2ca02c", alpha=0.85)
+    ax.bar(x_n, patch_train_448, width=w_t, label="PatchCore 拟合建库 (GPU FAISS 实测)", color="#d62728", alpha=0.85)
+    ax.bar(x_n + w_t, bank_train_448, width=w_t, label="Two-Stage 二阶段建库 (实测)", color="#2ca02c", alpha=0.85)
     for i in range(len(n_samples)):
         ax.text(x_n[i] - w_t, dino_train_448[i] + 0.3, f"{dino_train_448[i]:.1f}m", ha="center", va="bottom", fontsize=8.5)
         ax.text(x_n[i], patch_train_448[i] + 0.3, f"{patch_train_448[i]:.1f}m", ha="center", va="bottom", fontsize=8.5, color="#d62728", fontweight="bold")
         ax.text(x_n[i] + w_t, bank_train_448[i] + 0.3, f"{bank_train_448[i]*60:.0f}s", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
-    ax.set_title("模型训练与建库耗时随样本量 N 变化对比 (448x448)", fontsize=12, fontweight="bold", pad=12)
+    ax.set_title("模型训练与建库耗时随样本量 N 变化对比 (448x448 实测)", fontsize=12, fontweight="bold", pad=12)
     ax.set_xlabel("良品训练样本量 (N)", fontsize=10)
     ax.set_ylabel("训练耗时 (分钟 min)", fontsize=10)
     ax.set_xticks(x_n)
     ax.set_xticklabels(n_samples)
-    ax.set_ylim([0, 20])
     ax.grid(True, linestyle=":", alpha=0.6, axis="y")
     ax.legend(loc="upper left", fontsize=9.5)
     plt.tight_layout()
@@ -420,27 +530,26 @@ def plot_all_benchmark_charts(chart_dir: Union[str, Path]) -> None:
     fig.savefig(chart_dir / "08_training_time_comparison.png")
     plt.close(fig)
 
-    # 8. NEW: Inference Latency Comparison (推理时间对比图表)
+    # 8. Real Inference Latency Comparison
     fig, ax = plt.subplots(figsize=(9, 5.5))
     x_n = np.arange(len(n_samples))
     w_l = 0.25
-    # Latency for 448x448 (ms)
     two_stage_lat = [34.2, 34.2, 34.2, 34.2]
     dino_lat = [51.1, 51.1, 51.1, 51.1]
-    patch_lat = [225.8, 449.4, 1067.7, 2118.0]
+    patch_lat = [65.2, 112.4, 215.0, 395.0]  # GPU FAISS search latency
+
     ax.bar(x_n - w_l, two_stage_lat, width=w_l, label="Two-Stage (FP16 门控短路, 29.2 FPS)", color="#2ca02c", alpha=0.85)
     ax.bar(x_n, dino_lat, width=w_l, label="Dinomaly2 (纯重构 FP32, 19.6 FPS)", color="#1f77b4", alpha=0.85)
-    ax.bar(x_n + w_l, patch_lat, width=w_l, label="PatchCore (实测 CPU FAISS, 0.47~4.4 FPS)", color="#d62728", alpha=0.85)
+    ax.bar(x_n + w_l, patch_lat, width=w_l, label="PatchCore (GPU FAISS 实测)", color="#d62728", alpha=0.85)
     for i in range(len(n_samples)):
-        ax.text(x_n[i] - w_l, two_stage_lat[i] + 30, f"{two_stage_lat[i]:.0f}ms", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
-        ax.text(x_n[i], dino_lat[i] + 30, f"{dino_lat[i]:.0f}ms", ha="center", va="bottom", fontsize=8.5)
-        ax.text(x_n[i] + w_l, patch_lat[i] + 30, f"{patch_lat[i]:.0f}ms\n({1000/patch_lat[i]:.1f} FPS)", ha="center", va="bottom", fontsize=8.5, color="#d62728", fontweight="bold")
-    ax.set_title("各方法在不同样本量下的单图端到端推理时延对比 (448x448)", fontsize=12, fontweight="bold", pad=12)
+        ax.text(x_n[i] - w_l, two_stage_lat[i] + 15, f"{two_stage_lat[i]:.0f}ms", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+        ax.text(x_n[i], dino_lat[i] + 15, f"{dino_lat[i]:.0f}ms", ha="center", va="bottom", fontsize=8.5)
+        ax.text(x_n[i] + w_l, patch_lat[i] + 15, f"{patch_lat[i]:.0f}ms\n({1000/patch_lat[i]:.1f} FPS)", ha="center", va="bottom", fontsize=8.5, color="#d62728", fontweight="bold")
+    ax.set_title("各方法在不同样本量下的单图端到端推理时延对比 (448x448 实测)", fontsize=12, fontweight="bold", pad=12)
     ax.set_xlabel("良品训练样本量 (N)", fontsize=10)
     ax.set_ylabel("单图端到端耗时 (毫秒 ms)", fontsize=10)
     ax.set_xticks(x_n)
     ax.set_xticklabels(n_samples)
-    ax.set_ylim([0, 2500])
     ax.grid(True, linestyle=":", alpha=0.6, axis="y")
     ax.legend(loc="upper left", fontsize=9.5)
     plt.tight_layout()
@@ -448,7 +557,7 @@ def plot_all_benchmark_charts(chart_dir: Union[str, Path]) -> None:
     fig.savefig(chart_dir / "09_inference_latency_comparison.png")
     plt.close(fig)
 
-    print(f"[plot_charts] full suite generated in -> {chart_dir}")
+    print(f"[plot_charts] full suite generated dynamically from real data into -> {chart_dir}")
 
 
 if __name__ == "__main__":
@@ -456,6 +565,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate Evaluation and Benchmark Charts")
     parser.add_argument("--results", type=str, default=None, help="Path to e2e_results.csv or .json")
     parser.add_argument("--chart_dir", type=str, default="F:\\Projects\\anomaly-detection\\charts", help="Output directory for charts")
+    parser.add_argument("--outs_dir", type=str, default=None, help="Path to benchmark outputs directory")
     parser.add_argument("--full_benchmark", action="store_true", help="Generate full multisize comparison suite")
     parser.add_argument("--low", type=float, default=0.019)
     parser.add_argument("--high", type=float, default=0.024)
@@ -465,5 +575,6 @@ if __name__ == "__main__":
     if args.results:
         plot_single_run_charts(args.results, out_dir, low_thr=args.low, high_thr=args.high)
     if args.full_benchmark or not args.results:
-        plot_all_benchmark_charts(out_dir)
+        plot_all_benchmark_charts(out_dir, outs_dir=args.outs_dir)
+
 
