@@ -1,15 +1,25 @@
 import os, sys, glob, time, json, argparse
-import numpy as np
-import pandas as pd
+from pathlib import Path
+
+if sys.platform == "win32":
+    py_dir = Path(sys.executable).parent
+    for p in [py_dir, py_dir / "Library" / "bin", py_dir / "DLLs"]:
+        if p.is_dir():
+            try:
+                os.add_dll_directory(str(p))
+            except Exception:
+                pass
+            os.environ["PATH"] = str(p) + os.pathsep + os.environ.get("PATH", "")
+
+import faiss
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
+import pandas as pd
 import cv2
-import faiss
-from pathlib import Path
 from PIL import Image
 from torchvision import transforms
-from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve, confusion_matrix
 
 ROOT = Path(__file__).resolve().parent
 DINOMALY2_DIR = ROOT / "Dinomaly2"
