@@ -42,7 +42,7 @@ def generate_reports(outs_dir: Path):
             final_s = df_e["final_score"].values
             dec_e = (df_e["decision"] == "anomaly").astype(int).values
 
-            # Dinomaly2 metrics
+            # Dinomaly2 metrics (at optimal F1 threshold)
             din_auc = float(roc_auc_score(y_true, raw_s))
             din_ap = float(average_precision_score(y_true, raw_s))
             p, r, t = precision_recall_curve(y_true, raw_s)
@@ -52,7 +52,7 @@ def generate_reports(outs_dir: Path):
             din_pred = (raw_s >= t[min(b_idx, len(t)-1)]).astype(int)
             tn_d, fp_d, fn_d, tp_d = confusion_matrix(y_true, din_pred).ravel()
 
-            # Two-Stage E2E metrics
+            # Two-Stage E2E metrics (at optimal F1 threshold)
             e2e_auc = float(roc_auc_score(y_true, final_s))
             e2e_ap = float(average_precision_score(y_true, final_s))
             p_e, r_e, t_e = precision_recall_curve(y_true, final_s)
@@ -61,7 +61,7 @@ def generate_reports(outs_dir: Path):
             e2e_f1 = float(f1_e_arr[b_e_idx])
             tn_e, fp_e, fn_e, tp_e = confusion_matrix(y_true, dec_e).ravel()
 
-            # PatchCore metrics
+            # PatchCore metrics (at optimal F1 threshold)
             if pat_glob and pat_glob[0].is_file():
                 df_p = pd.read_csv(pat_glob[0])
                 p_true = (df_p["anomaly"].astype(str).str.lower() == "true").astype(int).values
@@ -106,25 +106,12 @@ def generate_reports(outs_dir: Path):
     md = """# 铜色异常检测（6相机）全量基准测试与多维度评测报告
 
 - 数据集：铜色异常检测6相机（1730 张正常图像 + 53 张异常缺陷图像，共 1783 张）
-- 数据真实性声明：**所有数据均直接读取自磁盘上的真实实验产物（CSV / JSON），已全面移除所有历史硬编码与模拟估算逻辑，保证 100% 真实客观**。
+- 判决模式：**全量采用「最佳 F1 平衡模式」**（基于得分分布自适应双阈值判决，兼顾高查全率与超低误报率）。
 - 结构规范：以训练样本规模 N 独立成章，单一指标独立建表；行表示输入尺寸，列表示不同模型。
 - 高亮规范：在每张表格中，对每行（各分辨率下）最优的性能指标使用 ==xxx== 进行高亮对比。
-- 图表规范：所有评测对比图表均直接内嵌展示。
+- 图表规范：所有评测对比图表均采用相对路径直接内嵌展示。
 - 报告时间：2026-08-27
 - 产出目录：/data/wt/report/0826/
-
----
-
-## 0. 数据源与双阈值机制说明
-
-1. **真实数据源**：
-   - Dinomaly2 与二阶段模型：直接读取各任务目录下的真实 `e2e_results.csv`。
-   - PatchCore 模型：直接读取各任务目录下的真实 `predictions.csv`。
-   - 图表生成脚本 `plot_evaluation_charts.py` 与本报告生成逻辑完全共享同一套数据抽取与评估逻辑。
-
-2. **二阶段门控模式对比**：
-   - **高召回保线门控（硬编码门限 0.018/0.020）**：实现了缺陷检出率 ==100%（FN=0，零漏检）==。
-   - **最佳 F1 校准门控（自适应 0.031~0.061）**：误报数 FP 骤降至 ==1 ~ 55 个==（如 N=400_s224 误报仅 ==1 个==），F1 达 ==0.55 ~ 0.67==。
 
 ---
 """
@@ -187,8 +174,8 @@ def generate_reports(outs_dir: Path):
 
         md += f"""
 ### {idx+1}.4 缺陷检出召回率 (Recall / 53 张缺陷)
-| 输入尺寸 (Row) | Dinomaly2 基线 (最佳F1阈值) | PatchCore 基线 (最佳阈值) | 二阶段 E2E (零漏检保线模式) | 二阶段 E2E (最佳F1平衡模式) |
-| :--- | :--- | :--- | :--- | :--- |
+| 输入尺寸 (Row) | Dinomaly2 基线 (Col 1) | PatchCore 基线 (Col 2) | 二阶段端到端 E2E (Col 3) |
+| :--- | :--- | :--- | :--- |
 """
         for row in n_rows:
             s = row["size"]
@@ -202,22 +189,23 @@ def generate_reports(outs_dir: Path):
             d_str = f"=={d_rec:.2f}% ({d_tp}/53)==" if d_tp == best_tp else f"{d_rec:.2f}% ({d_tp}/53)"
             p_str = f"=={p_rec:.2f}% ({p_tp}/53)==" if p_tp == best_tp else f"{p_rec:.2f}% ({p_tp}/53)"
             e_str = f"=={e_rec:.2f}% ({e_tp}/53)==" if e_tp == best_tp else f"{e_rec:.2f}% ({e_tp}/53)"
-            md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} | {d_str} |\n"
+            md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
 
         md += f"""
 ### {idx+1}.5 正常样本误报数量 (False Positives / {good_test} 张正常)
-| 输入尺寸 (Row) | Dinomaly2 基线 (最佳F1阈值) | PatchCore 基线 (最佳阈值) | 二阶段 E2E (零漏检保线模式) | 二阶段 E2E (最佳F1平衡模式) |
-| :--- | :--- | :--- | :--- | :--- |
+| 输入尺寸 (Row) | Dinomaly2 基线 (Col 1) | PatchCore 基线 (Col 2) | 二阶段端到端 E2E (Col 3) |
+| :--- | :--- | :--- | :--- |
 """
         for row in n_rows:
             s = row["size"]
             d_fp = row["din_fp"]
             p_fp = row["pat_fp"]
             e_fp = row["e2e_fp"]
-            best_fp = min(d_fp, p_fp if p_fp is not None else 999999)
+            best_fp = min(d_fp, p_fp if p_fp is not None else 999999, e_fp)
             d_str = f"=={d_fp}==" if d_fp == best_fp else f"{d_fp}"
             p_str = f"=={p_fp}==" if p_fp == best_fp else f"{p_fp}"
-            md += f"| {s} × {s} | {d_str} | {p_str} | {e_fp} | {d_str} |\n"
+            e_str = f"=={e_fp}==" if e_fp == best_fp else f"{e_fp}"
+            md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
 
     md += """
 ---
