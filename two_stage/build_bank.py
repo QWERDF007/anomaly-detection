@@ -38,7 +38,14 @@ from models.uad import Dinomaly
 from models.vision_transformer import Block as VitBlock, Attention, LinearAttention2
 from functools import partial
 import torch.nn as nn
-from utils import cal_anomaly_maps, get_gaussian_kernel
+
+import importlib.util
+_spec = importlib.util.spec_from_file_location("dinomaly2_utils", str(DINOMALY2 / "utils.py"))
+_din_utils = importlib.util.module_from_spec(_spec)
+sys.modules["dinomaly2_utils"] = _din_utils
+_spec.loader.exec_module(_din_utils)
+cal_anomaly_maps = _din_utils.cal_anomaly_maps
+get_gaussian_kernel = _din_utils.get_gaussian_kernel
 
 IMAGE_EXTS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 

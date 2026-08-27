@@ -48,7 +48,15 @@ from sklearn.metrics import roc_auc_score, average_precision_score, precision_re
 
 import patchcore.patchcore
 import patchcore.common
-from utils import cal_anomaly_maps, get_gaussian_kernel
+
+import importlib.util
+_spec = importlib.util.spec_from_file_location("dinomaly2_utils", str(DINOMALY2_DIR / "utils.py"))
+_din_utils = importlib.util.module_from_spec(_spec)
+sys.modules["dinomaly2_utils"] = _din_utils
+_spec.loader.exec_module(_din_utils)
+cal_anomaly_maps = _din_utils.cal_anomaly_maps
+get_gaussian_kernel = _din_utils.get_gaussian_kernel
+
 from models import vit_encoder
 from models.uad import Dinomaly
 from models.vision_transformer import Block as VitBlock, LinearAttention2
@@ -102,9 +110,19 @@ def main():
     else:
         test_txt_path = auto_detect_test_list(outs_dir)
 
-    test_lines = [l.strip() for l in test_txt_path.read_text(encoding="utf-8").splitlines() if l.strip()]
-    test_paths = [Path(l.split("\t")[0].strip()) for l in test_lines]
-    y_true = np.array([0 if ("\\OK\\" in str(p) or "/OK/" in str(p) or "good" in str(p).lower()) else 1 for p in test_paths], dtype=int)
+    test_paths = []
+    y_true_list = []
+    for l in test_lines:
+        tokens = l.split("\t")
+        p = Path(tokens[0].strip())
+        test_paths.append(p)
+        if len(tokens) > 1 and tokens[1].strip().isdigit():
+            y_true_list.append(int(tokens[1].strip()))
+        else:
+            parts_lower = [part.lower() for part in p.parts]
+            is_good = any(k in parts_lower for k in ["ok", "good", "normal", "良品", "正常"])
+            y_true_list.append(0 if is_good else 1)
+    y_true = np.array(y_true_list, dtype=int)
     print(f"Loaded Test Set from {test_txt_path.name}: {len(test_paths)} images (OK={int((y_true==0).sum())}, NG={int((y_true==1).sum())}) on {device}")
 
     sizes = sorted(list(set(args.image_sizes)))

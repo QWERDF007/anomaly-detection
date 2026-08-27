@@ -776,7 +776,7 @@ def plot_all_benchmark_charts(
     # Dynamically extracted directly from final_multisize_summary.json
     dynamic_perf = {}
     for s in sizes:
-        s_rows = {d["n"]: d for d in data if d["size"] == s}
+        s_rows = {d["n"]: d for d in summary_data if d["size"] == s}
         d_fps_list = [s_rows[n].get("din_fps", round(1000.0 / s_rows[n].get("din_lat_ms", 20.0), 1)) if n in s_rows and (s_rows[n].get("din_fps", 0) > 0 or s_rows[n].get("din_lat_ms", 0) > 0) else (56.0 if s == 224 else (15.5 if s == 448 else 6.2)) for n in n_samples]
         p_fps_list = [s_rows[n].get("pat_fps", round(1000.0 / s_rows[n]["pat_lat_ms"], 1) if s_rows[n].get("pat_lat_ms", 0) > 0 else 0.0) if n in s_rows else 0.0 for n in n_samples]
         e_fps_list = [s_rows[n].get("e2e_fps", round(s_rows[n].get("fps", 50.0), 1)) if n in s_rows else (54.4 if s == 224 else (16.0 if s == 448 else 6.2)) for n in n_samples]
