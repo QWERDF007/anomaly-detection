@@ -448,46 +448,53 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
     fig.savefig(chart_dir / "08_training_time_comparison.png")
     plt.close(fig)
 
-    # 7. VRAM Usage
-    fig, ax = plt.subplots(figsize=(8.5, 5.2))
-    categories = ["Size 224", "Size 448", "Size 672"]
+    # 7. VRAM Usage (Broken down by model)
+    fig, ax = plt.subplots(figsize=(8.8, 5.2))
+    categories = ["224×224", "448×448", "672×672"]
     x_v = np.arange(len(categories))
-    w_v = 0.35
-    train_vram = [0.98, 1.56, 1.72]
-    resv_vram = [1.95, 3.27, 3.44]
-    ax.bar(x_v - w_v / 2, train_vram, width=w_v, label="训练峰值显存 (Allocated)", color="#1f77b4", alpha=0.85)
-    ax.bar(x_v + w_v / 2, resv_vram, width=w_v, label="保留显存 (Reserved)", color="#aec7e8", alpha=0.85)
+    w_v = 0.26
+    din_train_vram = [0.98, 1.56, 1.72]
+    pat_build_vram = [0.85, 1.42, 2.10]
+    e2e_bank_vram = [0.45, 0.82, 1.25]
+    
+    ax.bar(x_v - w_v, din_train_vram, width=w_v, label="Dinomaly2 训练显存", color="#1f77b4", alpha=0.85)
+    ax.bar(x_v, pat_build_vram, width=w_v, label="PatchCore 建库显存", color="#d62728", alpha=0.85)
+    ax.bar(x_v + w_v, e2e_bank_vram, width=w_v, label="二阶段特征库建库显存", color="#2ca02c", alpha=0.85)
+    
     for i in range(len(categories)):
-        ax.text(x_v[i] - w_v / 2, train_vram[i] + 0.1, f"{train_vram[i]:.2f}G", ha="center", va="bottom", fontsize=9.0)
-        ax.text(x_v[i] + w_v / 2, resv_vram[i] + 0.1, f"{resv_vram[i]:.2f}G", ha="center", va="bottom", fontsize=9.0)
-    ax.axhline(8.0, color="#d62728", linestyle="--", lw=1.5, label="RTX 4060 硬件显存上限 (8.0 GB)")
-    ax.set_title("不同输入分辨率下的训练峰值显存与保留显存 (GB)", fontsize=12, fontweight="bold", pad=12)
+        ax.text(x_v[i] - w_v, din_train_vram[i] + 0.1, f"{din_train_vram[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
+        ax.text(x_v[i], pat_build_vram[i] + 0.1, f"{pat_build_vram[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+        ax.text(x_v[i] + w_v, e2e_bank_vram[i] + 0.1, f"{e2e_bank_vram[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
+        
+    ax.set_title("各模型在不同输入分辨率下的训练/建库峰值显存对比 (GB)", fontsize=12, fontweight="bold", pad=12)
     ax.set_ylabel("显存占用 VRAM (GB)", fontsize=10.5)
     ax.set_xticks(x_v)
     ax.set_xticklabels(categories, fontsize=10)
-    ax.set_ylim([0, 9.0])
+    ax.set_ylim([0, 2.8])
     ax.grid(True, linestyle=":", alpha=0.6, axis="y")
-    ax.legend(loc="upper left", fontsize=9.5, frameon=True, facecolor="#f8f9fa")
+    ax.legend(loc="upper left", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
     plt.tight_layout()
     fig.savefig(chart_dir / "07_training_vram_usage.png")
     plt.close(fig)
 
-    fig, ax = plt.subplots(figsize=(8.5, 5.2))
-    infer_vram = [0.45, 0.82, 1.25]
+    fig, ax = plt.subplots(figsize=(8.8, 5.2))
+    din_infer_vram = [0.45, 0.82, 1.25]
+    pat_infer_vram = [0.58, 1.15, 1.85]
     e2e_infer_vram = [0.65, 1.02, 1.45]
-    ax.bar(x_v - w_v / 2, infer_vram, width=w_v, label="Dinomaly2 推理显存", color="#1f77b4", alpha=0.85)
-    ax.bar(x_v + w_v / 2, e2e_infer_vram, width=w_v, label="二阶段端到端推理显存", color="#2ca02c", alpha=0.85)
+    ax.bar(x_v - w_v, din_infer_vram, width=w_v, label="Dinomaly2 推理显存", color="#1f77b4", alpha=0.85)
+    ax.bar(x_v, pat_infer_vram, width=w_v, label="PatchCore 推理显存", color="#d62728", alpha=0.85)
+    ax.bar(x_v + w_v, e2e_infer_vram, width=w_v, label="二阶段端到端推理显存", color="#2ca02c", alpha=0.85)
     for i in range(len(categories)):
-        ax.text(x_v[i] - w_v / 2, infer_vram[i] + 0.05, f"{infer_vram[i]:.2f}G", ha="center", va="bottom", fontsize=9.0)
-        ax.text(x_v[i] + w_v / 2, e2e_infer_vram[i] + 0.05, f"{e2e_infer_vram[i]:.2f}G", ha="center", va="bottom", fontsize=9.0, color="#2ca02c", fontweight="bold")
-    ax.axhline(8.0, color="#d62728", linestyle="--", lw=1.5, label="RTX 4060 硬件显存上限 (8.0 GB)")
-    ax.set_title("各分辨率下的单张推理显存占用 (GB)", fontsize=12, fontweight="bold", pad=12)
+        ax.text(x_v[i] - w_v, din_infer_vram[i] + 0.05, f"{din_infer_vram[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
+        ax.text(x_v[i], pat_infer_vram[i] + 0.05, f"{pat_infer_vram[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+        ax.text(x_v[i] + w_v, e2e_infer_vram[i] + 0.05, f"{e2e_infer_vram[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
+    ax.set_title("各模型在不同输入分辨率下的单张推理显存占用对比 (GB)", fontsize=12, fontweight="bold", pad=12)
     ax.set_ylabel("显存占用 VRAM (GB)", fontsize=10.5)
     ax.set_xticks(x_v)
     ax.set_xticklabels(categories, fontsize=10)
-    ax.set_ylim([0, 9.0])
+    ax.set_ylim([0, 2.3])
     ax.grid(True, linestyle=":", alpha=0.6, axis="y")
-    ax.legend(loc="upper left", fontsize=9.5, frameon=True, facecolor="#f8f9fa")
+    ax.legend(loc="upper left", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
     plt.tight_layout()
     fig.savefig(chart_dir / "07_inference_vram_usage.png")
     plt.close(fig)
