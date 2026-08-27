@@ -250,27 +250,27 @@ def generate_reports(outs_dir: Path):
 ## 6. 全量可视化图表展示
 
 ### 6.1 AUROC 与 F1-Score 性能曲线
-![AUROC 曲线 (224x224)](/data/wt/report/0826/charts/01_image_auroc_curve_s224.png)
-![AUROC 曲线 (448x448)](/data/wt/report/0826/charts/01_image_auroc_curve_s448.png)
-![AUROC 曲线 (672x672)](/data/wt/report/0826/charts/01_image_auroc_curve_s672.png)
-![F1 曲线 (224x224)](/data/wt/report/0826/charts/02_image_f1_curve_s224.png)
-![F1 曲线 (448x448)](/data/wt/report/0826/charts/02_image_f1_curve_s448.png)
-![F1 曲线 (672x672)](/data/wt/report/0826/charts/02_image_f1_curve_s672.png)
+![AUROC 曲线 (224x224)](charts/01_image_auroc_curve_s224.png)
+![AUROC 曲线 (448x448)](charts/01_image_auroc_curve_s448.png)
+![AUROC 曲线 (672x672)](charts/01_image_auroc_curve_s672.png)
+![F1 曲线 (224x224)](charts/02_image_f1_curve_s224.png)
+![F1 曲线 (448x448)](charts/02_image_f1_curve_s448.png)
+![F1 曲线 (672x672)](charts/02_image_f1_curve_s672.png)
 
 ### 6.2 缺陷检出与误报分布
-![缺陷检出 (224x224)](/data/wt/report/0826/charts/03_defect_detection_tp_s224.png)
-![缺陷检出 (448x448)](/data/wt/report/0826/charts/03_defect_detection_tp_s448.png)
-![缺陷检出 (672x672)](/data/wt/report/0826/charts/03_defect_detection_tp_s672.png)
-![误报数量 (224x224)](/data/wt/report/0826/charts/04_false_alarms_fp_s224.png)
-![误报数量 (448x448)](/data/wt/report/0826/charts/04_false_alarms_fp_s448.png)
-![误报数量 (672x672)](/data/wt/report/0826/charts/04_false_alarms_fp_s672.png)
+![缺陷检出 (224x224)](charts/03_defect_detection_tp_s224.png)
+![缺陷检出 (448x448)](charts/03_defect_detection_tp_s448.png)
+![缺陷检出 (672x672)](charts/03_defect_detection_tp_s672.png)
+![误报数量 (224x224)](charts/04_false_alarms_fp_s224.png)
+![误报数量 (448x448)](charts/04_false_alarms_fp_s448.png)
+![误报数量 (672x672)](charts/04_false_alarms_fp_s672.png)
 
 ### 6.3 训练耗时、推理吞吐与显存占用
-![训练耗时对比](/data/wt/report/0826/charts/05_training_time_comparison.png)
-![推理吞吐量 (FPS)](/data/wt/report/0826/charts/04_inference_throughput_fps.png)
-![推理时延对比 (ms)](/data/wt/report/0826/charts/06_inference_latency_comparison.png)
-![训练显存占用](/data/wt/report/0826/charts/07_training_vram_usage.png)
-![推理显存占用](/data/wt/report/0826/charts/07_inference_vram_usage.png)
+![训练耗时对比](charts/05_training_time_comparison.png)
+![推理吞吐量 (FPS)](charts/04_inference_throughput_fps.png)
+![推理时延对比 (ms)](charts/06_inference_latency_comparison.png)
+![训练显存占用](charts/07_training_vram_usage.png)
+![推理显存占用](charts/07_inference_vram_usage.png)
 """
 
     for target_name in ["FINAL_BENCHMARK_REPORT.md", "BENCHMARK_REPORT.md", "BENCHMARK_DETAILED_REPORT_224_448_672.md"]:
