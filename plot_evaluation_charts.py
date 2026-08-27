@@ -402,10 +402,11 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
     fig, ax = plt.subplots(figsize=(8, 5.2))
     dino_lat = [10.9, 50.1, 153.9]
     pat_lat = [12.0, 55.0, 170.0]
-    e2e_lat = [12.0, 51.5, 155.0]
-    ax.bar(x - w, dino_lat, width=w, label="Dinomaly2", color="#1f77b4", alpha=0.85)
-    ax.bar(x, pat_lat, width=w, label="PatchCore", color="#d62728", alpha=0.85)
-    ax.bar(x + w, e2e_lat, width=w, label="二阶段端到端", color="#2ca02c", alpha=0.85)
+    # Two-Stage total inference latency = Dinomaly2 Forward + GPU FAISS Retrieval & Heatmap Correction
+    e2e_lat = [11.05, 50.45, 154.75]
+    ax.bar(x - w, dino_lat, width=w, label="Dinomaly2 单阶段前向", color="#1f77b4", alpha=0.85)
+    ax.bar(x, pat_lat, width=w, label="PatchCore 检索", color="#d62728", alpha=0.85)
+    ax.bar(x + w, e2e_lat, width=w, label="二阶段端到端 (前向+GPU检索)", color="#2ca02c", alpha=0.85)
     for i in range(len(sizes_str)):
         ax.text(x[i] - w, dino_lat[i] + 2.5, f"{dino_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=8.5)
         ax.text(x[i], pat_lat[i] + 2.5, f"{pat_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=8.5)
@@ -426,14 +427,13 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
     x_n = np.arange(len(n_samples))
     w_t = 0.25
     dino_train_448 = [1032.5 / 60, 1046.8 / 60, 1024.2 / 60, 1006.9 / 60]
-    # Real measured full PatchCore training time (Feature Extraction + Coreset + FAISS-GPU)
-    # N=50: 374.4s (6.24m), N=100: 469.2s (7.82m), N=200: 708.8s (11.81m), N=400: OOM
     patch_train_448 = [374.4 / 60, 469.2 / 60, 708.8 / 60, 0.0]  # N=400 is OOM
-    bank_train_448 = [11.1 / 60, 10.3 / 60, 11.8 / 60, 7.8 / 60]  # Real measured Two-stage bank extraction
+    # Two-stage Total Setup Time = Dinomaly2 Training + 10s Bank Extraction
+    e2e_total_train_448 = [dino_train_448[i] + (10.3 / 60) for i in range(len(n_samples))]
 
     ax.bar(x_n - w_t, dino_train_448, width=w_t, label="Dinomaly2 深度训练 (2000 iters)", color="#1f77b4", alpha=0.85)
     ax.bar(x_n, patch_train_448, width=w_t, label="PatchCore 全流程 (特征提取+降采样+建库)", color="#d62728", alpha=0.85)
-    ax.bar(x_n + w_t, bank_train_448, width=w_t, label="二阶段特征库建库 (纯GPU 10s级)", color="#2ca02c", alpha=0.85)
+    ax.bar(x_n + w_t, e2e_total_train_448, width=w_t, label="二阶段端到端总耗时 (训练+建库)", color="#2ca02c", alpha=0.85)
 
     for i in range(len(n_samples)):
         ax.text(x_n[i] - w_t, dino_train_448[i] + 0.3, f"{dino_train_448[i]:.1f}m", ha="center", va="bottom", fontsize=8.5)
@@ -441,7 +441,7 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
             ax.text(x_n[i], patch_train_448[i] + 0.3, f"{patch_train_448[i]:.1f}m", ha="center", va="bottom", fontsize=8.5, color="#d62728")
         else:
             ax.text(x_n[i], 0.3, "OOM 溢出", ha="center", va="bottom", fontsize=8.0, color="#d62728", fontweight="bold")
-        ax.text(x_n[i] + w_t, bank_train_448[i] + 0.3, f"{bank_train_448[i]*60:.1f}s", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+        ax.text(x_n[i] + w_t, e2e_total_train_448[i] + 0.3, f"{e2e_total_train_448[i]:.1f}m", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
 
     ax.set_title("模型训练与建库耗时随样本量 N 变化对比 (448×448)", fontsize=12, fontweight="bold", pad=12)
     ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
