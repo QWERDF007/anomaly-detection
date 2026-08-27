@@ -1,15 +1,16 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Generic Full Benchmark Pipeline Runner.
+"""Generic Multi-GPU Full Benchmark Pipeline Runner.
 
 Automates the complete multi-size multi-sample benchmark workflow:
   1. Automated Data Splitting (sampling N normal images, gathering full test set)
-  2. Dinomaly2 Multi-Scale Training
-  3. PatchCore Multi-Scale Training & FAISS GPU Indexing
-  4. Two-Stage Defect/Normal Feature Bank Construction
-  5. Multi-Scale Full Test Set Evaluation (evaluate_benchmark.py)
-  6. Real Hardware Performance Visualization (plot_evaluation_charts.py)
-  7. Automated Markdown Benchmark Report Generation (generate_final_report_multisize.py)
+  2. Multi-GPU Parallel Task Dispatching:
+     - Dinomaly2 Multi-Scale Training
+     - PatchCore Multi-Scale Training & FAISS GPU Indexing
+     - Two-Stage Defect/Normal Feature Bank Construction
+  3. Multi-Scale Full Test Set Evaluation (evaluate_benchmark.py)
+  4. Real Hardware Performance Visualization (plot_evaluation_charts.py)
+  5. Automated Markdown Benchmark Report Generation (generate_final_report_multisize.py)
 """
 import os
 import sys
@@ -18,6 +19,7 @@ import json
 import random
 import subprocess
 import argparse
+import multiprocessing as mp
 from pathlib import Path
 
 if sys.platform == "win32":
@@ -33,19 +35,16 @@ if sys.platform == "win32":
 ROOT = Path(__file__).resolve().parent
 PYTHON = Path(sys.executable)
 
-def run_cmd(cmd, cwd=None):
+def run_cmd(cmd, cwd=None, env=None):
     cmd_str = " ".join(str(c) for c in cmd)
-    print(f"\n[RUN] {cmd_str}")
     t0 = time.perf_counter()
-    proc = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+    proc = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
     elapsed = time.perf_counter() - t0
     if proc.returncode != 0:
-        print(f"[ERR] Failed in {elapsed:.1f}s, returncode={proc.returncode}")
-        print(f"STDOUT:\n{proc.stdout[-2000:]}")
+        print(f"[ERR] Failed in {elapsed:.1f}s, cmd: {cmd_str[:120]}...")
         print(f"STDERR:\n{proc.stderr[-2000:]}")
         return False, elapsed
     else:
-        print(f"[OK] Completed in {elapsed:.1f}s")
         return True, elapsed
 
 def discover_dataset_images(dataset_root: Path):
@@ -69,15 +68,46 @@ def discover_dataset_images(dataset_root: Path):
     bad_imgs = sorted(list(set(bad_imgs)))
     return good_imgs, bad_imgs
 
+def _worker_gpu(gpu_id: int, task_queue: mp.Queue, result_queue: mp.Queue):
+    """Dedicated worker process for a specific GPU."""
+    while True:
+        try:
+            task = task_queue.get(timeout=3)
+        except Exception:
+            break
+        if task is None:
+            break
+
+        task_type, cmd, desc = task
+        print(f"[GPU {gpu_id}] Starting: {desc}...", flush=True)
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        ok, elapsed = run_cmd(cmd, env=env)
+        status = "OK" if ok else "FAILED"
+        print(f"[GPU {gpu_id}] Finished [{status}] in {elapsed:.1f}s: {desc}", flush=True)
+        result_queue.put((task_type, desc, ok, elapsed))
+
+def parse_gpu_list(gpus_arg: str) -> list[int]:
+    import torch
+    num_cuda = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    if gpus_arg.strip().lower() == "auto":
+        return list(range(num_cuda)) if num_cuda > 0 else [-1]
+    gpus = []
+    for part in gpus_arg.split(","):
+        part = part.strip()
+        if part.isdigit():
+            gpus.append(int(part))
+    return gpus if gpus else [0]
+
 def main():
-    parser = argparse.ArgumentParser(description="Generic Full Benchmark Pipeline Runner")
+    parser = argparse.ArgumentParser(description="Generic Multi-GPU Full Benchmark Pipeline Runner")
     parser.add_argument("--dataset_root", type=str, required=True, help="Root folder of industrial inspection dataset")
     parser.add_argument("--bank_data", type=str, default="", help="Path to defect/normal ROI images for two-stage bank")
     parser.add_argument("--outs_dir", type=str, required=True, help="Output directory for experiments, models, charts, and report")
     parser.add_argument("--train_sizes", type=int, nargs="+", default=[50, 100, 200, 400], help="Sample sizes N to evaluate")
     parser.add_argument("--image_sizes", type=int, nargs="+", default=[224, 448, 672], help="Resolution sizes to evaluate")
     parser.add_argument("--max_iters", type=int, default=2000, help="Training iterations for Dinomaly2")
-    parser.add_argument("--cuda", type=int, default=0, help="GPU device ID")
+    parser.add_argument("--gpus", type=str, default="auto", help="GPU device IDs (e.g. '0', '0,1', '0,1,2,3', or 'auto')")
     parser.add_argument("--seed", type=int, default=2024, help="Random seed")
     args = parser.parse_args()
 
@@ -87,15 +117,17 @@ def main():
     splits_dir = outs_dir / "data_splits"
     splits_dir.mkdir(parents=True, exist_ok=True)
 
+    gpu_list = parse_gpu_list(args.gpus)
     bank_data = Path(args.bank_data).expanduser().resolve() if args.bank_data else (dataset_root / "建库数据" if (dataset_root / "建库数据").is_dir() else None)
 
     print("=" * 80)
-    print(f"=== Generic Anomaly Detection Benchmark Pipeline ===")
+    print(f"=== Multi-GPU Anomaly Detection Benchmark Pipeline ===")
     print(f"Dataset Root: {dataset_root}")
     print(f"Bank Data: {bank_data}")
     print(f"Outs Dir: {outs_dir}")
     print(f"Train Sizes N: {args.train_sizes}")
     print(f"Image Sizes S: {args.image_sizes}")
+    print(f"GPUs Allocated: {gpu_list} (Total: {len(gpu_list)} GPU workers)")
     print(f"Max Iters: {args.max_iters}")
     print("=" * 80)
 
@@ -125,10 +157,10 @@ def main():
             f.write(f"{p}\t{lbl}\n")
     print(f"Created unified test split: {len(test_imgs)} total images -> {test_full_p}")
 
-    # 2. Dinomaly2 Training
-    print("\n" + "=" * 80)
-    print("=== Step 1: Training Dinomaly2 Models ===")
-    print("=" * 80)
+    # Build Training Task List
+    training_tasks = []
+
+    # Dinomaly2 Tasks
     for s in args.image_sizes:
         for n in valid_n_samples:
             task_name = f"dinomaly2_n{n}_s{s}_seed{args.seed}"
@@ -136,64 +168,52 @@ def main():
             train_txt = splits_dir / f"train_n{n}.txt"
             model_file = task_out / "model.pth"
 
-            if model_file.exists() or any((task_out).glob("*/model.pth")):
-                print(f"[SKIP] Dinomaly2 Task {task_name} already trained.")
-                continue
+            if not model_file.exists() and not any(task_out.glob("*/model.pth")):
+                cmd = [
+                    str(PYTHON), str(ROOT / "Dinomaly2" / "train.py"),
+                    "-d", "custom",
+                    "--custom_train_data", str(train_txt),
+                    "--custom_test_data", str(test_full_p),
+                    "--img_size", str(s),
+                    "--max_iters", str(args.max_iters),
+                    "--output_dir", str(task_out),
+                    "--val_freq", "2000",
+                    "--batch_size", "2" if s >= 672 else "4",
+                ]
+                training_tasks.append(("dinomaly2", cmd, f"Dinomaly2 N={n} Size={s}"))
 
-            cmd = [
-                str(PYTHON), str(ROOT / "Dinomaly2" / "train.py"),
-                "-d", "custom",
-                "--custom_train_data", str(train_txt),
-                "--custom_test_data", str(test_full_p),
-                "--img_size", str(s),
-                "--max_iters", str(args.max_iters),
-                "--output_dir", str(task_out),
-                "--val_freq", "2000",
-                "--batch_size", "2" if s >= 672 else "4",
-            ]
-            run_cmd(cmd)
-
-    # 3. PatchCore Training
-    print("\n" + "=" * 80)
-    print("=== Step 2: Training PatchCore Baselines & GPU Indexing ===")
-    print("=" * 80)
+    # PatchCore Tasks
     for s in args.image_sizes:
         for n in valid_n_samples:
             task_name = f"patchcore_n{n}_s{s}_seed{args.seed}"
             task_out = outs_dir / task_name
             train_txt = splits_dir / f"train_n{n}.txt"
 
-            if list(task_out.glob("*/*patchcore_params.pkl")):
-                print(f"[SKIP] PatchCore Task {task_name} already trained.")
-                continue
+            if not list(task_out.glob("*/*patchcore_params.pkl")):
+                cmd = [
+                    str(PYTHON), str(ROOT / "patchcore-inspection" / "bin" / "run_patchcore.py"),
+                    "--gpu", "0",
+                    "--seed", str(args.seed),
+                    "--save_patchcore_model",
+                    "--log_group", task_name,
+                    "--log_project", str(outs_dir),
+                    "patch_core",
+                    "-b", "wideresnet50",
+                    "-le", "layer2",
+                    "-le", "layer3",
+                    "--faiss_on_gpu",
+                    "--sampler", "approx_greedy_coreset",
+                    "--percentage", "0.1",
+                    "dataset",
+                    "--resize", str(s),
+                    "--imagesize", str(s),
+                    "custom",
+                    "--train_data", str(train_txt),
+                    "--test_data", str(test_full_p),
+                ]
+                training_tasks.append(("patchcore", cmd, f"PatchCore N={n} Size={s}"))
 
-            cmd = [
-                str(PYTHON), str(ROOT / "patchcore-inspection" / "bin" / "run_patchcore.py"),
-                "--gpu", str(args.cuda),
-                "--seed", str(args.seed),
-                "--save_patchcore_model",
-                "--log_group", task_name,
-                "--log_project", str(outs_dir),
-                "patch_core",
-                "-b", "wideresnet50",
-                "-le", "layer2",
-                "-le", "layer3",
-                "--faiss_on_gpu",
-                "--sampler", "approx_greedy_coreset",
-                "--percentage", "0.1",
-                "dataset",
-                "--resize", str(s),
-                "--imagesize", str(s),
-                "custom",
-                "--train_data", str(train_txt),
-                "--test_data", str(test_full_p),
-            ]
-            run_cmd(cmd)
-
-    # 4. Two-Stage Feature Bank Construction
-    print("\n" + "=" * 80)
-    print("=== Step 3: Building Two-Stage Defect & Normal Feature Banks ===")
-    print("=" * 80)
+    # Two-Stage Feature Bank Tasks
     if bank_data and bank_data.is_dir():
         for s in args.image_sizes:
             for n in valid_n_samples:
@@ -201,35 +221,69 @@ def main():
                 bank_file = task_out / "feature_bank.npz"
                 train_txt = splits_dir / f"train_n{n}.txt"
 
-                if bank_file.exists():
-                    print(f"[SKIP] Feature bank already built for N={n} Size={s}")
-                    continue
+                if not bank_file.exists():
+                    cmd = [
+                        str(PYTHON), str(ROOT / "two_stage" / "build_bank.py"),
+                        "--data_root", str(bank_data),
+                        "--normal_list", str(train_txt),
+                        "--output", str(bank_file),
+                        "--image_size", str(s),
+                        "--device", "cuda:0",
+                    ]
+                    training_tasks.append(("feature_bank", cmd, f"FeatureBank N={n} Size={s}"))
 
-                cmd = [
-                    str(PYTHON), str(ROOT / "two_stage" / "build_bank.py"),
-                    "--data_root", str(bank_data),
-                    "--normal_list", str(train_txt),
-                    "--output", str(bank_file),
-                    "--image_size", str(s),
-                    "--device", f"cuda:{args.cuda}",
-                ]
-                run_cmd(cmd)
+    # Execute Parallel Training across GPUs
+    print("\n" + "=" * 80)
+    print(f"=== Step 1-3: Executing {len(training_tasks)} Training Tasks across {len(gpu_list)} GPUs ===")
+    print("=" * 80)
 
-    # 5. Full Evaluation
+    if training_tasks:
+        if len(gpu_list) > 1:
+            task_queue = mp.Queue()
+            result_queue = mp.Queue()
+            for t in training_tasks:
+                task_queue.put(t)
+
+            processes = []
+            for gid in gpu_list:
+                p = mp.Process(target=_worker_gpu, args=(gid, task_queue, result_queue))
+                p.start()
+                processes.append(p)
+
+            for p in processes:
+                p.join()
+        else:
+            single_gid = gpu_list[0]
+            for task_type, cmd, desc in training_tasks:
+                print(f"[GPU {single_gid}] Starting: {desc}...", flush=True)
+                env = os.environ.copy()
+                if single_gid >= 0:
+                    env["CUDA_VISIBLE_DEVICES"] = str(single_gid)
+                ok, elapsed = run_cmd(cmd, env=env)
+                status = "OK" if ok else "FAILED"
+                print(f"[GPU {single_gid}] Finished [{status}] in {elapsed:.1f}s: {desc}", flush=True)
+    else:
+        print("[INFO] All training tasks already completed!")
+
+    # 4. Full Evaluation
     print("\n" + "=" * 80)
     print("=== Step 4: Running Full Unified Evaluation ===")
     print("=" * 80)
+    primary_gpu = gpu_list[0] if gpu_list[0] >= 0 else 0
     eval_cmd = [
         str(PYTHON), str(ROOT / "evaluate_benchmark.py"),
         "--outs_dir", str(outs_dir),
         "--test_list", str(test_full_p),
         "--train_sizes"] + [str(n) for n in valid_n_samples] + [
         "--image_sizes"] + [str(s) for s in args.image_sizes] + [
-        "--cuda", str(args.cuda)
+        "--cuda", str(primary_gpu)
     ]
-    run_cmd(eval_cmd)
+    env_eval = os.environ.copy()
+    if primary_gpu >= 0:
+        env_eval["CUDA_VISIBLE_DEVICES"] = str(primary_gpu)
+    run_cmd(eval_cmd, env=env_eval)
 
-    # 6. Plot Evaluation Charts
+    # 5. Plot Evaluation Charts
     print("\n" + "=" * 80)
     print("=== Step 5: Generating Benchmark Visualization Charts ===")
     print("=" * 80)
@@ -241,7 +295,7 @@ def main():
     ]
     run_cmd(plot_cmd)
 
-    # 7. Generate Final Report
+    # 6. Generate Final Report
     print("\n" + "=" * 80)
     print("=== Step 6: Generating Comprehensive Markdown Benchmark Report ===")
     print("=" * 80)
@@ -258,4 +312,5 @@ def main():
     print("=" * 80)
 
 if __name__ == "__main__":
+    mp.freeze_support()
     main()
