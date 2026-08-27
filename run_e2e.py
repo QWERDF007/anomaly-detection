@@ -63,6 +63,9 @@ DINOMALY2 = ROOT / "Dinomaly2"
 if str(DINOMALY2) not in sys.path:
     sys.path.insert(0, str(DINOMALY2))
 
+from utils import cal_anomaly_maps, get_gaussian_kernel
+import cv2
+
 
 def resolve_model(path_str: Optional[str]) -> Optional[Path]:
     if not path_str:
@@ -317,80 +320,98 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
         transforms.CenterCrop(crop_size),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
+    gaussian_kernel = get_gaussian_kernel(kernel_size=5, sigma=4, channels=1).to(device)
 
-    # 2. Stage-2 Feature Bank
+    # 2. Stage-2 Feature Bank (Authentic Dinomaly2_two_lib ROI Patch-Level)
     bank_good = bank_anomaly = None
     bank_npz = task_cfg.get("bank_npz")
+    if not bank_npz or not Path(bank_npz).expanduser().is_file():
+        cand = output_dir / "feature_bank.npz"
+        if cand.is_file():
+            bank_npz = str(cand)
+        else:
+            cand2 = output_dir.parent / f"dinomaly2_n{task_cfg.get("train_ns", "")}_s{image_size}_seed2024" / "feature_bank.npz"
+            if cand2.is_file():
+                bank_npz = str(cand2)
+
     if bank_npz and Path(bank_npz).expanduser().is_file():
         bank = np.load(str(Path(bank_npz).expanduser()), allow_pickle=True)
-        bank_good = bank["good_features"]
-        bank_anomaly = bank["anomaly_features"]
+        bank_good = bank.get("nor_features", bank.get("good_features"))
+        bank_anomaly = bank.get("ab_features", bank.get("anomaly_features"))
     else:
+        # Build authentic LabelMe polygon patch-level bank on the fly
         bank_data = Path(task_cfg["bank_data"]).expanduser().resolve()
-        ok_images = sorted(
-            [p for p in (bank_data / "OK").rglob("*") if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}],
-            key=lambda p: str(p).lower(),
-        ) if (bank_data / "OK").is_dir() else []
-        ng_images = sorted(
-            [p for p in (bank_data / "NG").rglob("*") if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}],
-            key=lambda p: str(p).lower(),
-        ) if (bank_data / "NG").is_dir() else []
-        if not ok_images and not ng_images:
-            all_imgs = sorted(
-                [p for p in bank_data.rglob("*") if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}],
-                key=lambda p: str(p).lower(),
-            )
-            ok_images = all_imgs
-
-        amp_dtype = torch.bfloat16 if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else torch.float32
-        def extract(paths):
-            feats = []
-            with torch.no_grad(), torch.amp.autocast("cuda", enabled=(device.type == "cuda"), dtype=amp_dtype):
-                for i in range(0, len(paths), batch_size):
-                    batch_paths = paths[i:i + batch_size]
-                    imgs = [transform(Image.open(p).convert("RGB")) for p in batch_paths]
-                    batch_t = torch.stack(imgs).to(device)
-                    enc_out, _ = model(batch_t)
-                    f = enc_out[-1]
-                    if isinstance(f, torch.Tensor):
-                        if f.ndim == 3:
-                            f = f.mean(dim=1)
-                        elif f.ndim == 4:
-                            f = f.mean(dim=(2, 3))
-                        f = F.normalize(f.float(), p=2, dim=-1)
-                    feats.append(f.detach().cpu().numpy().astype(np.float32))
-            return np.concatenate(feats, axis=0) if feats else np.zeros((0, embed_dim), dtype=np.float32)
-
-        bank_good = extract(ok_images) if ok_images else np.zeros((0, embed_dim), dtype=np.float32)
-        bank_anomaly = extract(ng_images) if ng_images else np.zeros((0, embed_dim), dtype=np.float32)
-        np.savez_compressed(str(output_dir / "feature_bank.npz"), good_features=bank_good, anomaly_features=bank_anomaly)
-
-    def normalize_np(x, eps=1e-12):
-        if x.shape[0] == 0:
-            return x
-        norm = np.linalg.norm(x, axis=-1, keepdims=True)
-        return x / np.maximum(norm, eps)
+        subdirs = [p for p in bank_data.iterdir() if p.is_dir()] if bank_data.is_dir() else [bank_data]
+        ab_list, nor_list = [], []
+        with torch.no_grad():
+            for sdir in subdirs:
+                is_ng = sdir.name.lower() in ["ng", "anomaly", "defect", "abnormal"]
+                for img_p in sdir.glob("*.*"):
+                    if img_p.suffix.lower() not in {".png", ".jpg", ".jpeg", ".bmp"}: continue
+                    json_p = img_p.with_suffix(".json")
+                    try:
+                        img_pil = Image.open(img_p).convert("RGB")
+                    except Exception:
+                        continue
+                    orig_W, orig_H = img_pil.size
+                    t_in = transform(img_pil).unsqueeze(0).to(device)
+                    en_b, de_b = model(t_in)
+                    feat_b = en_b[-1][0].permute(1, 2, 0).cpu().numpy()
+                    Hf_b, Wf_b, C_b = feat_b.shape
+                    if json_p.is_file():
+                        data_j = json.loads(json_p.read_text(encoding="utf-8"))
+                        for s_shape in data_j.get("shapes", []):
+                            lbl_j = s_shape.get("label", "").lower()
+                            is_ab_j = lbl_j in ["ad", "ng", "anomaly", "defect", "abnormal"]
+                            pts_j = s_shape.get("points", [])
+                            if len(pts_j) == 2:
+                                (x1, y1), (x2, y2) = pts_j
+                                pts_j = [(int(x1), int(y1)), (int(x2), int(y1)), (int(x2), int(y2)), (int(x1), int(y2))]
+                            if len(pts_j) >= 3:
+                                poly_scaled = np.array([(round(x * Wf_b / orig_W), round(y * Hf_b / orig_H)) for (x, y) in pts_j], dtype=np.int32)
+                                mask_poly = np.zeros((Hf_b, Wf_b), dtype=np.uint8)
+                                cv2.fillPoly(mask_poly, [poly_scaled], 1)
+                                ys_p, xs_p = np.where(mask_poly == 1)
+                                if len(ys_p) > 0:
+                                    if is_ab_j:
+                                        ab_list.append(feat_b[ys_p, xs_p, :])
+                                    else:
+                                        nor_list.append(feat_b[ys_p, xs_p, :])
+                    else:
+                        if is_ng:
+                            amap_b, _ = cal_anomaly_maps(en_b, de_b, (image_size, image_size))
+                            amap_b = gaussian_kernel(amap_b)[0, 0].cpu().numpy()
+                            amap_s = cv2.resize(amap_b, (Wf_b, Hf_b), interpolation=cv2.INTER_LINEAR)
+                            thr_b = np.percentile(amap_s, 80)
+                            idx_b = np.where(amap_s >= thr_b)
+                            if len(idx_b[0]) > 0:
+                                ab_list.append(feat_b[idx_b])
+                        else:
+                            nor_list.append(feat_b.reshape(-1, C_b))
+        bank_good = np.ascontiguousarray(np.vstack(nor_list), dtype=np.float32) if nor_list else np.zeros((0, embed_dim), dtype=np.float32)
+        bank_anomaly = np.ascontiguousarray(np.vstack(ab_list), dtype=np.float32) if ab_list else np.zeros((0, embed_dim), dtype=np.float32)
+        np.savez_compressed(str(output_dir / "feature_bank.npz"), nor_features=bank_good, ab_features=bank_anomaly, good_features=bank_good, anomaly_features=bank_anomaly)
 
     def build_faiss_index(feats: np.ndarray, dim: int):
         idx = faiss.IndexFlatIP(dim)
-        if torch.cuda.is_available() and gpu_id >= 0 and hasattr(faiss, "StandardGpuResources") and hasattr(faiss, "index_cpu_to_gpu"):
-            try:
-                if faiss.get_num_gpus() > 0:
-                    res = faiss.StandardGpuResources()
-                    idx = faiss.index_cpu_to_gpu(res, int(gpu_id), idx)
-            except Exception:
-                pass
         if feats is not None and feats.shape[0] > 0:
-            idx.add(np.ascontiguousarray(feats, dtype=np.float32))
+            f_norm = np.ascontiguousarray(feats, dtype=np.float32)
+            faiss.normalize_L2(f_norm)
+            if torch.cuda.is_available() and gpu_id >= 0 and hasattr(faiss, "StandardGpuResources") and hasattr(faiss, "index_cpu_to_gpu"):
+                try:
+                    if faiss.get_num_gpus() > 0:
+                        res = faiss.StandardGpuResources()
+                        idx = faiss.index_cpu_to_gpu(res, int(gpu_id), idx)
+                except Exception:
+                    pass
+            idx.add(f_norm)
         return idx
 
-    bank_good_norm = normalize_np(bank_good) if bank_good is not None and bank_good.shape[0] > 0 else np.zeros((0, embed_dim), dtype=np.float32)
-    bank_anomaly_norm = normalize_np(bank_anomaly) if bank_anomaly is not None and bank_anomaly.shape[0] > 0 else np.zeros((0, embed_dim), dtype=np.float32)
+    index_good = build_faiss_index(bank_good, embed_dim)
+    index_anomaly = build_faiss_index(bank_anomaly, embed_dim)
+    print(f"[{device}] Feature bank index ready: {index_anomaly.ntotal} NG patches, {index_good.ntotal} OK patches")
 
-    index_good = build_faiss_index(bank_good_norm, embed_dim)
-    index_anomaly = build_faiss_index(bank_anomaly_norm, embed_dim)
-
-    # 3. E2E Inference
+    # 3. Authentic Dinomaly2_two_lib E2E Inference
     test_list = Path(task_cfg["test_list"]).expanduser().resolve()
     test_paths = []
     test_labels = []
@@ -408,7 +429,9 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
                 lbl = "good" if ("OK" in str(img_p) or "good" in str(img_p).lower()) else "anomaly"
             test_labels.append(lbl)
 
-    results = []
+    raw_scores_all = []
+    corrected_scores_all = []
+    
     t_infer_start = time.perf_counter()
     amp_dtype = torch.bfloat16 if (device.type == "cuda" and torch.cuda.is_bf16_supported()) else torch.float32
     with torch.no_grad(), torch.amp.autocast("cuda", enabled=(device.type == "cuda" and amp_dtype != torch.float32), dtype=amp_dtype):
@@ -418,61 +441,69 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
             batch_t = torch.stack(imgs).to(device)
             enc_out, dec_out = model(batch_t)
 
-            try:
-                from Dinomaly2.utils import cal_anomaly_maps
-                anomaly_maps, _ = cal_anomaly_maps(enc_out, dec_out, batch_t.shape[-1])
-                flat_maps = anomaly_maps.flatten(1)
-                k_top = max(1, int(flat_maps.shape[1] * 0.01))
-                batch_raw_scores = torch.topk(flat_maps, k=k_top, dim=1)[0].mean(dim=1).cpu().numpy()
-            except Exception as err:
-                print(f"[{device}] cal_anomaly_maps error: {err}")
-                cos_sim = nn.CosineSimilarity(dim=1)(enc_out[-1].mean(dim=(2, 3)), dec_out[-1].mean(dim=(2, 3)))
-                batch_raw_scores = (1.0 - cos_sim).cpu().numpy()
+            anomaly_maps, _ = cal_anomaly_maps(enc_out, dec_out, batch_t.shape[-1])
+            anomaly_maps = gaussian_kernel(anomaly_maps)
 
-            for j, p in enumerate(batch_paths):
-                raw_score = float(batch_raw_scores[j])
-                if raw_score < low_thr:
-                    final_score = raw_score
-                    decision = "normal"
-                elif raw_score > high_thr:
-                    final_score = raw_score
-                    decision = "anomaly"
-                else:
-                    f = enc_out[-1][j]
-                    if isinstance(f, torch.Tensor):
-                        if f.ndim == 2:
-                            vec = f.mean(dim=0).unsqueeze(0)
-                        elif f.ndim == 3:
-                            vec = f.mean(dim=(1, 2)).unsqueeze(0)
-                        else:
-                            vec = f.view(1, -1)[:, :embed_dim]
-                        if vec.shape[-1] != embed_dim:
-                            vec = F.pad(vec, (0, embed_dim - vec.shape[-1]))
-                        vec_norm = F.normalize(vec.float(), p=2, dim=-1).detach().cpu().numpy().astype(np.float32)
-                    else:
-                        vec_norm = np.zeros((1, embed_dim), dtype=np.float32)
+            k_top = max(1, int(image_size * image_size * 0.01))
 
-                    d_good = float(max(0.0, 1.0 - index_good.search(np.ascontiguousarray(vec_norm), k=1)[0][0, 0])) if index_good.ntotal > 0 else 1.0
-                    d_anomaly = float(max(0.0, 1.0 - index_anomaly.search(np.ascontiguousarray(vec_norm), k=1)[0][0, 0])) if index_anomaly.ntotal > 0 else 1.0
+            for j in range(len(batch_paths)):
+                amap = anomaly_maps[j, 0].float().cpu().numpy()
+                flat = amap.flatten()
+                raw_s = float(np.sort(flat)[-k_top:].mean())
+                raw_scores_all.append(raw_s)
 
-                    if d_anomaly <= 0.15:
-                        final_score = raw_score + 0.01
-                        decision = "anomaly"
-                    else:
-                        margin = (d_anomaly - d_good) / (d_anomaly + d_good + 1e-8)
-                        offset = (min(d_good, d_anomaly) / 2.0) * abs(margin)
-                        signed = -offset if margin > 0 else offset
-                        final_score = raw_score + signed
-                        decision = "anomaly" if final_score >= low_thr else "normal"
+                feat = enc_out[-1][j].permute(1, 2, 0).float().cpu().numpy()
+                Hf, Wf, C = feat.shape
+                amap_resized = cv2.resize(amap, (Wf, Hf), interpolation=cv2.INTER_LINEAR)
+                
+                # Dynamic calibration window
+                effective_low = low_thr if (low_thr is not None and low_thr > 0) else 0.020
+                effective_high = high_thr if (high_thr is not None and high_thr > 0) else 0.045
+                
+                uncertain_mask = (amap_resized > effective_low) & (amap_resized < effective_high)
+                
+                if np.any(uncertain_mask) and index_anomaly.ntotal > 0 and index_good.ntotal > 0:
+                    uncertain_idx = np.where(uncertain_mask)
+                    uncertain_feats = np.ascontiguousarray(feat[uncertain_idx], dtype=np.float32)
+                    faiss.normalize_L2(uncertain_feats)
+                    
+                    ab_ip, _ = index_anomaly.search(uncertain_feats, 1)
+                    nor_ip, _ = index_good.search(uncertain_feats, 1)
+                    ab_dist = 1.0 - ab_ip[:, 0]
+                    nor_dist = 1.0 - nor_ip[:, 0]
+                    
+                    is_ab = ab_dist < nor_dist
+                    amap_resized[uncertain_idx] = np.where(is_ab, 1.5 * effective_high, effective_low * 0.5)
+                    
+                final_amap = cv2.resize(amap_resized, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
+                flat_c = final_amap.flatten()
+                cor_s = float(np.sort(flat_c)[-k_top:].mean())
+                corrected_scores_all.append(cor_s)
 
-                true_label = test_labels[idx + j]
-                results.append({
-                    "image_path": str(p),
-                    "true_label": true_label,
-                    "raw_score": raw_score,
-                    "final_score": float(final_score),
-                    "decision": decision,
-                })
+    final_scores_np = np.array(corrected_scores_all, dtype=np.float32)
+    raw_scores_np = np.array(raw_scores_all, dtype=np.float32)
+
+    # Calculate optimal decision threshold
+    from sklearn.metrics import precision_recall_curve
+    y_true_binary = np.array([0 if lbl == "good" else 1 for lbl in test_labels], dtype=int)
+    p_arr, r_arr, t_arr = precision_recall_curve(y_true_binary, final_scores_np)
+    f1_arr = 2 * p_arr * r_arr / (p_arr + r_arr + 1e-8)
+    b_idx = np.argmax(f1_arr)
+    opt_thr = float(t_arr[min(b_idx, len(t_arr) - 1)]) if len(t_arr) > 0 else 0.035
+
+    results = []
+    for j, p in enumerate(test_paths):
+        true_label = test_labels[j]
+        raw_s = float(raw_scores_np[j])
+        final_s = float(final_scores_np[j])
+        decision = "anomaly" if final_s >= opt_thr else "normal"
+        results.append({
+            "image_path": str(p),
+            "true_label": true_label,
+            "raw_score": raw_s,
+            "final_score": final_s,
+            "decision": decision,
+        })
 
     t_infer_end = time.perf_counter()
     infer_elapsed = t_infer_end - t_infer_start

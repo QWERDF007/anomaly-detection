@@ -142,8 +142,6 @@ def _worker_process(gpu_id: int, task_queue: mp.Queue, result_queue: mp.Queue, o
                    "--test_list", str(test_txt),
                    "--output_dir", str(out_e2e),
                    "--cuda", str(gpu_id),
-                   "--low", "0.018",
-                   "--high", "0.020",
                    "--image_size", str(sz),
                    "--backbone", "dinov2reg_vit_small_14"]
             run_cmd(cmd, cwd=str(ROOT))

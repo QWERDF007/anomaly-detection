@@ -351,6 +351,35 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
     print(f"[plot_charts] All real benchmark charts successfully generated in -> {chart_dir}")
 
 
+def plot_single_run_charts(csv_path: Union[str, Path], chart_dir: Union[str, Path], low_thr: float = 0.02, high_thr: float = 0.045):
+    """Plot individual ROC and score distribution charts for a single E2E run."""
+    csv_path = Path(csv_path)
+    chart_dir = Path(chart_dir)
+    chart_dir.mkdir(parents=True, exist_ok=True)
+    if not csv_path.is_file():
+        return
+    df = pd.read_csv(csv_path)
+    y_true = (df["true_label"] != "good").astype(int).values
+    final_s = df["final_score"].values
+    if len(np.unique(y_true)) < 2:
+        return
+
+    fpr, tpr, _ = roc_curve(y_true, final_s)
+    auc_val = roc_auc_score(y_true, final_s)
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    ax.plot(fpr, tpr, color="#2ca02c", lw=2, label=f"E2E AUROC = {auc_val:.4f}")
+    ax.plot([0, 1], [0, 1], color="gray", linestyle="--")
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
+    ax.set_title("Single Run ROC Curve", fontsize=11, fontweight="bold")
+    ax.legend(loc="lower right")
+    ax.grid(True, linestyle=":", alpha=0.6)
+    plt.tight_layout()
+    fig.savefig(chart_dir / "roc_curve.png")
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate Real Benchmark Charts from Experiment Outputs")
     parser.add_argument("--outs_dir", type=str, default="/data/wt/report/0826", help="Base outs directory")
@@ -358,3 +387,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     plot_all_benchmark_charts(args.outs_dir, args.chart_dir)
+
