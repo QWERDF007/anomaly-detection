@@ -562,7 +562,7 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
         },
         672: {
             "dino": [1.25, 1.25, 1.25, 1.25],
-            "patch": [1.45, 1.85, 1.20, 0.0],  # N=200 CPU fallback, N=400 OOM
+            "patch": [1.45, 1.85, 0.0, 0.0],  # N=200 is 8.0G打满 (CPU降级), N=400 is OOM (>8G)
             "e2e": [1.45, 1.45, 1.45, 1.45],
             "ylim": [0, 2.5]
         }
@@ -584,12 +584,14 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
         for i in range(len(n_samples)):
             ax.text(x_n[i] - w_t, d_iv[i] + 0.03, f"{d_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
             if p_iv[i] > 0:
-                if s == 672 and n_samples[i] == 200:
-                    ax.text(x_n[i], p_iv[i] + 0.03, f"{p_iv[i]:.2f}G\n(CPU降级)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
-                else:
-                    ax.text(x_n[i], p_iv[i] + 0.03, f"{p_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+                ax.text(x_n[i], p_iv[i] + 0.03, f"{p_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
             else:
-                ax.text(x_n[i], 0.03, "OOM 溢出", ha="center", va="bottom", fontsize=8.0, color="#d62728", fontweight="bold")
+                if s == 672 and n_samples[i] == 200:
+                    ax.text(x_n[i], 0.03, "8.0G 打满\n(溢出降级)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
+                elif s == 448 and n_samples[i] == 400:
+                    ax.text(x_n[i], 0.03, "8.0G 打满\n(OOM溢出)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
+                else:
+                    ax.text(x_n[i], 0.03, "OOM 溢出\n(>8G超限)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
             ax.text(x_n[i] + w_t, e_iv[i] + 0.03, f"{e_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
 
         ax.set_title(f"单张图像推理显存占用随样本量 N 变化对比 ({s}×{s})", fontsize=12, fontweight="bold", pad=12)
@@ -621,7 +623,7 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
         },
         672: {
             "dino": [1.72, 1.72, 1.72, 1.72],
-            "patch": [1.75, 2.10, 1.40, 0.0],  # N=200 CPU fallback, N=400 OOM
+            "patch": [1.75, 2.10, 0.0, 0.0],  # N=200 is 8.0G打满 (CPU降级), N=400 is OOM (>8G)
             "e2e": [1.72, 1.72, 1.72, 1.72],
             "ylim": [0, 2.8]
         }
@@ -643,12 +645,14 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
         for i in range(len(n_samples)):
             ax.text(x_n[i] - w_t, d_tv[i] + 0.05, f"{d_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
             if p_tv[i] > 0:
-                if s == 672 and n_samples[i] == 200:
-                    ax.text(x_n[i], p_tv[i] + 0.05, f"{p_tv[i]:.2f}G\n(CPU降级)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
-                else:
-                    ax.text(x_n[i], p_tv[i] + 0.05, f"{p_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+                ax.text(x_n[i], p_tv[i] + 0.05, f"{p_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
             else:
-                ax.text(x_n[i], 0.05, "OOM 溢出", ha="center", va="bottom", fontsize=8.0, color="#d62728", fontweight="bold")
+                if s == 672 and n_samples[i] == 200:
+                    ax.text(x_n[i], 0.05, "8.0G 打满\n(溢出降级)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
+                elif s == 448 and n_samples[i] == 400:
+                    ax.text(x_n[i], 0.05, "8.0G 打满\n(OOM溢出)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
+                else:
+                    ax.text(x_n[i], 0.05, "OOM 溢出\n(>8G超限)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
             ax.text(x_n[i] + w_t, e_tv[i] + 0.05, f"{e_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
 
         ax.set_title(f"训练与建库峰值显存随样本量 N 变化对比 ({s}×{s})", fontsize=12, fontweight="bold", pad=12)
