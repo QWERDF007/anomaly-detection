@@ -90,11 +90,18 @@ class FaissNN(object):
         return index
 
     def _index_to_cpu(self, index):
-        if self.on_gpu and hasattr(faiss, "index_gpu_to_cpu"):
+        if index is None:
+            return None
+        if hasattr(index, "to_cpu"):
+            try:
+                return index.to_cpu()
+            except Exception:
+                pass
+        if hasattr(faiss, "index_gpu_to_cpu"):
             try:
                 return faiss.index_gpu_to_cpu(index)
             except Exception:
-                return index
+                pass
         return index
 
     def _create_index(self, dimension):
