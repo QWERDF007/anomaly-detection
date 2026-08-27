@@ -145,13 +145,15 @@ def generate_reports(outs_dir: Path):
 | :--- | :--- | :--- | :--- |
 """
         max_din_auc = max(d["din_auc"] for d in data)
-        max_pat_auc = max(d["pat_auc"] for d in data if d["pat_auc"] is not None)
+        valid_pat_aucs = [d["pat_auc"] for d in data if d["pat_auc"] is not None]
+        max_pat_auc = max(valid_pat_aucs) if valid_pat_aucs else None
         max_e2e_auc = max(d["e2e_auc"] for d in data)
 
         for row in n_rows:
             s = row["size"]
             d_str = f"=={row["din_auc"]:.4f}==" if row["din_auc"] == max_din_auc else f"{row["din_auc"]:.4f}"
-            p_str = f"=={row["pat_auc"]:.4f}==" if row["pat_auc"] == max_pat_auc else f"{row["pat_auc"]:.4f}"
+            p_auc = row.get("pat_auc")
+            p_str = (f"=={p_auc:.4f}==" if p_auc == max_pat_auc else f"{p_auc:.4f}") if p_auc is not None else "OOM (显存溢出)"
             e_str = f"=={row["e2e_auc"]:.4f}==" if row["e2e_auc"] == max_e2e_auc else f"{row["e2e_auc"]:.4f}"
             md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
 
@@ -161,13 +163,15 @@ def generate_reports(outs_dir: Path):
 | :--- | :--- | :--- | :--- |
 """
         max_din_ap = max(d["din_ap"] for d in data)
-        max_pat_ap = max(d["pat_ap"] for d in data if d["pat_ap"] is not None)
+        valid_pat_aps = [d["pat_ap"] for d in data if d["pat_ap"] is not None]
+        max_pat_ap = max(valid_pat_aps) if valid_pat_aps else None
         max_e2e_ap = max(d["e2e_ap"] for d in data)
 
         for row in n_rows:
             s = row["size"]
             d_str = f"=={row["din_ap"]:.4f}==" if row["din_ap"] == max_din_ap else f"{row["din_ap"]:.4f}"
-            p_str = f"=={row["pat_ap"]:.4f}==" if row["pat_ap"] == max_pat_ap else f"{row["pat_ap"]:.4f}"
+            p_ap = row.get("pat_ap")
+            p_str = (f"=={p_ap:.4f}==" if p_ap == max_pat_ap else f"{p_ap:.4f}") if p_ap is not None else "OOM (显存溢出)"
             e_str = f"=={row["e2e_ap"]:.4f}==" if row["e2e_ap"] == max_e2e_ap else f"{row["e2e_ap"]:.4f}"
             md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
 
@@ -177,13 +181,15 @@ def generate_reports(outs_dir: Path):
 | :--- | :--- | :--- | :--- |
 """
         max_din_f1 = max(d["din_f1"] for d in data)
-        max_pat_f1 = max(d["pat_f1"] for d in data if d["pat_f1"] is not None)
+        valid_pat_f1s = [d["pat_f1"] for d in data if d["pat_f1"] is not None]
+        max_pat_f1 = max(valid_pat_f1s) if valid_pat_f1s else None
         max_e2e_f1 = max(d["e2e_f1"] for d in data)
 
         for row in n_rows:
             s = row["size"]
             d_str = f"=={row["din_f1"]:.4f}==" if row["din_f1"] == max_din_f1 else f"{row["din_f1"]:.4f}"
-            p_str = f"=={row["pat_f1"]:.4f}==" if row["pat_f1"] == max_pat_f1 else f"{row["pat_f1"]:.4f}"
+            p_f1 = row.get("pat_f1")
+            p_str = (f"=={p_f1:.4f}==" if p_f1 == max_pat_f1 else f"{p_f1:.4f}") if p_f1 is not None else "OOM (显存溢出)"
             e_str = f"=={row["e2e_f1"]:.4f}==" if row["e2e_f1"] == max_e2e_f1 else f"{row["e2e_f1"]:.4f}"
             md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
 
@@ -195,10 +201,11 @@ def generate_reports(outs_dir: Path):
         for row in n_rows:
             s = row["size"]
             d_rec = row["din_tp"] / 53.0 * 100
-            p_rec = row["pat_tp"] / 53.0 * 100
+            p_tp = row.get("pat_tp")
+            p_rec_str = f"{(p_tp / 53.0 * 100):.2f}% ({p_tp}/53)" if p_tp is not None else "OOM"
             e_rec = row["e2e_tp"] / 53.0 * 100
             e_str = f"=={e_rec:.2f}% ({row["e2e_tp"]}/53)==" if row["e2e_tp"] == 53 else f"{e_rec:.2f}% ({row["e2e_tp"]}/53)"
-            md += f"| {s} × {s} | {d_rec:.2f}% ({row["din_tp"]}/53) | {p_rec:.2f}% ({row["pat_tp"]}/53) | {e_str} | {d_rec:.2f}% ({row["din_tp"]}/53) |\n"
+            md += f"| {s} × {s} | {d_rec:.2f}% ({row["din_tp"]}/53) | {p_rec_str} | {e_str} | {d_rec:.2f}% ({row["din_tp"]}/53) |\n"
 
         md += f"""
 ### {idx+1}.5 正常样本误报数量 (False Positives / {good_test} 张正常)
@@ -206,12 +213,14 @@ def generate_reports(outs_dir: Path):
 | :--- | :--- | :--- | :--- | :--- |
 """
         min_din_fp = min(d["din_fp"] for d in data)
-        min_pat_fp = min(d["pat_fp"] for d in data if d["pat_fp"] is not None)
+        valid_pat_fps = [d["pat_fp"] for d in data if d["pat_fp"] is not None]
+        min_pat_fp = min(valid_pat_fps) if valid_pat_fps else None
 
         for row in n_rows:
             s = row["size"]
             d_str = f"=={row["din_fp"]}==" if row["din_fp"] == min_din_fp else f"{row["din_fp"]}"
-            p_str = f"=={row["pat_fp"]}==" if row["pat_fp"] == min_pat_fp else f"{row["pat_fp"]}"
+            p_fp = row.get("pat_fp")
+            p_str = (f"=={p_fp}==" if p_fp == min_pat_fp else f"{p_fp}") if p_fp is not None else "OOM"
             md += f"| {s} × {s} | {d_str} | {p_str} | {row["e2e_fp"]} | {d_str} |\n"
 
     md += """

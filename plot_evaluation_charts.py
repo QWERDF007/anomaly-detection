@@ -497,8 +497,21 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate Real Benchmark Charts from Experiment Outputs")
-    parser.add_argument("--outs_dir", type=str, default="/data/wt/report/0826", help="Base outs directory")
+    parser.add_argument("--outs_dir", type=str, default=None, help="Base outs directory")
     parser.add_argument("--chart_dir", type=str, default=None, help="Charts output directory")
+    parser.add_argument("--results", type=str, default=None, help="Path to single e2e_results.csv or .json")
+    parser.add_argument("--full_benchmark", action="store_true", help="Generate full multisize comparison suite")
+    parser.add_argument("--low", type=float, default=0.019)
+    parser.add_argument("--high", type=float, default=0.024)
     args = parser.parse_args()
 
-    plot_all_benchmark_charts(args.outs_dir, args.chart_dir)
+    outs_dir = args.outs_dir
+    chart_dir = args.chart_dir
+    if chart_dir is not None and outs_dir is None:
+        outs_dir = str(Path(chart_dir).parent)
+
+    if args.results:
+        out_chart_dir = Path(chart_dir or "F:\\Projects\\anomaly-detection\\charts").expanduser().resolve()
+        plot_single_run_charts(args.results, out_chart_dir, low_thr=args.low, high_thr=args.high)
+    if args.full_benchmark or not args.results:
+        plot_all_benchmark_charts(outs_dir=outs_dir or "F:\\tmp\\0826", chart_dir=chart_dir)
