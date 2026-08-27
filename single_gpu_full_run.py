@@ -153,8 +153,6 @@ def main():
                    "--test_list", str(test_txt),
                    "--output_dir", str(out_e2e),
                    "--cuda", str(args.cuda),
-                   "--low", "0.018",
-                   "--high", "0.020",
                    "--image_size", str(sz)]
             run_cmd(cmd, cwd=str(ROOT))
     # Final report

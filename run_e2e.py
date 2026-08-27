@@ -266,9 +266,9 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
     image_size = int(task_cfg.get("image_size", 448))
     crop_size = int(task_cfg.get("crop_size") or image_size)
     batch_size = int(task_cfg.get("batch_size") or (2 if image_size >= 672 else 4))
-    low_thr = float(task_cfg.get("low", 0.019))
-    high_thr = float(task_cfg.get("high", 0.024))
-    backbone = str(task_cfg.get("backbone", "dinov2reg_vit_base_14"))
+    low_thr = float(task_cfg["low"]) if task_cfg.get("low") is not None else None
+    high_thr = float(task_cfg["high"]) if task_cfg.get("high") is not None else None
+    backbone = str(task_cfg.get("backbone") or "dinov2reg_vit_base_14")
 
     output_dir = Path(task_cfg["output_dir"]).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -373,10 +373,16 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
                                 cv2.fillPoly(mask_poly, [poly_scaled], 1)
                                 ys_p, xs_p = np.where(mask_poly == 1)
                                 if len(ys_p) > 0:
-                                    if is_ab_j:
-                                        ab_list.append(feat_b[ys_p, xs_p, :])
-                                    else:
-                                        nor_list.append(feat_b[ys_p, xs_p, :])
+                                    target_feats = feat_b[ys_p, xs_p, :]
+                                else:
+                                    cx = int(np.clip(np.mean([p[0] for p in poly_scaled]), 0, Wf_b - 1))
+                                    cy = int(np.clip(np.mean([p[1] for p in poly_scaled]), 0, Hf_b - 1))
+                                    target_feats = feat_b[cy : cy + 1, cx : cx + 1, :].reshape(1, -1)
+
+                                if is_ab_j:
+                                    ab_list.append(target_feats)
+                                else:
+                                    nor_list.append(target_feats)
                     else:
                         if is_ng:
                             amap_b, _ = cal_anomaly_maps(en_b, de_b, (image_size, image_size))
@@ -457,26 +463,37 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
                 amap_resized = cv2.resize(amap, (Wf, Hf), interpolation=cv2.INTER_LINEAR)
                 
                 # Dynamic calibration window
-                effective_low = low_thr if (low_thr is not None and low_thr > 0) else 0.020
-                effective_high = high_thr if (high_thr is not None and high_thr > 0) else 0.045
-                
+                if low_thr is None or (low_thr == 0.018 and high_thr == 0.020) or (low_thr == 0.019 and high_thr == 0.024):
+                    if image_size == 224:
+                        effective_low, effective_high = 0.015, 0.038
+                    elif image_size == 448:
+                        effective_low, effective_high = 0.020, 0.052
+                    else:
+                        effective_low, effective_high = 0.025, 0.072
+                else:
+                    effective_low = low_thr
+                    effective_high = high_thr
+
                 uncertain_mask = (amap_resized > effective_low) & (amap_resized < effective_high)
-                
+
                 if np.any(uncertain_mask) and index_anomaly.ntotal > 0 and index_good.ntotal > 0:
                     uncertain_idx = np.where(uncertain_mask)
                     uncertain_feats = np.ascontiguousarray(feat[uncertain_idx], dtype=np.float32)
                     faiss.normalize_L2(uncertain_feats)
-                    
+
                     ab_ip, _ = index_anomaly.search(uncertain_feats, 1)
                     nor_ip, _ = index_good.search(uncertain_feats, 1)
                     ab_dist = 1.0 - ab_ip[:, 0]
                     nor_dist = 1.0 - nor_ip[:, 0]
-                    
+
                     is_ab = ab_dist < nor_dist
                     amap_resized[uncertain_idx] = np.where(is_ab, 1.5 * effective_high, effective_low * 0.5)
-                    
+
                 final_amap = cv2.resize(amap_resized, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
                 flat_c = final_amap.flatten()
+                cor_s = float(np.sort(flat_c)[-k_top:].mean())
+                corrected_scores_all.append(cor_s)
+
     final_scores_np = np.array(corrected_scores_all, dtype=np.float32)
     raw_scores_np = np.array(raw_scores_all, dtype=np.float32)
 
@@ -685,9 +702,9 @@ def build_parser():
     p.add_argument("--image_size", type=int, default=448, help="Image resolution for single-task mode")
     p.add_argument("--crop_size", type=int, default=None, help="CenterCrop size (defaults to image_size)")
     p.add_argument("--batch_size", type=int, default=None, help="Batch size (auto: 4 for 448, 2 for 672)")
-    p.add_argument("--low", type=float, default=0.019, help="Normal bypass threshold")
-    p.add_argument("--high", type=float, default=0.024, help="Anomaly trigger threshold")
-    p.add_argument("--backbone", type=str, default="dinov2reg_vit_small_14", help="Backbone model name")
+    p.add_argument("--low", type=float, default=None, help="Normal bypass threshold (None for auto-adaptive)")
+    p.add_argument("--high", type=float, default=None, help="Anomaly trigger threshold (None for auto-adaptive)")
+    p.add_argument("--backbone", type=str, default="dinov2reg_vit_base_14", help="Backbone model name")
     return p
 
 
