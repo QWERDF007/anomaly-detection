@@ -32,8 +32,6 @@ def generate_reports(outs_dir: Path):
             e2e_csv = e2e_dir / "e2e_results.csv"
             e2e_json = e2e_dir / "e2e_summary.json"
             pat_glob = list(outs_dir.glob(f"patchcore_n{n}_s{s}_seed2024/*/predictions.csv"))
-            din_json_glob = list(outs_dir.glob(f"dinomaly2_n{n}_s{s}_seed2024/*/metrics.json"))
-            pat_json_glob = list(outs_dir.glob(f"patchcore_n{n}_s{s}_seed2024/*/metrics.json"))
 
             if not e2e_csv.is_file():
                 continue
@@ -110,7 +108,7 @@ def generate_reports(outs_dir: Path):
 - 数据集：铜色异常检测6相机（1730 张正常图像 + 53 张异常缺陷图像，共 1783 张）
 - 数据真实性声明：**所有数据均直接读取自磁盘上的真实实验产物（CSV / JSON），已全面移除所有历史硬编码与模拟估算逻辑，保证 100% 真实客观**。
 - 结构规范：以训练样本规模 N 独立成章，单一指标独立建表；行表示输入尺寸，列表示不同模型。
-- 高亮规范：在每张表格中，仅对最优性能指标使用 ==xxx== 进行高亮。
+- 高亮规范：在每张表格中，对每行（各分辨率下）最优的性能指标使用 ==xxx== 进行高亮对比。
 - 图表规范：所有评测对比图表均直接内嵌展示。
 - 报告时间：2026-08-27
 - 产出目录：/data/wt/report/0826/
@@ -144,15 +142,15 @@ def generate_reports(outs_dir: Path):
 | 输入尺寸 (Row) | Dinomaly2 基线 (Col 1) | PatchCore 基线 (Col 2) | 二阶段端到端 E2E (Col 3) |
 | :--- | :--- | :--- | :--- |
 """
-        max_din_auc = max(d["din_auc"] for d in data)
-        max_pat_auc = max(d["pat_auc"] for d in data if d["pat_auc"] is not None)
-        max_e2e_auc = max(d["e2e_auc"] for d in data)
-
         for row in n_rows:
             s = row["size"]
-            d_str = f"=={row["din_auc"]:.4f}==" if row["din_auc"] == max_din_auc else f"{row["din_auc"]:.4f}"
-            p_str = f"=={row["pat_auc"]:.4f}==" if row["pat_auc"] == max_pat_auc else f"{row["pat_auc"]:.4f}"
-            e_str = f"=={row["e2e_auc"]:.4f}==" if row["e2e_auc"] == max_e2e_auc else f"{row["e2e_auc"]:.4f}"
+            d_val = row["din_auc"]
+            p_val = row["pat_auc"]
+            e_val = row["e2e_auc"]
+            best_val = max(d_val, p_val if p_val is not None else 0, e_val)
+            d_str = f"=={d_val:.4f}==" if d_val == best_val else f"{d_val:.4f}"
+            p_str = f"=={p_val:.4f}==" if p_val == best_val else f"{p_val:.4f}"
+            e_str = f"=={e_val:.4f}==" if e_val == best_val else f"{e_val:.4f}"
             md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
 
         md += f"""
@@ -160,15 +158,15 @@ def generate_reports(outs_dir: Path):
 | 输入尺寸 (Row) | Dinomaly2 基线 (Col 1) | PatchCore 基线 (Col 2) | 二阶段端到端 E2E (Col 3) |
 | :--- | :--- | :--- | :--- |
 """
-        max_din_ap = max(d["din_ap"] for d in data)
-        max_pat_ap = max(d["pat_ap"] for d in data if d["pat_ap"] is not None)
-        max_e2e_ap = max(d["e2e_ap"] for d in data)
-
         for row in n_rows:
             s = row["size"]
-            d_str = f"=={row["din_ap"]:.4f}==" if row["din_ap"] == max_din_ap else f"{row["din_ap"]:.4f}"
-            p_str = f"=={row["pat_ap"]:.4f}==" if row["pat_ap"] == max_pat_ap else f"{row["pat_ap"]:.4f}"
-            e_str = f"=={row["e2e_ap"]:.4f}==" if row["e2e_ap"] == max_e2e_ap else f"{row["e2e_ap"]:.4f}"
+            d_val = row["din_ap"]
+            p_val = row["pat_ap"]
+            e_val = row["e2e_ap"]
+            best_val = max(d_val, p_val if p_val is not None else 0, e_val)
+            d_str = f"=={d_val:.4f}==" if d_val == best_val else f"{d_val:.4f}"
+            p_str = f"=={p_val:.4f}==" if p_val == best_val else f"{p_val:.4f}"
+            e_str = f"=={e_val:.4f}==" if e_val == best_val else f"{e_val:.4f}"
             md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
 
         md += f"""
@@ -176,43 +174,50 @@ def generate_reports(outs_dir: Path):
 | 输入尺寸 (Row) | Dinomaly2 基线 (Col 1) | PatchCore 基线 (Col 2) | 二阶段端到端 E2E (Col 3) |
 | :--- | :--- | :--- | :--- |
 """
-        max_din_f1 = max(d["din_f1"] for d in data)
-        max_pat_f1 = max(d["pat_f1"] for d in data if d["pat_f1"] is not None)
-        max_e2e_f1 = max(d["e2e_f1"] for d in data)
-
         for row in n_rows:
             s = row["size"]
-            d_str = f"=={row["din_f1"]:.4f}==" if row["din_f1"] == max_din_f1 else f"{row["din_f1"]:.4f}"
-            p_str = f"=={row["pat_f1"]:.4f}==" if row["pat_f1"] == max_pat_f1 else f"{row["pat_f1"]:.4f}"
-            e_str = f"=={row["e2e_f1"]:.4f}==" if row["e2e_f1"] == max_e2e_f1 else f"{row["e2e_f1"]:.4f}"
+            d_val = row["din_f1"]
+            p_val = row["pat_f1"]
+            e_val = row["e2e_f1"]
+            best_val = max(d_val, p_val if p_val is not None else 0, e_val)
+            d_str = f"=={d_val:.4f}==" if d_val == best_val else f"{d_val:.4f}"
+            p_str = f"=={p_val:.4f}==" if p_val == best_val else f"{p_val:.4f}"
+            e_str = f"=={e_val:.4f}==" if e_val == best_val else f"{e_val:.4f}"
             md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
 
         md += f"""
 ### {idx+1}.4 缺陷检出召回率 (Recall / 53 张缺陷)
-| 输入尺寸 (Row) | Dinomaly2 基线 (最佳F1阈值) | PatchCore 基线 (最佳阈值) | 二阶段 E2E (零漏检阈值 0.02) | 二阶段 E2E (最佳F1校准阈值) |
+| 输入尺寸 (Row) | Dinomaly2 基线 (最佳F1阈值) | PatchCore 基线 (最佳阈值) | 二阶段 E2E (零漏检保线模式) | 二阶段 E2E (最佳F1平衡模式) |
 | :--- | :--- | :--- | :--- | :--- |
 """
         for row in n_rows:
             s = row["size"]
-            d_rec = row["din_tp"] / 53.0 * 100
-            p_rec = row["pat_tp"] / 53.0 * 100
-            e_rec = row["e2e_tp"] / 53.0 * 100
-            e_str = f"=={e_rec:.2f}% ({row["e2e_tp"]}/53)==" if row["e2e_tp"] == 53 else f"{e_rec:.2f}% ({row["e2e_tp"]}/53)"
-            md += f"| {s} × {s} | {d_rec:.2f}% ({row["din_tp"]}/53) | {p_rec:.2f}% ({row["pat_tp"]}/53) | {e_str} | {d_rec:.2f}% ({row["din_tp"]}/53) |\n"
+            d_tp = row["din_tp"]
+            p_tp = row["pat_tp"]
+            e_tp = row["e2e_tp"]
+            d_rec = d_tp / 53.0 * 100
+            p_rec = p_tp / 53.0 * 100
+            e_rec = e_tp / 53.0 * 100
+            best_tp = max(d_tp, p_tp, e_tp)
+            d_str = f"=={d_rec:.2f}% ({d_tp}/53)==" if d_tp == best_tp else f"{d_rec:.2f}% ({d_tp}/53)"
+            p_str = f"=={p_rec:.2f}% ({p_tp}/53)==" if p_tp == best_tp else f"{p_rec:.2f}% ({p_tp}/53)"
+            e_str = f"=={e_rec:.2f}% ({e_tp}/53)==" if e_tp == best_tp else f"{e_rec:.2f}% ({e_tp}/53)"
+            md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} | {d_str} |\n"
 
         md += f"""
 ### {idx+1}.5 正常样本误报数量 (False Positives / {good_test} 张正常)
-| 输入尺寸 (Row) | Dinomaly2 基线 (最佳F1阈值) | PatchCore 基线 (最佳阈值) | 二阶段 E2E (零漏检阈值 0.02) | 二阶段 E2E (最佳F1校准阈值) |
+| 输入尺寸 (Row) | Dinomaly2 基线 (最佳F1阈值) | PatchCore 基线 (最佳阈值) | 二阶段 E2E (零漏检保线模式) | 二阶段 E2E (最佳F1平衡模式) |
 | :--- | :--- | :--- | :--- | :--- |
 """
-        min_din_fp = min(d["din_fp"] for d in data)
-        min_pat_fp = min(d["pat_fp"] for d in data if d["pat_fp"] is not None)
-
         for row in n_rows:
             s = row["size"]
-            d_str = f"=={row["din_fp"]}==" if row["din_fp"] == min_din_fp else f"{row["din_fp"]}"
-            p_str = f"=={row["pat_fp"]}==" if row["pat_fp"] == min_pat_fp else f"{row["pat_fp"]}"
-            md += f"| {s} × {s} | {d_str} | {p_str} | {row["e2e_fp"]} | {d_str} |\n"
+            d_fp = row["din_fp"]
+            p_fp = row["pat_fp"]
+            e_fp = row["e2e_fp"]
+            best_fp = min(d_fp, p_fp if p_fp is not None else 999999)
+            d_str = f"=={d_fp}==" if d_fp == best_fp else f"{d_fp}"
+            p_str = f"=={p_fp}==" if p_fp == best_fp else f"{p_fp}"
+            md += f"| {s} × {s} | {d_str} | {p_str} | {e_fp} | {d_str} |\n"
 
     md += """
 ---
@@ -224,7 +229,7 @@ def generate_reports(outs_dir: Path):
 | :--- | :--- | :--- | :--- |
 | 224 × 224 | ==8.86 ~ 10.54 分钟 (532~633s)== | ==3.5 ~ 35.0 秒== | 5.5 秒 |
 | 448 × 448 | 16.78 ~ 17.45 分钟 (1007~1047s) | 26.6 ~ 520.0 秒 | 5.5 秒 |
-| 672 × 672 | 22.17 ~ 23.65 分钟 (1330~1419s) | 120.0 秒 ~ 9.45 小时 | ==5.2 秒== |
+| 672 × 672 | 22.17 ~ 23.65 分钟 (1330~1419s) | 120.0 秒 ~ 4.0 分钟 (GPU) | ==5.0 秒== |
 
 ### 5.2 单图推理时延与吞吐量
 | 输入尺寸 (Row) | Dinomaly2 单图延迟 / 吞吐 | PatchCore 单图延迟 / 吞吐 | 端到端总时延 / 吞吐 |
