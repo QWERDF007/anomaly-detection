@@ -110,6 +110,7 @@ def main():
     else:
         test_txt_path = auto_detect_test_list(outs_dir)
 
+    test_lines = [l.strip() for l in test_txt_path.read_text(encoding="utf-8").splitlines() if l.strip()]
     test_paths = []
     y_true_list = []
     for l in test_lines:
