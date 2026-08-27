@@ -548,9 +548,24 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
 
     # 7. VRAM Usage Across Different N
 def get_current_gpu_capacity(override_name: Optional[str] = None, override_vram_gb: Optional[float] = None) -> tuple[str, float]:
-    """Dynamically query the local GPU model and total memory capacity (GB)."""
+    """Dynamically query the local GPU model and total memory capacity (GB), or apply user override."""
     if override_name and override_vram_gb:
         return override_name, float(override_vram_gb)
+    if override_name and not override_vram_gb:
+        name_upper = override_name.upper()
+        if "4060" in name_upper:
+            return override_name, 8.0
+        elif "3060" in name_upper:
+            return override_name, 12.0
+        elif "4090" in name_upper:
+            return override_name, 24.0
+        elif "A100" in name_upper:
+            return override_name, 80.0
+        elif "H100" in name_upper:
+            return override_name, 80.0
+        elif "V100" in name_upper:
+            return override_name, 32.0
+
     try:
         import torch
         if torch.cuda.is_available():
@@ -560,10 +575,10 @@ def get_current_gpu_capacity(override_name: Optional[str] = None, override_vram_
             total_gb = round(total_bytes / (1024 ** 3), 1)
             # Simplify GPU name for clean chart labels
             clean_name = raw_name.replace("NVIDIA ", "").replace("GeForce ", "").replace(" Laptop GPU", "").strip()
-            return clean_name or "GPU", total_gb
+            return override_name or clean_name or "GPU", override_vram_gb or total_gb
     except Exception:
         pass
-    return "RTX 4090", 24.0
+    return override_name or "RTX 4060", override_vram_gb or 8.0
 
 
 def plot_all_benchmark_charts(
