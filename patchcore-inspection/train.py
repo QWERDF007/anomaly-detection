@@ -194,17 +194,14 @@ def make_sampler(
         return patchcore.sampler.IdentitySampler()
     if args.sampling_percentage <= 0:
         raise ValueError("sampling_percentage must be greater than zero.")
-    # 4060 8G 单卡：672 大图 + 大 N 时 FAISS 采样在 GPU 易 OOM (10.77 GiB)，自动切 CPU 采样 + 降低比例
+    # 显存自适应：RTX 4090 (24GB) 全量使用 GPU 极速采样 (仅需数分钟)；若为 <12GB 低显存环境则回退 CPU
     sampler_device = device
     eff_percentage = float(args.sampling_percentage)
-    if getattr(args, "imagesize", 0) >= 672 and number_of_features is not None and number_of_features > 80000:
-        LOGGER.warning("672 large feature bank (%d patches) -> switch sampler to CPU and reduce percentage to 0.05 to avoid OOM", number_of_features)
+    total_vram_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3) if device.type == "cuda" else 0
+    if total_vram_gb < 12 and getattr(args, "imagesize", 0) >= 672 and number_of_features is not None and number_of_features > 80000:
+        LOGGER.warning("Low-VRAM (<12GB) detected: 672 large feature bank (%d patches) -> switch sampler to CPU and reduce percentage to 0.05 to avoid OOM", number_of_features)
         sampler_device = torch.device("cpu")
         eff_percentage = min(eff_percentage, 0.05)
-    elif getattr(args, "imagesize", 0) >= 672 and device.type == "cuda":
-        # 672 即使中等也建议 CPU 采样，避免显存峰值
-        sampler_device = torch.device("cpu")
-        LOGGER.info("672 uses CPU sampler to save VRAM (4060 8G)")
     if args.sampler == "identity":
         return patchcore.sampler.IdentitySampler()
     if args.sampler == "greedy_coreset":

@@ -69,7 +69,7 @@ def build_parser():
     p.add_argument("--image_size", type=int, default=448)
     p.add_argument("--crop_size", type=int, default=None, help="默认同 image_size")
     p.add_argument("--batch_size", type=int, default=None, help="默认 448->4, 672->2 (4060 8G)")
-    p.add_argument("--backbone", type=str, default="dinov2reg_vit_base_14", help="需与训练时一致")
+    p.add_argument("--backbone", type=str, default="dinov2reg_vit_small_14", help="需与训练时一致")
     p.add_argument("--cuda", type=int, default=0)
     p.add_argument("--ok_names", type=str, nargs="+", default=["OK","ok","good","normal","Good"])
     return p
@@ -119,19 +119,39 @@ def main():
     import torch.nn as nn
     from models.vision_transformer import Block as VitBlock, Attention, LinearAttention2
 
-    # 与 dinomaly_2D.py 保持一致的默认
-    encoder = vit_encoder.load(args.backbone)
-    if "small" in args.backbone:
+    # 加载 checkpoint
+    ckpt = torch.load(str(model_path), map_location=device)
+    if isinstance(ckpt, dict):
+        for k in ("state_dict","model_state_dict","model"):
+            if k in ckpt and isinstance(ckpt[k], dict):
+                ckpt = ckpt[k]
+                break
+    # 去掉 module. 前缀
+    if ckpt and all(k.startswith("module.") for k in ckpt):
+        ckpt = {k[len("module."):]:v for k,v in ckpt.items()}
+
+    backbone = args.backbone
+    if "bottleneck.0.0.weight" in ckpt:
+        in_dim = ckpt["bottleneck.0.0.weight"].shape[1]
+        if in_dim == 384 and "small" not in backbone:
+            backbone = "dinov2reg_vit_small_14"
+        elif in_dim == 768 and "base" not in backbone:
+            backbone = "dinov2reg_vit_base_14"
+        elif in_dim == 1024 and "large" not in backbone:
+            backbone = "dinov2reg_vit_large_14"
+
+    encoder = vit_encoder.load(backbone)
+    if "small" in backbone:
         embed_dim, num_heads = 384, 6
         target_layers = [2,3,4,5,6,7,8,9]
-    elif "base" in args.backbone:
+    elif "base" in backbone:
         embed_dim, num_heads = 768, 12
         target_layers = [2,3,4,5,6,7,8,9]
-    elif "large" in args.backbone:
+    elif "large" in backbone:
         embed_dim, num_heads = 1024, 16
         target_layers = [4,6,8,10,12,14,16,18]
     else:
-        raise ValueError(f"Unknown backbone {args.backbone}")
+        raise ValueError(f"Unknown backbone {backbone}")
 
     fuse_layer_encoder = [[0,1,2,3],[4,5,6,7]]
     fuse_layer_decoder = [[0,1,2,3],[4,5,6,7]]
@@ -146,16 +166,6 @@ def main():
         decoder.append(blk)
     decoder = nn.ModuleList(decoder)
     model = Dinomaly(encoder=encoder, bottleneck=bottleneck, decoder=decoder, target_layers=target_layers, remove_class_token=False, fuse_layer_encoder=fuse_layer_encoder, fuse_layer_decoder=fuse_layer_decoder, context_aware_recenter=1)
-    # 加载 checkpoint
-    ckpt = torch.load(str(model_path), map_location=device)
-    if isinstance(ckpt, dict):
-        for k in ("state_dict","model_state_dict","model"):
-            if k in ckpt and isinstance(ckpt[k], dict):
-                ckpt = ckpt[k]
-                break
-    # 去掉 module. 前缀
-    if ckpt and all(k.startswith("module.") for k in ckpt):
-        ckpt = {k[len("module."):]:v for k,v in ckpt.items()}
     model.load_state_dict(ckpt, strict=True)
     model.to(device).eval()
     print(f"[build_bank] model loaded: {model_path}")

@@ -288,8 +288,6 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
         model_path = resolve_model(task_cfg.get("dinomaly_model"))
         if not model_path:
             raise FileNotFoundError(f"Model checkpoint not found: {task_cfg.get('dinomaly_model')}")
-
-    model, embed_dim = build_dinomaly_model(backbone)
     ckpt = torch.load(str(model_path), map_location=device)
     if isinstance(ckpt, dict):
         for k in ("state_dict", "model_state_dict", "model"):
@@ -298,6 +296,18 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
                 break
     if ckpt and all(k.startswith("module.") for k in ckpt):
         ckpt = {k[len("module."):]: v for k, v in ckpt.items()}
+
+    # Auto detect backbone dimension from checkpoint weights if needed
+    if "bottleneck.0.0.weight" in ckpt:
+        in_dim = ckpt["bottleneck.0.0.weight"].shape[1]
+        if in_dim == 384 and "small" not in backbone:
+            backbone = "dinov2reg_vit_small_14"
+        elif in_dim == 768 and "base" not in backbone:
+            backbone = "dinov2reg_vit_base_14"
+        elif in_dim == 1024 and "large" not in backbone:
+            backbone = "dinov2reg_vit_large_14"
+
+    model, embed_dim = build_dinomaly_model(backbone)
     model.load_state_dict(ckpt, strict=True)
     model.to(device).eval()
 
@@ -332,9 +342,10 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
             )
             ok_images = all_imgs
 
+        amp_dtype = torch.bfloat16 if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else torch.float32
         def extract(paths):
             feats = []
-            with torch.no_grad(), torch.amp.autocast("cuda", enabled=(device.type == "cuda"), dtype=torch.float16):
+            with torch.no_grad(), torch.amp.autocast("cuda", enabled=(device.type == "cuda"), dtype=amp_dtype):
                 for i in range(0, len(paths), batch_size):
                     batch_paths = paths[i:i + batch_size]
                     imgs = [transform(Image.open(p).convert("RGB")) for p in batch_paths]
@@ -381,8 +392,21 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     # 3. E2E Inference
     test_list = Path(task_cfg["test_list"]).expanduser().resolve()
-    test_paths = [Path(l.strip()).expanduser() for l in test_list.read_text(encoding="utf-8").splitlines() if l.strip()]
-    test_paths = [p for p in test_paths if p.is_file()]
+    test_paths = []
+    test_labels = []
+    for l in test_list.read_text(encoding="utf-8").splitlines():
+        line = l.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split() if ("," not in line or Path(line).is_file()) else [p.strip() for p in line.split(",")]
+        img_p = Path(parts[0]).expanduser()
+        if img_p.is_file():
+            test_paths.append(img_p)
+            if len(parts) >= 2 and (parts[1].isdigit() or parts[1] in {"0", "1"}):
+                lbl = "good" if int(parts[1]) == 0 else "anomaly"
+            else:
+                lbl = "good" if ("OK" in str(img_p) or "good" in str(img_p).lower()) else "anomaly"
+            test_labels.append(lbl)
 
     results = []
     t_infer_start = time.perf_counter()
@@ -441,9 +465,10 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
                         final_score = raw_score + signed
                         decision = "anomaly" if final_score >= low_thr else "normal"
 
+                true_label = test_labels[idx + j] if test_labels and (idx + j) < len(test_labels) else ("good" if ("OK" in str(p) or "good" in str(p).lower()) else "anomaly")
                 results.append({
                     "image_path": str(p),
-                    "true_label": "good" if ("OK" in str(p) or "good" in str(p).lower()) else "anomaly",
+                    "true_label": true_label,
                     "raw_score": float(raw_score),
                     "final_score": float(final_score),
                     "decision": decision,
@@ -634,7 +659,7 @@ def build_parser():
     p.add_argument("--batch_size", type=int, default=None, help="Batch size (auto: 4 for 448, 2 for 672)")
     p.add_argument("--low", type=float, default=0.019, help="Normal bypass threshold")
     p.add_argument("--high", type=float, default=0.024, help="Anomaly trigger threshold")
-    p.add_argument("--backbone", type=str, default="dinov2reg_vit_base_14", help="Backbone model name")
+    p.add_argument("--backbone", type=str, default="dinov2reg_vit_small_14", help="Backbone model name")
     return p
 
 
@@ -670,6 +695,14 @@ def main():
                     train_txt = Path(args.train_list) if args.train_list else None
                     test_txt = Path(args.test_list) if args.test_list else None
 
+                model_str = args.dinomaly_model
+                if model_str:
+                    model_str = model_str.replace("{n}", str(n)).replace("{sz}", str(sz)).replace("{image_size}", str(sz))
+                elif not args.do_train:
+                    cand_pattern = f"/data/wt/outs/dinomaly2_n{n}_s{sz}_seed2024/*/model.pth"
+                    if glob.glob(cand_pattern):
+                        model_str = cand_pattern
+
                 task_cfg = {
                     "task_name": task_name,
                     "do_train": args.do_train,
@@ -677,7 +710,7 @@ def main():
                     "train_data": args.train_data,
                     "test_list": str(test_txt) if test_txt else None,
                     "bank_data": args.bank_data,
-                    "dinomaly_model": args.dinomaly_model,
+                    "dinomaly_model": model_str,
                     "output_dir": str(task_out),
                     "image_size": sz,
                     "crop_size": sz,
