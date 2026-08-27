@@ -552,19 +552,19 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
             "dino": [0.45, 0.45, 0.45, 0.45],
             "patch": [0.52, 0.58, 0.65, 0.72],
             "e2e": [0.65, 0.65, 0.65, 0.65],
-            "ylim": [0, 1.0]
+            "ylim": [0, 1.2]
         },
         448: {
             "dino": [0.82, 0.82, 0.82, 0.82],
-            "patch": [0.95, 1.15, 1.45, 0.0],  # N=400 is OOM
+            "patch": [0.95, 1.15, 1.45, 8.0],  # N=400 hits 8.0G OOM
             "e2e": [1.02, 1.02, 1.02, 1.02],
-            "ylim": [0, 1.8]
+            "ylim": [0, 9.8]
         },
         672: {
             "dino": [1.25, 1.25, 1.25, 1.25],
-            "patch": [1.45, 1.85, 0.0, 0.0],  # N=200 is 8.0G打满 (CPU降级), N=400 is OOM (>8G)
+            "patch": [1.45, 1.85, 8.0, 8.5],  # N=200 hits 8.0G 打满降级, N=400 is >8.0G OOM
             "e2e": [1.45, 1.45, 1.45, 1.45],
-            "ylim": [0, 2.5]
+            "ylim": [0, 9.8]
         }
     }
 
@@ -578,21 +578,34 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
         e_iv = ivd["e2e"]
 
         ax.bar(x_n - w_t, d_iv, width=w_t, label="Dinomaly2 推理显存", color="#1f77b4", alpha=0.85)
-        ax.bar(x_n, p_iv, width=w_t, label="PatchCore 推理显存", color="#d62728", alpha=0.85)
+        
+        # PatchCore bars with hatch for >= 8.0G
+        for i in range(len(n_samples)):
+            val = p_iv[i]
+            if val >= 8.0:
+                ax.bar(x_n[i], val, width=w_t, color="#d62728", alpha=0.85, hatch="//", edgecolor="#900")
+            else:
+                ax.bar(x_n[i], val, width=w_t, color="#d62728", alpha=0.85)
+        # Dummy bar for PatchCore legend
+        ax.bar(x_n[0], 0, width=w_t, label="PatchCore 推理显存", color="#d62728", alpha=0.85)
+
         ax.bar(x_n + w_t, e_iv, width=w_t, label="二阶段端到端推理显存", color="#2ca02c", alpha=0.85)
 
+        if ivd["ylim"][1] > 3.0:
+            ax.axhline(8.0, color="#d62728", linestyle="--", lw=1.1, alpha=0.6, label="RTX 4060 显存上限 (8.0GB)")
+
         for i in range(len(n_samples)):
-            ax.text(x_n[i] - w_t, d_iv[i] + 0.03, f"{d_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
-            if p_iv[i] > 0:
-                ax.text(x_n[i], p_iv[i] + 0.03, f"{p_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
-            else:
+            ax.text(x_n[i] - w_t, d_iv[i] + 0.15, f"{d_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
+            if p_iv[i] == 8.0:
                 if s == 672 and n_samples[i] == 200:
-                    ax.text(x_n[i], 0.03, "8.0G 打满\n(溢出降级)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
-                elif s == 448 and n_samples[i] == 400:
-                    ax.text(x_n[i], 0.03, "8.0G 打满\n(OOM溢出)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
+                    ax.text(x_n[i], 8.0 + 0.15, "8.0G+\n(打满降级)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
                 else:
-                    ax.text(x_n[i], 0.03, "OOM 溢出\n(>8G超限)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
-            ax.text(x_n[i] + w_t, e_iv[i] + 0.03, f"{e_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
+                    ax.text(x_n[i], 8.0 + 0.15, "8.0G+\n(OOM溢出)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
+            elif p_iv[i] > 8.0:
+                ax.text(x_n[i], p_iv[i] + 0.15, ">8.0G\n(OOM崩溃)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
+            else:
+                ax.text(x_n[i], p_iv[i] + 0.15, f"{p_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+            ax.text(x_n[i] + w_t, e_iv[i] + 0.15, f"{e_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
 
         ax.set_title(f"单张图像推理显存占用随样本量 N 变化对比 ({s}×{s})", fontsize=12, fontweight="bold", pad=12)
         ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
@@ -613,19 +626,19 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
             "dino": [0.98, 0.98, 0.98, 0.98],
             "patch": [0.65, 0.75, 0.85, 1.05],
             "e2e": [0.98, 0.98, 0.98, 0.98],
-            "ylim": [0, 1.4]
+            "ylim": [0, 1.6]
         },
         448: {
             "dino": [1.56, 1.56, 1.56, 1.56],
-            "patch": [1.15, 1.42, 1.95, 0.0],  # N=400 is OOM
+            "patch": [1.15, 1.42, 1.95, 8.0],  # N=400 hits 8.0G OOM
             "e2e": [1.56, 1.56, 1.56, 1.56],
-            "ylim": [0, 2.4]
+            "ylim": [0, 9.8]
         },
         672: {
             "dino": [1.72, 1.72, 1.72, 1.72],
-            "patch": [1.75, 2.10, 0.0, 0.0],  # N=200 is 8.0G打满 (CPU降级), N=400 is OOM (>8G)
+            "patch": [1.75, 2.10, 8.0, 8.5],  # N=200 hits 8.0G 打满降级, N=400 is >8.0G OOM
             "e2e": [1.72, 1.72, 1.72, 1.72],
-            "ylim": [0, 2.8]
+            "ylim": [0, 9.8]
         }
     }
 
@@ -639,21 +652,34 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
         e_tv = tvd["e2e"]
 
         ax.bar(x_n - w_t, d_tv, width=w_t, label="Dinomaly2 训练显存", color="#1f77b4", alpha=0.85)
-        ax.bar(x_n, p_tv, width=w_t, label="PatchCore 建库显存", color="#d62728", alpha=0.85)
+        
+        # PatchCore bars with hatch for >= 8.0G
+        for i in range(len(n_samples)):
+            val = p_tv[i]
+            if val >= 8.0:
+                ax.bar(x_n[i], val, width=w_t, color="#d62728", alpha=0.85, hatch="//", edgecolor="#900")
+            else:
+                ax.bar(x_n[i], val, width=w_t, color="#d62728", alpha=0.85)
+        # Dummy bar for PatchCore legend
+        ax.bar(x_n[0], 0, width=w_t, label="PatchCore 建库显存", color="#d62728", alpha=0.85)
+
         ax.bar(x_n + w_t, e_tv, width=w_t, label="二阶段总训练显存峰值 (训练+建库)", color="#2ca02c", alpha=0.85)
 
+        if tvd["ylim"][1] > 3.0:
+            ax.axhline(8.0, color="#d62728", linestyle="--", lw=1.1, alpha=0.6, label="RTX 4060 显存上限 (8.0GB)")
+
         for i in range(len(n_samples)):
-            ax.text(x_n[i] - w_t, d_tv[i] + 0.05, f"{d_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
-            if p_tv[i] > 0:
-                ax.text(x_n[i], p_tv[i] + 0.05, f"{p_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
-            else:
+            ax.text(x_n[i] - w_t, d_tv[i] + 0.15, f"{d_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
+            if p_tv[i] == 8.0:
                 if s == 672 and n_samples[i] == 200:
-                    ax.text(x_n[i], 0.05, "8.0G 打满\n(溢出降级)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
-                elif s == 448 and n_samples[i] == 400:
-                    ax.text(x_n[i], 0.05, "8.0G 打满\n(OOM溢出)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
+                    ax.text(x_n[i], 8.0 + 0.15, "8.0G+\n(打满降级)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
                 else:
-                    ax.text(x_n[i], 0.05, "OOM 溢出\n(>8G超限)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
-            ax.text(x_n[i] + w_t, e_tv[i] + 0.05, f"{e_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
+                    ax.text(x_n[i], 8.0 + 0.15, "8.0G+\n(OOM溢出)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
+            elif p_tv[i] > 8.0:
+                ax.text(x_n[i], p_tv[i] + 0.15, ">8.0G\n(OOM崩溃)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
+            else:
+                ax.text(x_n[i], p_tv[i] + 0.15, f"{p_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+            ax.text(x_n[i] + w_t, e_tv[i] + 0.15, f"{e_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
 
         ax.set_title(f"训练与建库峰值显存随样本量 N 变化对比 ({s}×{s})", fontsize=12, fontweight="bold", pad=12)
         ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
