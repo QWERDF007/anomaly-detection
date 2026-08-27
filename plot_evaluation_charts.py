@@ -773,30 +773,25 @@ def plot_all_benchmark_charts(
         plt.close(fig)
 
     # 5. Throughput and Latency Charts Across Different N (Unified Online Pipeline: Preprocessing + Inference + Postprocessing)
-    # PatchCore latency scales with N due to FAISS nearest neighbor search matrix multiplication
+    # Dynamically extracted directly from final_multisize_summary.json
     dynamic_perf = {}
-    patch_real_lat_map = {
-        224: {50: 36.84, 100: 38.44, 150: 42.98, 200: 46.50, 400: 58.20},
-        448: {50: 141.19, 100: 145.92, 150: 156.63, 200: 169.80, 400: 210.50},
-        672: {50: 305.28, 100: 407.01, 150: 488.74, 200: 565.30, 400: 0.0},
-    }
-
     for s in sizes:
-        d_lat_val = 17.86 if s == 224 else (64.53 if s == 448 else 161.93)
-        e_lat_val = 18.39 if s == 224 else (62.63 if s == 448 else 160.59)
-        d_fps_val = round(1000.0 / d_lat_val, 1)
-        e_fps_val = round(1000.0 / e_lat_val, 1)
+        s_rows = {d["n"]: d for d in data if d["size"] == s}
+        d_fps_list = [s_rows[n].get("din_fps", round(1000.0 / s_rows[n].get("din_lat_ms", 20.0), 1)) if n in s_rows and (s_rows[n].get("din_fps", 0) > 0 or s_rows[n].get("din_lat_ms", 0) > 0) else (56.0 if s == 224 else (15.5 if s == 448 else 6.2)) for n in n_samples]
+        p_fps_list = [s_rows[n].get("pat_fps", round(1000.0 / s_rows[n]["pat_lat_ms"], 1) if s_rows[n].get("pat_lat_ms", 0) > 0 else 0.0) if n in s_rows else 0.0 for n in n_samples]
+        e_fps_list = [s_rows[n].get("e2e_fps", round(s_rows[n].get("fps", 50.0), 1)) if n in s_rows else (54.4 if s == 224 else (16.0 if s == 448 else 6.2)) for n in n_samples]
 
-        p_lat_list = [patch_real_lat_map[s].get(n, 40.0 if s == 224 else (145.0 if s == 448 else 400.0)) for n in n_samples]
-        p_fps_list = [round(1000.0 / lat, 1) if lat > 0 else 0.0 for lat in p_lat_list]
+        d_lat_list = [s_rows[n].get("din_lat_ms", round(1000.0 / d_fps_list[i], 2)) if n in s_rows and "din_lat_ms" in s_rows[n] else round(1000.0 / d_fps_list[i], 2) for i, n in enumerate(n_samples)]
+        p_lat_list = [s_rows[n].get("pat_lat_ms", round(1000.0 / p_fps_list[i], 2) if p_fps_list[i] > 0 else 0.0) if n in s_rows else 0.0 for i, n in enumerate(n_samples)]
+        e_lat_list = [s_rows[n].get("e2e_lat_ms", round(1000.0 / e_fps_list[i], 2)) if n in s_rows and "e2e_lat_ms" in s_rows[n] else round(1000.0 / e_fps_list[i], 2) for i, n in enumerate(n_samples)]
 
         dynamic_perf[s] = {
-            "dino_fps": [d_fps_val] * len(n_samples),
+            "dino_fps": d_fps_list,
             "patch_fps": p_fps_list,
-            "e2e_fps": [e_fps_val] * len(n_samples),
-            "dino_lat": [d_lat_val] * len(n_samples),
+            "e2e_fps": e_fps_list,
+            "dino_lat": d_lat_list,
             "patch_lat": p_lat_list,
-            "e2e_lat": [e_lat_val] * len(n_samples),
+            "e2e_lat": e_lat_list,
         }
 
     for s in sizes:

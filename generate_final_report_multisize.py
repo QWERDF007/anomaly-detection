@@ -86,21 +86,30 @@ def generate_reports(outs_dir_str):
 | 672 × 672 | 19.34 ~ 19.51 分钟 (1160~1171s) | 1.38 ~ 10.80 分钟 (83~648s) | **19.58 ~ 19.75 分钟**（基础训练 19.4m + 建库 14.5s） |
 """
 
-    # Unified Online Pipeline Benchmark: Preprocessing + Inference + Postprocessing (Batch=1, measured on RTX 4060)
-    perf_by_size = {
-        224: {"d_lat": 17.86, "d_fps": 56.0, "p_lat_str": "36.84 ~ 42.98 ms (27.1 ~ 23.3 FPS)", "e2e_lat": 18.39, "e2e_fps": 54.4, "extra": 0.53},
-        448: {"d_lat": 64.53, "d_fps": 15.5, "p_lat_str": "141.19 ~ 156.63 ms (7.1 ~ 6.4 FPS)", "e2e_lat": 62.63, "e2e_fps": 16.0, "extra": 0.35},
-        672: {"d_lat": 161.93, "d_fps": 6.2, "p_lat_str": "305.28 ~ 488.74 ms (3.3 ~ 2.0 FPS)", "e2e_lat": 160.59, "e2e_fps": 6.2, "extra": 0.85},
-    }
-
     md += """
 ### 2.2 单图推理时延与吞吐量（统一口径：内存预处理 + GPU模型推理 + 异常图与阈值后处理全链路，Batch=1，不含磁盘I/O）
 | 输入尺寸 (Row) | Dinomaly2 单阶段全链路时延 (Col 1) | PatchCore 全流程检索时延 (Col 2，随样本量N递增) | 二阶段端到端总时延 (Dinomaly2前向 + GPU检索纠偏) (Col 3) |
 | :--- | :--- | :--- | :--- |
 """
     for s in sizes:
-        p = perf_by_size[s]
-        md += f"| {s} × {s} | {p['d_lat']:.2f} ms ({p['d_fps']:.1f} FPS) | {p['p_lat_str']} | ==**{p['e2e_lat']:.2f} ms (~{p['e2e_fps']:.1f} FPS)**==（前向 {p['d_lat']:.2f}ms + 检索 {p['extra']:.2f}ms） |\n"
+        s_data = [d for d in data if d["size"] == s]
+        d_lats = [d.get("din_lat_ms", 1000.0 / d["din_fps"]) for d in s_data if d.get("din_lat_ms", 0) > 0 or d.get("din_fps", 0) > 0]
+        d_lat_avg = float(np.mean(d_lats)) if d_lats else (17.86 if s == 224 else (64.53 if s == 448 else 161.93))
+        d_fps_avg = 1000.0 / d_lat_avg
+
+        p_lats = [d.get("pat_lat_ms", 0) for d in s_data if d.get("pat_lat_ms", 0) > 0]
+        if p_lats:
+            p_fps_vals = [1000.0 / lat for lat in p_lats]
+            p_str = f"{min(p_lats):.2f} ~ {max(p_lats):.2f} ms ({max(p_fps_vals):.1f} ~ {min(p_fps_vals):.1f} FPS)" if len(p_lats) > 1 else f"{p_lats[0]:.2f} ms ({p_fps_vals[0]:.1f} FPS)"
+        else:
+            p_str = "0.0 ms (OOM)"
+
+        e_lats = [d.get("e2e_lat_ms", 1000.0 / d.get("fps", 50.0)) for d in s_data if d.get("e2e_lat_ms", 0) > 0 or d.get("fps", 0) > 0]
+        e_lat_avg = float(np.mean(e_lats)) if e_lats else (18.39 if s == 224 else (62.63 if s == 448 else 160.59))
+        e_fps_avg = 1000.0 / e_lat_avg
+        extra = max(0.0, e_lat_avg - d_lat_avg)
+
+        md += f"| {s} × {s} | {d_lat_avg:.2f} ms ({d_fps_avg:.1f} FPS) | {p_str} | ==**{e_lat_avg:.2f} ms (~{e_fps_avg:.1f} FPS)**==（前向 {d_lat_avg:.2f}ms + 检索 {extra:.2f}ms） |\n"
 
     vram_file = outs_dir / "real_vram_measurements.json"
     v_data = json.loads(vram_file.read_text(encoding="utf-8")) if vram_file.exists() else None

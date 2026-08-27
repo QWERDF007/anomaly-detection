@@ -183,7 +183,49 @@ def main():
         effective_low = 0.25
         effective_high = 0.50
 
-        # Measure Dinomaly2 & E2E Inference
+        # Measure pure GPU full pipeline latency and VRAM for Dinomaly2 & E2E (Single Image Batch=1)
+        dummy_img = Image.new('RGB', (s, s), color=(128, 128, 128))
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        torch.cuda.reset_peak_memory_stats() if torch.cuda.is_available() else None
+
+        # Dinomaly2 pure GPU benchmark
+        t_d = din_transform(dummy_img).unsqueeze(0).to(device)
+        with torch.no_grad():
+            for _ in range(5):
+                en_o, de_o = din_model(t_d)
+                amaps, _ = cal_anomaly_maps(en_o, de_o, s)
+                _ = gaussian_kernel(amaps)
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            for _ in range(20):
+                en_o, de_o = din_model(t_d)
+                amaps, _ = cal_anomaly_maps(en_o, de_o, s)
+                _ = gaussian_kernel(amaps)
+                torch.cuda.synchronize() if torch.cuda.is_available() else None
+        din_lat_ms = (time.perf_counter() - t0) * 1000.0 / 20.0
+        din_fps = 1000.0 / din_lat_ms
+        din_vram_gb = torch.cuda.max_memory_allocated() / (1024**3) if torch.cuda.is_available() else 0.0
+
+        # E2E pure GPU benchmark
+        torch.cuda.reset_peak_memory_stats() if torch.cuda.is_available() else None
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            for _ in range(20):
+                en_o, de_o = din_model(t_d)
+                amaps, _ = cal_anomaly_maps(en_o, de_o, s)
+                amaps = gaussian_kernel(amaps)
+                if ab_t is not None:
+                    feat = en_o[-1][0].permute(1, 2, 0).float()
+                    unc_feats = feat.reshape(-1, 768)[:100]
+                    unc_feats = F.normalize(unc_feats, p=2, dim=-1)
+                    _ = torch.mm(unc_feats, ab_t.T).max(dim=-1).values
+                torch.cuda.synchronize() if torch.cuda.is_available() else None
+        e2e_lat_ms = (time.perf_counter() - t0) * 1000.0 / 20.0
+        e2e_fps = 1000.0 / e2e_lat_ms
+        e2e_vram_gb = torch.cuda.max_memory_allocated() / (1024**3) if torch.cuda.is_available() else 0.0
+
+        # Full Test Set evaluation for Dinomaly2 & E2E
         batch_sz = 8 if s <= 448 else 4
         t_start = time.perf_counter()
         with torch.no_grad():
@@ -225,11 +267,13 @@ def main():
                     e2e_scores_all.append(cor_s)
 
         e2e_sec = time.perf_counter() - t_start
-        fps = len(test_paths) / e2e_sec
 
         # 2. Evaluate PatchCore
         m_pat = None
         pat_scores = None
+        pat_lat_ms = 0.0
+        pat_fps = 0.0
+        pat_vram_gb = 0.0
         if pat_pkl_path is not None and pat_pkl_path.is_file():
             try:
                 pat_model = patchcore.patchcore.PatchCore(device)
@@ -245,6 +289,25 @@ def main():
                     transforms.ToTensor(),
                     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
                 ])
+
+                # PatchCore pure GPU benchmark
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                torch.cuda.reset_peak_memory_stats() if torch.cuda.is_available() else None
+                t_p = pat_transform(dummy_img).unsqueeze(0).to(device)
+                with torch.no_grad():
+                    for _ in range(5):
+                        _ = pat_model.predict(t_p)
+                torch.cuda.synchronize() if torch.cuda.is_available() else None
+                t0 = time.perf_counter()
+                with torch.no_grad():
+                    for _ in range(20):
+                        sc, _ = pat_model.predict(t_p)
+                        _ = float(sc[0])
+                        torch.cuda.synchronize() if torch.cuda.is_available() else None
+                pat_lat_ms = (time.perf_counter() - t0) * 1000.0 / 20.0
+                pat_fps = 1000.0 / pat_lat_ms
+                pat_vram_gb = torch.cuda.max_memory_allocated() / (1024**3) if torch.cuda.is_available() else 0.0
+
                 pat_scores_all = []
                 with torch.no_grad():
                     for p in test_paths:
@@ -297,13 +360,16 @@ def main():
             "n": n, "size": s,
             "din_auc": m_din["auc"], "din_ap": m_din["ap"], "din_f1": m_din["f1"], "din_th": m_din["th"],
             "din_tp": m_din["tp"], "din_fp": m_din["fp"], "din_tn": m_din["tn"], "din_fn": m_din["fn"],
+            "din_lat_ms": round(din_lat_ms, 2), "din_fps": round(din_fps, 1), "din_vram_gb": round(din_vram_gb, 2),
             "e2e_auc": m_e2e["auc"], "e2e_ap": m_e2e["ap"], "e2e_f1": m_e2e["f1"], "e2e_th": m_e2e["th"],
             "e2e_tp": m_e2e["tp"], "e2e_fp": m_e2e["fp"], "e2e_tn": m_e2e["tn"], "e2e_fn": m_e2e["fn"],
-            "e2e_sec": round(e2e_sec, 2), "fps": round(fps, 1),
+            "e2e_lat_ms": round(e2e_lat_ms, 2), "e2e_fps": round(e2e_fps, 1), "e2e_vram_gb": round(e2e_vram_gb, 2),
+            "e2e_sec": round(e2e_sec, 2), "fps": round(e2e_fps, 1),
             "pat_auc": m_pat["auc"] if m_pat else 0.0, "pat_ap": m_pat["ap"] if m_pat else 0.0,
             "pat_f1": m_pat["f1"] if m_pat else 0.0, "pat_th": m_pat["th"] if m_pat else 0.0,
             "pat_tp": m_pat["tp"] if m_pat else 0, "pat_fp": m_pat["fp"] if m_pat else 0,
             "pat_tn": m_pat["tn"] if m_pat else 0, "pat_fn": m_pat["fn"] if m_pat else 0,
+            "pat_lat_ms": round(pat_lat_ms, 2), "pat_fps": round(pat_fps, 1), "pat_vram_gb": round(pat_vram_gb, 2),
         }
         summary_results.append(res_item)
 
