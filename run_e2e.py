@@ -477,6 +477,9 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
                     
                 final_amap = cv2.resize(amap_resized, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
                 flat_c = final_amap.flatten()
+                cor_s = float(np.sort(flat_c)[-k_top:].mean())
+                corrected_scores_all.append(cor_s)
+
     final_scores_np = np.array(corrected_scores_all, dtype=np.float32)
     raw_scores_np = np.array(raw_scores_all, dtype=np.float32)
 
