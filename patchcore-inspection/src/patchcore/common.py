@@ -105,18 +105,6 @@ class FaissNN(object):
         return index
 
     def _create_index(self, dimension):
-        if self.on_gpu and hasattr(faiss, "GpuIndexFlatL2"):
-            try:
-                dev_id = self.device_id.index if hasattr(self.device_id, 'index') and self.device_id.index is not None else int(self.device_id if isinstance(self.device_id, int) else 0)
-                res = faiss.StandardGpuResources()
-                res.setTempMemory(32 * 1024 * 1024)
-                cfg = faiss.GpuIndexFlatConfig()
-                cfg.device = dev_id
-                return faiss.GpuIndexFlatL2(res, dimension, cfg)
-            except Exception as exc:
-                LOGGER.warning("GpuIndexFlatL2 creation failed (%s), falling back to faiss-cpu IndexFlatL2", exc)
-                self.on_gpu = False
-                return faiss.IndexFlatL2(dimension)
         return faiss.IndexFlatL2(dimension)
 
     def fit(self, features: np.ndarray) -> None:
