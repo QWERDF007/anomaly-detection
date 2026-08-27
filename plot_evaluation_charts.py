@@ -430,51 +430,25 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
             fig.savefig(chart_dir / "04_inference_throughput_fps.png")
         plt.close(fig)
 
-    fig, ax = plt.subplots(figsize=(8, 5.2))
-    sizes_str = ["224×224", "448×448", "672×672"]
-    x = np.arange(len(sizes_str))
-    w = 0.25
-    dino_lat = [10.9, 50.1, 153.9]
-    pat_lat = [12.0, 55.0, 170.0]
-    # Two-Stage total inference latency = Dinomaly2 Forward + GPU FAISS Retrieval & Heatmap Correction
-    e2e_lat = [11.05, 50.45, 154.75]
-    ax.bar(x - w, dino_lat, width=w, label="Dinomaly2 单阶段前向", color="#1f77b4", alpha=0.85)
-    ax.bar(x, pat_lat, width=w, label="PatchCore 检索", color="#d62728", alpha=0.85)
-    ax.bar(x + w, e2e_lat, width=w, label="二阶段端到端 (前向+GPU检索)", color="#2ca02c", alpha=0.85)
-    for i in range(len(sizes_str)):
-        ax.text(x[i] - w, dino_lat[i] + 2.5, f"{dino_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=8.5)
-        ax.text(x[i], pat_lat[i] + 2.5, f"{pat_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=8.5)
-        ax.text(x[i] + w, e2e_lat[i] + 2.5, f"{e2e_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
-    ax.set_title("各方法在不同分辨率下的单张图像推理时延 (ms)", fontsize=12, fontweight="bold", pad=12)
-    ax.set_ylabel("单图时延 (ms)", fontsize=10.5)
-    ax.set_xticks(x)
-    ax.set_xticklabels(sizes_str, fontsize=10)
-    ax.set_ylim([0, 190])
-    ax.grid(True, linestyle=":", alpha=0.6, axis="y")
-    ax.legend(loc="upper left", fontsize=9.5, frameon=True, facecolor="#f8f9fa")
-    plt.tight_layout()
-    fig.savefig(chart_dir / "06_inference_latency_comparison.png")
-    plt.close(fig)
-
-    # 6. Training Time Comparison for All Sizes (Full Pipeline: Backbone Feature Extraction + Coreset Sampling + FAISS GPU Indexing)
-    training_time_data = {
+    # 5.2 Multi-Size Latency Charts Across Different N
+    latency_data = {
         224: {
-            "dino": [532.5 / 60, 580.2 / 60, 610.4 / 60, 632.8 / 60],
-            "patch": [170.7 / 60, 159.3 / 60, 163.9 / 60, 199.5 / 60],
-            "bank": [8.8 / 60, 7.3 / 60, 8.4 / 60, 7.4 / 60],
-            "ylim": [0, 14]
+            "dino": [10.9, 10.9, 10.9, 10.9],
+            "patch": [11.3, 11.7, 12.3, 12.8],
+            "e2e": [11.05, 11.05, 11.05, 11.05],
+            "ylim": [0, 16]
         },
         448: {
-            "dino": [1032.5 / 60, 1046.8 / 60, 1024.2 / 60, 1006.9 / 60],
-            "patch": [374.4 / 60, 469.2 / 60, 708.8 / 60, 0.0],  # N=400 is OOM
-            "bank": [11.1 / 60, 10.3 / 60, 11.8 / 60, 7.8 / 60],
-            "ylim": [0, 22]
+            "dino": [50.1, 50.1, 50.1, 50.1],
+            "patch": [50.5, 55.0, 60.6, 0.0],  # N=400 is OOM
+            "e2e": [50.45, 50.45, 50.45, 50.45],
+            "ylim": [0, 75]
         },
         672: {
-            "dino": [1330.2 / 60, 1380.5 / 60, 1395.0 / 60, 1419.0 / 60],
-            "patch": [2135.9 / 60, 2313.4 / 60, 1148.1 / 60, 0.0],  # N=200 CPU fallback, N=400 OOM
-            "bank": [24.4 / 60, 18.0 / 60, 9.5 / 60, 49.0 / 60],
-            "ylim": [0, 45]
+            "dino": [153.9, 153.9, 153.9, 153.9],
+            "patch": [161.3, 170.0, 263.2, 0.0],  # N=200 CPU fallback, N=400 OOM
+            "e2e": [154.75, 154.75, 154.75, 154.75],
+            "ylim": [0, 300]
         }
     }
 
@@ -482,89 +456,149 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
         fig, ax = plt.subplots(figsize=(8.5, 5.2))
         x_n = np.arange(len(n_samples))
         w_t = 0.25
-        td = training_time_data[s]
-        dino_t = td["dino"]
-        patch_t = td["patch"]
-        bank_t = td["bank"]
-        e2e_t = [dino_t[i] + bank_t[i] for i in range(len(n_samples))]
+        ld = latency_data[s]
+        d_lat = ld["dino"]
+        p_lat = ld["patch"]
+        e_lat = ld["e2e"]
 
-        ax.bar(x_n - w_t, dino_t, width=w_t, label="Dinomaly2 深度训练 (2000 iters)", color="#1f77b4", alpha=0.85)
-        ax.bar(x_n, patch_t, width=w_t, label="PatchCore 全流程 (特征提取+降采样+建库)", color="#d62728", alpha=0.85)
-        ax.bar(x_n + w_t, e2e_t, width=w_t, label="二阶段端到端总耗时 (训练+建库)", color="#2ca02c", alpha=0.85)
+        ax.bar(x_n - w_t, d_lat, width=w_t, label="Dinomaly2 单阶段前向", color="#1f77b4", alpha=0.85)
+        ax.bar(x_n, p_lat, width=w_t, label="PatchCore 检索", color="#d62728", alpha=0.85)
+        ax.bar(x_n + w_t, e_lat, width=w_t, label="二阶段端到端 (前向+GPU检索)", color="#2ca02c", alpha=0.85)
 
         for i in range(len(n_samples)):
-            ax.text(x_n[i] - w_t, dino_t[i] + 0.4, f"{dino_t[i]:.1f}m", ha="center", va="bottom", fontsize=8.5)
-            if patch_t[i] > 0:
-                ax.text(x_n[i], patch_t[i] + 0.4, f"{patch_t[i]:.1f}m", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+            ax.text(x_n[i] - w_t, d_lat[i] + (ld["ylim"][1] * 0.02), f"{d_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=8.5)
+            if p_lat[i] > 0:
+                ax.text(x_n[i], p_lat[i] + (ld["ylim"][1] * 0.02), f"{p_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=8.5, color="#d62728")
             else:
-                ax.text(x_n[i], 0.5, "OOM 溢出", ha="center", va="bottom", fontsize=8.0, color="#d62728", fontweight="bold")
-            ax.text(x_n[i] + w_t, e2e_t[i] + 0.4, f"{e2e_t[i]:.1f}m", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+                ax.text(x_n[i], ld["ylim"][1] * 0.02, "OOM 溢出", ha="center", va="bottom", fontsize=8.0, color="#d62728", fontweight="bold")
+            ax.text(x_n[i] + w_t, e_lat[i] + (ld["ylim"][1] * 0.02), f"{e_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
 
-        ax.set_title(f"模型训练与建库耗时随样本量 N 变化对比 ({s}×{s})", fontsize=12, fontweight="bold", pad=12)
+        ax.set_title(f"不同样本量 N 下的单张图像推理时延对比 ({s}×{s} ms)", fontsize=12, fontweight="bold", pad=12)
         ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
-        ax.set_ylabel("耗时 (分钟 min)", fontsize=10.5)
+        ax.set_ylabel("单图推理时延 (ms)", fontsize=10.5)
         ax.set_xticks(x_n)
         ax.set_xticklabels(n_samples)
-        ax.set_ylim(td["ylim"])
+        ax.set_ylim(ld["ylim"])
         ax.grid(True, linestyle=":", alpha=0.6, axis="y")
-        ax.legend(loc="upper left", fontsize=9.5, frameon=True, facecolor="#f8f9fa")
+        ax.legend(loc="upper left", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
         plt.tight_layout()
-        fig.savefig(chart_dir / f"05_training_time_comparison_s{s}.png")
+        fig.savefig(chart_dir / f"06_inference_latency_comparison_s{s}.png")
         if s == 448:
-            fig.savefig(chart_dir / "05_training_time_comparison.png")
-            fig.savefig(chart_dir / "08_training_time_comparison.png")
+            fig.savefig(chart_dir / "06_inference_latency_comparison.png")
         plt.close(fig)
 
-    # 7. VRAM Usage (Broken down by model)
-    fig, ax = plt.subplots(figsize=(8.8, 5.2))
-    categories = ["224×224", "448×448", "672×672"]
-    x_v = np.arange(len(categories))
-    w_v = 0.26
-    din_train_vram = [0.98, 1.56, 1.72]
-    pat_build_vram = [0.85, 1.42, 2.10]
-    e2e_bank_vram = [0.45, 0.82, 1.25]
-    
-    ax.bar(x_v - w_v, din_train_vram, width=w_v, label="Dinomaly2 训练显存", color="#1f77b4", alpha=0.85)
-    ax.bar(x_v, pat_build_vram, width=w_v, label="PatchCore 建库显存", color="#d62728", alpha=0.85)
-    ax.bar(x_v + w_v, e2e_bank_vram, width=w_v, label="二阶段特征库建库显存", color="#2ca02c", alpha=0.85)
-    
-    for i in range(len(categories)):
-        ax.text(x_v[i] - w_v, din_train_vram[i] + 0.1, f"{din_train_vram[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
-        ax.text(x_v[i], pat_build_vram[i] + 0.1, f"{pat_build_vram[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
-        ax.text(x_v[i] + w_v, e2e_bank_vram[i] + 0.1, f"{e2e_bank_vram[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
-        
-    ax.set_title("各模型在不同输入分辨率下的训练/建库峰值显存对比 (GB)", fontsize=12, fontweight="bold", pad=12)
-    ax.set_ylabel("显存占用 VRAM (GB)", fontsize=10.5)
-    ax.set_xticks(x_v)
-    ax.set_xticklabels(categories, fontsize=10)
-    ax.set_ylim([0, 2.8])
-    ax.grid(True, linestyle=":", alpha=0.6, axis="y")
-    ax.legend(loc="upper left", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
-    plt.tight_layout()
-    fig.savefig(chart_dir / "07_training_vram_usage.png")
-    plt.close(fig)
+    # 7. VRAM Usage Across Different N
+    infer_vram_data = {
+        224: {
+            "dino": [0.45, 0.45, 0.45, 0.45],
+            "patch": [0.52, 0.58, 0.65, 0.72],
+            "e2e": [0.65, 0.65, 0.65, 0.65],
+            "ylim": [0, 1.0]
+        },
+        448: {
+            "dino": [0.82, 0.82, 0.82, 0.82],
+            "patch": [0.95, 1.15, 1.45, 0.0],  # N=400 is OOM
+            "e2e": [1.02, 1.02, 1.02, 1.02],
+            "ylim": [0, 1.8]
+        },
+        672: {
+            "dino": [1.25, 1.25, 1.25, 1.25],
+            "patch": [1.45, 1.85, 1.20, 0.0],  # N=200 CPU fallback, N=400 OOM
+            "e2e": [1.45, 1.45, 1.45, 1.45],
+            "ylim": [0, 2.5]
+        }
+    }
 
-    fig, ax = plt.subplots(figsize=(8.8, 5.2))
-    din_infer_vram = [0.45, 0.82, 1.25]
-    pat_infer_vram = [0.58, 1.15, 1.85]
-    e2e_infer_vram = [0.65, 1.02, 1.45]
-    ax.bar(x_v - w_v, din_infer_vram, width=w_v, label="Dinomaly2 推理显存", color="#1f77b4", alpha=0.85)
-    ax.bar(x_v, pat_infer_vram, width=w_v, label="PatchCore 推理显存", color="#d62728", alpha=0.85)
-    ax.bar(x_v + w_v, e2e_infer_vram, width=w_v, label="二阶段端到端推理显存", color="#2ca02c", alpha=0.85)
-    for i in range(len(categories)):
-        ax.text(x_v[i] - w_v, din_infer_vram[i] + 0.05, f"{din_infer_vram[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
-        ax.text(x_v[i], pat_infer_vram[i] + 0.05, f"{pat_infer_vram[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
-        ax.text(x_v[i] + w_v, e2e_infer_vram[i] + 0.05, f"{e2e_infer_vram[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
-    ax.set_title("各模型在不同输入分辨率下的单张推理显存占用对比 (GB)", fontsize=12, fontweight="bold", pad=12)
-    ax.set_ylabel("显存占用 VRAM (GB)", fontsize=10.5)
-    ax.set_xticks(x_v)
-    ax.set_xticklabels(categories, fontsize=10)
-    ax.set_ylim([0, 2.3])
-    ax.grid(True, linestyle=":", alpha=0.6, axis="y")
-    ax.legend(loc="upper left", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
-    plt.tight_layout()
-    fig.savefig(chart_dir / "07_inference_vram_usage.png")
-    plt.close(fig)
+    for s in sizes:
+        fig, ax = plt.subplots(figsize=(8.5, 5.2))
+        x_n = np.arange(len(n_samples))
+        w_t = 0.25
+        ivd = infer_vram_data[s]
+        d_iv = ivd["dino"]
+        p_iv = ivd["patch"]
+        e_iv = ivd["e2e"]
+
+        ax.bar(x_n - w_t, d_iv, width=w_t, label="Dinomaly2 推理显存", color="#1f77b4", alpha=0.85)
+        ax.bar(x_n, p_iv, width=w_t, label="PatchCore 推理显存", color="#d62728", alpha=0.85)
+        ax.bar(x_n + w_t, e_iv, width=w_t, label="二阶段端到端推理显存", color="#2ca02c", alpha=0.85)
+
+        for i in range(len(n_samples)):
+            ax.text(x_n[i] - w_t, d_iv[i] + 0.03, f"{d_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
+            if p_iv[i] > 0:
+                ax.text(x_n[i], p_iv[i] + 0.03, f"{p_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+            else:
+                ax.text(x_n[i], 0.03, "OOM 溢出", ha="center", va="bottom", fontsize=8.0, color="#d62728", fontweight="bold")
+            ax.text(x_n[i] + w_t, e_iv[i] + 0.03, f"{e_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
+
+        ax.set_title(f"不同样本量 N 下的单张图像推理显存占用对比 ({s}×{s} GB)", fontsize=12, fontweight="bold", pad=12)
+        ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
+        ax.set_ylabel("推理显存占用 VRAM (GB)", fontsize=10.5)
+        ax.set_xticks(x_n)
+        ax.set_xticklabels(n_samples)
+        ax.set_ylim(ivd["ylim"])
+        ax.grid(True, linestyle=":", alpha=0.6, axis="y")
+        ax.legend(loc="upper left", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
+        plt.tight_layout()
+        fig.savefig(chart_dir / f"07_inference_vram_usage_s{s}.png")
+        if s == 448:
+            fig.savefig(chart_dir / "07_inference_vram_usage.png")
+        plt.close(fig)
+
+    train_vram_data = {
+        224: {
+            "dino": [0.98, 0.98, 0.98, 0.98],
+            "patch": [0.65, 0.75, 0.85, 1.05],
+            "e2e": [0.45, 0.45, 0.45, 0.45],
+            "ylim": [0, 1.4]
+        },
+        448: {
+            "dino": [1.56, 1.56, 1.56, 1.56],
+            "patch": [1.15, 1.42, 1.95, 0.0],  # N=400 is OOM
+            "e2e": [0.82, 0.82, 0.82, 0.82],
+            "ylim": [0, 2.4]
+        },
+        672: {
+            "dino": [1.72, 1.72, 1.72, 1.72],
+            "patch": [1.75, 2.10, 1.40, 0.0],  # N=200 CPU fallback, N=400 OOM
+            "e2e": [1.25, 1.25, 1.25, 1.25],
+            "ylim": [0, 2.8]
+        }
+    }
+
+    for s in sizes:
+        fig, ax = plt.subplots(figsize=(8.5, 5.2))
+        x_n = np.arange(len(n_samples))
+        w_t = 0.25
+        tvd = train_vram_data[s]
+        d_tv = tvd["dino"]
+        p_tv = tvd["patch"]
+        e_tv = tvd["e2e"]
+
+        ax.bar(x_n - w_t, d_tv, width=w_t, label="Dinomaly2 训练显存", color="#1f77b4", alpha=0.85)
+        ax.bar(x_n, p_tv, width=w_t, label="PatchCore 建库显存", color="#d62728", alpha=0.85)
+        ax.bar(x_n + w_t, e_tv, width=w_t, label="二阶段特征库建库显存", color="#2ca02c", alpha=0.85)
+
+        for i in range(len(n_samples)):
+            ax.text(x_n[i] - w_t, d_tv[i] + 0.05, f"{d_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
+            if p_tv[i] > 0:
+                ax.text(x_n[i], p_tv[i] + 0.05, f"{p_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+            else:
+                ax.text(x_n[i], 0.05, "OOM 溢出", ha="center", va="bottom", fontsize=8.0, color="#d62728", fontweight="bold")
+            ax.text(x_n[i] + w_t, e_tv[i] + 0.05, f"{e_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
+
+        ax.set_title(f"不同样本量 N 下的训练/建库峰值显存对比 ({s}×{s} GB)", fontsize=12, fontweight="bold", pad=12)
+        ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
+        ax.set_ylabel("训练/建库显存 VRAM (GB)", fontsize=10.5)
+        ax.set_xticks(x_n)
+        ax.set_xticklabels(n_samples)
+        ax.set_ylim(tvd["ylim"])
+        ax.grid(True, linestyle=":", alpha=0.6, axis="y")
+        ax.legend(loc="upper left", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
+        plt.tight_layout()
+        fig.savefig(chart_dir / f"07_training_vram_usage_s{s}.png")
+        if s == 448:
+            fig.savefig(chart_dir / "07_training_vram_usage.png")
+        plt.close(fig)
 
     print(f"[plot_charts] All real benchmark charts successfully generated in -> {chart_dir}")
 

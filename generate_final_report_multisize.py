@@ -265,9 +265,15 @@ def generate_reports(outs_dir: Path):
 ![推理吞吐量 (224x224)](charts/04_inference_throughput_fps_s224.png)
 ![推理吞吐量 (448x448)](charts/04_inference_throughput_fps_s448.png)
 ![推理吞吐量 (672x672)](charts/04_inference_throughput_fps_s672.png)
-![推理时延对比 (ms)](charts/06_inference_latency_comparison.png)
-![训练显存占用](charts/07_training_vram_usage.png)
-![推理显存占用](charts/07_inference_vram_usage.png)
+![推理时延对比 (224x224)](charts/06_inference_latency_comparison_s224.png)
+![推理时延对比 (448x448)](charts/06_inference_latency_comparison_s448.png)
+![推理时延对比 (672x672)](charts/06_inference_latency_comparison_s672.png)
+![训练显存占用 (224x224)](charts/07_training_vram_usage_s224.png)
+![训练显存占用 (448x448)](charts/07_training_vram_usage_s448.png)
+![训练显存占用 (672x672)](charts/07_training_vram_usage_s672.png)
+![推理显存占用 (224x224)](charts/07_inference_vram_usage_s224.png)
+![推理显存占用 (448x448)](charts/07_inference_vram_usage_s448.png)
+![推理显存占用 (672x672)](charts/07_inference_vram_usage_s672.png)
 """
 
     for target_name in ["FINAL_BENCHMARK_REPORT.md", "BENCHMARK_REPORT.md", "BENCHMARK_DETAILED_REPORT_224_448_672.md"]:
