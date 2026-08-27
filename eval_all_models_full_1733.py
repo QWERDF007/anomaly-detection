@@ -43,8 +43,8 @@ def main():
     device = torch.device(f"cuda:{args.cuda}" if torch.cuda.is_available() and args.cuda >= 0 else "cpu")
 
     test_lines = [l.strip() for l in test_txt_path.read_text(encoding="utf-8").splitlines() if l.strip()]
-    test_paths = [Path(l.split()[0]) for l in test_lines]
-    y_true = np.array([int(l.split()[1]) for l in test_lines], dtype=int)
+    test_paths = [Path(l.split("\t")[0].strip()) for l in test_lines]
+    y_true = np.array([0 if ("\\OK\\" in str(p) or "/OK/" in str(p) or "good" in str(p).lower()) else 1 for p in test_paths], dtype=int)
     print(f"Loaded Unified Full Test Set: {len(test_paths)} images (OK={int((y_true==0).sum())}, NG={int((y_true==1).sum())}) on {device}")
 
     tasks = []
