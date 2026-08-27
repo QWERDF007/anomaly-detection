@@ -24,7 +24,14 @@ def generate_reports(outs_dir_str):
     defect_test = int(sample_r.get("e2e_tp", 0) + sample_r.get("e2e_fn", 0))
     total_test = good_test + defect_test
 
-    dataset_name = "透气膜异常检测" if ("0827" in str(outs_dir) or "透气膜" in str(outs_dir)) else "铜色异常检测（6相机）"
+    if "透气膜" in str(outs_dir):
+        dataset_name = "透气膜"
+    elif "4相机" in str(outs_dir):
+        dataset_name = "铜色异常检测（4相机）"
+    elif "6相机" in str(outs_dir):
+        dataset_name = "铜色异常检测（6相机）"
+    else:
+        dataset_name = outs_dir.name
 
     # Build clean markdown report with visual charts placed at the very top
     md = f"""# {dataset_name} 全量基准测试与多维度评测报告

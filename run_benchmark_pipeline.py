@@ -213,11 +213,11 @@ def main():
                     "--test_path", str(test_full_p),
                     "--image_size", str(s),
                     "--crop_size", str(s),
+                    "--batch_size", "2" if s >= 672 else "4",
                     "--max_iters", str(args.max_iters),
                     "--save_dir", str(task_out),
                     "--eval_interval", "-1",
                     "--cuda", "0",
-                    "--batch_size", "2" if s >= 672 else "4",
                 ]
                 dino_tasks.append(("dinomaly2", cmd, f"Dinomaly2 N={n} Size={s}"))
     run_task_batch_on_gpus(dino_tasks, gpu_list, "Step 1: Training Dinomaly2 Models")
@@ -230,7 +230,7 @@ def main():
             task_out = outs_dir / task_name
             train_txt = splits_dir / f"train_n{n}.txt"
 
-            if not list(task_out.glob("*/*patchcore_params.pkl")) and not (task_out / "patchcore_params.pkl").exists():
+            if not list(task_out.glob("*/*patchcore_params.pkl")) and not (task_out / "patchcore_params.pkl").exists() and not (task_out / "models" / "patchcore_params.pkl").exists():
                 cmd = [
                     str(PYTHON), str(ROOT / "patchcore-inspection" / "train.py"),
                     "--data_path", str(train_txt),
@@ -257,11 +257,13 @@ def main():
                 task_out = outs_dir / f"dinomaly2_n{n}_s{s}_seed{args.seed}"
                 model_file = task_out / "model.pth"
                 bank_file = task_out / "feature_bank.npz"
+                d_cands = sorted(list(task_out.glob("*/model.pth")) + list(task_out.glob("model.pth")), key=lambda p: p.stat().st_mtime, reverse=True)
+                m_p = d_cands[0] if d_cands else model_file
 
-                if not bank_file.exists():
+                if not bank_file.exists() and d_cands:
                     cmd = [
                         str(PYTHON), str(ROOT / "two_stage" / "build_bank.py"),
-                        "--model", str(model_file),
+                        "--model", str(m_p),
                         "--data_dir", str(bank_data),
                         "--save_bank", str(bank_file),
                         "--image_size", str(s),

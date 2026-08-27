@@ -155,8 +155,13 @@ def main():
         if isinstance(ckpt, dict) and "state_dict" in ckpt: ckpt = ckpt["state_dict"]
         elif isinstance(ckpt, dict) and "model" in ckpt: ckpt = ckpt["model"]
 
-        backbone = "dinov2reg_vit_base_14"
-        embed_dim, num_heads = 768, 12
+        embed_dim = 384
+        for k, v in ckpt.items():
+            if "bottleneck.0.0.weight" in k:
+                embed_dim = v.shape[1]
+                break
+        num_heads = 6 if embed_dim == 384 else (12 if embed_dim == 768 else 16)
+        backbone = "dinov2reg_vit_small_14" if embed_dim == 384 else "dinov2reg_vit_base_14"
         target_layers = [2, 3, 4, 5, 6, 7, 8, 9]
         fuse_layer_encoder = [[0, 1, 2, 3], [4, 5, 6, 7]]
         fuse_layer_decoder = [[0, 1, 2, 3], [4, 5, 6, 7]]
@@ -179,21 +184,25 @@ def main():
             transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
         ])
 
-        gaussian_kernel = get_gaussian_kernel(kernel_size=5, sigma=1, channels=1).to(device)
+        gaussian_kernel = get_gaussian_kernel(kernel_size=5, sigma=4, channels=1).to(device)
 
         # Load Feature Banks
         ab_t = None
         nor_t = None
         if save_bank_path.is_file():
             bank = np.load(str(save_bank_path))
-            k_ab = "abnormal_bank" if "abnormal_bank" in bank else bank.files[0]
-            ab_t = torch.from_numpy(bank[k_ab]).float().to(device)
-            if "normal_bank" in bank:
-                nor_t = torch.from_numpy(bank["normal_bank"]).float().to(device)
-            elif len(bank.files) > 1:
-                nor_t = torch.from_numpy(bank[bank.files[1]]).float().to(device)
+            if "ab_features" in bank and "nor_features" in bank:
+                ab_t = torch.from_numpy(bank["ab_features"]).float().to(device)
+                nor_t = torch.from_numpy(bank["nor_features"]).float().to(device)
             else:
-                nor_t = ab_t
+                k_ab = "abnormal_bank" if "abnormal_bank" in bank else bank.files[0]
+                ab_t = torch.from_numpy(bank[k_ab]).float().to(device)
+                if "normal_bank" in bank:
+                    nor_t = torch.from_numpy(bank["normal_bank"]).float().to(device)
+                elif len(bank.files) > 1:
+                    nor_t = torch.from_numpy(bank[bank.files[1]]).float().to(device)
+                else:
+                    nor_t = ab_t
 
         din_scores_all = []
         e2e_scores_all = []
@@ -236,7 +245,7 @@ def main():
                 amaps = gaussian_kernel(amaps)
                 if ab_t is not None:
                     feat = en_o[-1][0].permute(1, 2, 0).float()
-                    unc_feats = feat.reshape(-1, 768)[:100]
+                    unc_feats = feat.reshape(-1, embed_dim)[:100]
                     unc_feats = F.normalize(unc_feats, p=2, dim=-1)
                     _ = torch.mm(unc_feats, ab_t.T).max(dim=-1).values
                 torch.cuda.synchronize() if torch.cuda.is_available() else None
