@@ -563,7 +563,7 @@ def get_current_gpu_capacity(override_name: Optional[str] = None, override_vram_
             return clean_name or "GPU", total_gb
     except Exception:
         pass
-    return "RTX 4060", 8.0
+    return "RTX 4090", 24.0
 
 
 def plot_all_benchmark_charts(
