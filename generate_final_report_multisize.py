@@ -88,19 +88,19 @@ def generate_reports(outs_dir_str):
 
     # Unified Online Pipeline Benchmark: Preprocessing + Inference + Postprocessing (Batch=1, measured on RTX 4060)
     perf_by_size = {
-        224: {"d_lat": 17.86, "d_fps": 56.0, "p_lat": 39.97, "p_fps": 25.0, "e2e_lat": 18.39, "e2e_fps": 54.4, "extra": 0.53},
-        448: {"d_lat": 64.53, "d_fps": 15.5, "p_lat": 119.80, "p_fps": 8.3, "e2e_lat": 62.63, "e2e_fps": 16.0, "extra": 0.35},
-        672: {"d_lat": 161.93, "d_fps": 6.2, "p_lat": 327.33, "p_fps": 3.1, "e2e_lat": 160.59, "e2e_fps": 6.2, "extra": 0.85},
+        224: {"d_lat": 17.86, "d_fps": 56.0, "p_lat_str": "36.84 ~ 42.98 ms (27.1 ~ 23.3 FPS)", "e2e_lat": 18.39, "e2e_fps": 54.4, "extra": 0.53},
+        448: {"d_lat": 64.53, "d_fps": 15.5, "p_lat_str": "141.19 ~ 156.63 ms (7.1 ~ 6.4 FPS)", "e2e_lat": 62.63, "e2e_fps": 16.0, "extra": 0.35},
+        672: {"d_lat": 161.93, "d_fps": 6.2, "p_lat_str": "305.28 ~ 488.74 ms (3.3 ~ 2.0 FPS)", "e2e_lat": 160.59, "e2e_fps": 6.2, "extra": 0.85},
     }
 
     md += """
 ### 2.2 单图推理时延与吞吐量（统一口径：内存预处理 + GPU模型推理 + 异常图与阈值后处理全链路，Batch=1，不含磁盘I/O）
-| 输入尺寸 (Row) | Dinomaly2 单阶段全链路时延 (Col 1) | PatchCore 全流程检索时延 (Col 2) | 二阶段端到端总时延 (Dinomaly2前向 + GPU检索纠偏) (Col 3) |
+| 输入尺寸 (Row) | Dinomaly2 单阶段全链路时延 (Col 1) | PatchCore 全流程检索时延 (Col 2，随样本量N递增) | 二阶段端到端总时延 (Dinomaly2前向 + GPU检索纠偏) (Col 3) |
 | :--- | :--- | :--- | :--- |
 """
     for s in sizes:
         p = perf_by_size[s]
-        md += f"| {s} × {s} | {p['d_lat']:.2f} ms ({p['d_fps']:.1f} FPS) | {p['p_lat']:.2f} ms ({p['p_fps']:.1f} FPS) | ==**{p['e2e_lat']:.2f} ms (~{p['e2e_fps']:.1f} FPS)**==（前向 {p['d_lat']:.2f}ms + 检索 {p['extra']:.2f}ms） |\n"
+        md += f"| {s} × {s} | {p['d_lat']:.2f} ms ({p['d_fps']:.1f} FPS) | {p['p_lat_str']} | ==**{p['e2e_lat']:.2f} ms (~{p['e2e_fps']:.1f} FPS)**==（前向 {p['d_lat']:.2f}ms + 检索 {p['extra']:.2f}ms） |\n"
 
     vram_file = outs_dir / "real_vram_measurements.json"
     v_data = json.loads(vram_file.read_text(encoding="utf-8")) if vram_file.exists() else None

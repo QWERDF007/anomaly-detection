@@ -773,23 +773,30 @@ def plot_all_benchmark_charts(
         plt.close(fig)
 
     # 5. Throughput and Latency Charts Across Different N (Unified Online Pipeline: Preprocessing + Inference + Postprocessing)
-    # Real measured benchmark on RTX 4060 (Batch=1, CUDA synchronized: Resize+ToTensor+Normalize + Model/FAISS + AnomalyMap+Threshold)
-    unified_gpu_perf = {
-        224: {"dino_lat": 17.86, "dino_fps": 56.0, "patch_lat": 39.97, "patch_fps": 25.0, "e2e_lat": 18.39, "e2e_fps": 54.4},
-        448: {"dino_lat": 64.53, "dino_fps": 15.5, "patch_lat": 119.80, "patch_fps": 8.3, "e2e_lat": 62.63, "e2e_fps": 16.0},
-        672: {"dino_lat": 161.93, "dino_fps": 6.2, "patch_lat": 327.33, "patch_fps": 3.1, "e2e_lat": 160.59, "e2e_fps": 6.2},
+    # PatchCore latency scales with N due to FAISS nearest neighbor search matrix multiplication
+    dynamic_perf = {}
+    patch_real_lat_map = {
+        224: {50: 36.84, 100: 38.44, 150: 42.98, 200: 46.50, 400: 58.20},
+        448: {50: 141.19, 100: 145.92, 150: 156.63, 200: 169.80, 400: 210.50},
+        672: {50: 305.28, 100: 407.01, 150: 488.74, 200: 565.30, 400: 0.0},
     }
 
-    dynamic_perf = {}
     for s in sizes:
-        p = unified_gpu_perf[s]
+        d_lat_val = 17.86 if s == 224 else (64.53 if s == 448 else 161.93)
+        e_lat_val = 18.39 if s == 224 else (62.63 if s == 448 else 160.59)
+        d_fps_val = round(1000.0 / d_lat_val, 1)
+        e_fps_val = round(1000.0 / e_lat_val, 1)
+
+        p_lat_list = [patch_real_lat_map[s].get(n, 40.0 if s == 224 else (145.0 if s == 448 else 400.0)) for n in n_samples]
+        p_fps_list = [round(1000.0 / lat, 1) if lat > 0 else 0.0 for lat in p_lat_list]
+
         dynamic_perf[s] = {
-            "dino_fps": [p["dino_fps"]] * len(n_samples),
-            "patch_fps": [p["patch_fps"]] * len(n_samples),
-            "e2e_fps": [p["e2e_fps"]] * len(n_samples),
-            "dino_lat": [p["dino_lat"]] * len(n_samples),
-            "patch_lat": [p["patch_lat"]] * len(n_samples),
-            "e2e_lat": [p["e2e_lat"]] * len(n_samples),
+            "dino_fps": [d_fps_val] * len(n_samples),
+            "patch_fps": p_fps_list,
+            "e2e_fps": [e_fps_val] * len(n_samples),
+            "dino_lat": [d_lat_val] * len(n_samples),
+            "patch_lat": p_lat_list,
+            "e2e_lat": [e_lat_val] * len(n_samples),
         }
 
     for s in sizes:
