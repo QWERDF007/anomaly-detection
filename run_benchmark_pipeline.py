@@ -245,6 +245,7 @@ def main():
                     "--save_dir", str(task_out),
                     "--gpu", "0",
                     "--seed", str(args.seed),
+                    "--skip_eval",
                 ]
                 patch_tasks.append(("patchcore", cmd, f"PatchCore N={n} Size={s}"))
     run_task_batch_on_gpus(patch_tasks, gpu_list, "Step 2: Training PatchCore Baselines & GPU Indexing")
