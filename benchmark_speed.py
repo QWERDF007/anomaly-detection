@@ -128,7 +128,7 @@ def main():
     tasks = []
     for test_path in selected:
         lines = [l.strip() for l in test_path.read_text(encoding="utf-8").splitlines() if l.strip()]
-        paths = [Path(l).expanduser() for l in lines if Path(l).expanduser().is_file()]
+        paths = [Path(l.split()[0]).expanduser() for l in lines if l.strip() and Path(l.split()[0]).expanduser().is_file()]
         # 为 32G 内存安全：限制单次评估 1383 张，或全量
         for sz in args.image_sizes:
             bs = args.batch_size
@@ -155,7 +155,7 @@ def main():
                 break
             for test_path in selected[:1]:
                 lines = [l.strip() for l in test_path.read_text(encoding="utf-8").splitlines() if l.strip()]
-                paths = [Path(l).expanduser() for l in lines if Path(l).expanduser().is_file()]
+                paths = [Path(l.split()[0]).expanduser() for l in lines if l.strip() and Path(l.split()[0]).expanduser().is_file()]
                 bs_variants = [2,4] if sz==448 else [2]
                 for bs in bs_variants:
                     if len(tasks)>=15:
