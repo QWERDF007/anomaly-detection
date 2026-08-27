@@ -422,39 +422,64 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
     fig.savefig(chart_dir / "06_inference_latency_comparison.png")
     plt.close(fig)
 
-    # 6. Training Time Comparison (Full Pipeline: Backbone Feature Extraction + Coreset Sampling + FAISS GPU Indexing)
-    fig, ax = plt.subplots(figsize=(8.5, 5.2))
-    x_n = np.arange(len(n_samples))
-    w_t = 0.25
-    dino_train_448 = [1032.5 / 60, 1046.8 / 60, 1024.2 / 60, 1006.9 / 60]
-    patch_train_448 = [374.4 / 60, 469.2 / 60, 708.8 / 60, 0.0]  # N=400 is OOM
-    # Two-stage Total Setup Time = Dinomaly2 Training + 10s Bank Extraction
-    e2e_total_train_448 = [dino_train_448[i] + (10.3 / 60) for i in range(len(n_samples))]
+    # 6. Training Time Comparison for All Sizes (Full Pipeline: Backbone Feature Extraction + Coreset Sampling + FAISS GPU Indexing)
+    training_time_data = {
+        224: {
+            "dino": [532.5 / 60, 580.2 / 60, 610.4 / 60, 632.8 / 60],
+            "patch": [170.7 / 60, 159.3 / 60, 163.9 / 60, 199.5 / 60],
+            "bank": [8.8 / 60, 7.3 / 60, 8.4 / 60, 7.4 / 60],
+            "ylim": [0, 14]
+        },
+        448: {
+            "dino": [1032.5 / 60, 1046.8 / 60, 1024.2 / 60, 1006.9 / 60],
+            "patch": [374.4 / 60, 469.2 / 60, 708.8 / 60, 0.0],  # N=400 is OOM
+            "bank": [11.1 / 60, 10.3 / 60, 11.8 / 60, 7.8 / 60],
+            "ylim": [0, 22]
+        },
+        672: {
+            "dino": [1330.2 / 60, 1380.5 / 60, 1395.0 / 60, 1419.0 / 60],
+            "patch": [2135.9 / 60, 2313.4 / 60, 1148.1 / 60, 0.0],  # N=200 CPU fallback, N=400 OOM
+            "bank": [24.4 / 60, 18.0 / 60, 9.5 / 60, 49.0 / 60],
+            "ylim": [0, 45]
+        }
+    }
 
-    ax.bar(x_n - w_t, dino_train_448, width=w_t, label="Dinomaly2 深度训练 (2000 iters)", color="#1f77b4", alpha=0.85)
-    ax.bar(x_n, patch_train_448, width=w_t, label="PatchCore 全流程 (特征提取+降采样+建库)", color="#d62728", alpha=0.85)
-    ax.bar(x_n + w_t, e2e_total_train_448, width=w_t, label="二阶段端到端总耗时 (训练+建库)", color="#2ca02c", alpha=0.85)
+    for s in sizes:
+        fig, ax = plt.subplots(figsize=(8.5, 5.2))
+        x_n = np.arange(len(n_samples))
+        w_t = 0.25
+        td = training_time_data[s]
+        dino_t = td["dino"]
+        patch_t = td["patch"]
+        bank_t = td["bank"]
+        e2e_t = [dino_t[i] + bank_t[i] for i in range(len(n_samples))]
 
-    for i in range(len(n_samples)):
-        ax.text(x_n[i] - w_t, dino_train_448[i] + 0.3, f"{dino_train_448[i]:.1f}m", ha="center", va="bottom", fontsize=8.5)
-        if patch_train_448[i] > 0:
-            ax.text(x_n[i], patch_train_448[i] + 0.3, f"{patch_train_448[i]:.1f}m", ha="center", va="bottom", fontsize=8.5, color="#d62728")
-        else:
-            ax.text(x_n[i], 0.3, "OOM 溢出", ha="center", va="bottom", fontsize=8.0, color="#d62728", fontweight="bold")
-        ax.text(x_n[i] + w_t, e2e_total_train_448[i] + 0.3, f"{e2e_total_train_448[i]:.1f}m", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+        ax.bar(x_n - w_t, dino_t, width=w_t, label="Dinomaly2 深度训练 (2000 iters)", color="#1f77b4", alpha=0.85)
+        ax.bar(x_n, patch_t, width=w_t, label="PatchCore 全流程 (特征提取+降采样+建库)", color="#d62728", alpha=0.85)
+        ax.bar(x_n + w_t, e2e_t, width=w_t, label="二阶段端到端总耗时 (训练+建库)", color="#2ca02c", alpha=0.85)
 
-    ax.set_title("模型训练与建库耗时随样本量 N 变化对比 (448×448)", fontsize=12, fontweight="bold", pad=12)
-    ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
-    ax.set_ylabel("耗时 (分钟 min)", fontsize=10.5)
-    ax.set_xticks(x_n)
-    ax.set_xticklabels(n_samples)
-    ax.set_ylim([0, 20])
-    ax.grid(True, linestyle=":", alpha=0.6, axis="y")
-    ax.legend(loc="upper left", fontsize=9.5, frameon=True, facecolor="#f8f9fa")
-    plt.tight_layout()
-    fig.savefig(chart_dir / "05_training_time_comparison.png")
-    fig.savefig(chart_dir / "08_training_time_comparison.png")
-    plt.close(fig)
+        for i in range(len(n_samples)):
+            ax.text(x_n[i] - w_t, dino_t[i] + 0.4, f"{dino_t[i]:.1f}m", ha="center", va="bottom", fontsize=8.5)
+            if patch_t[i] > 0:
+                ax.text(x_n[i], patch_t[i] + 0.4, f"{patch_t[i]:.1f}m", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+            else:
+                ax.text(x_n[i], 0.5, "OOM 溢出", ha="center", va="bottom", fontsize=8.0, color="#d62728", fontweight="bold")
+            ax.text(x_n[i] + w_t, e2e_t[i] + 0.4, f"{e2e_t[i]:.1f}m", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+
+        ax.set_title(f"模型训练与建库耗时随样本量 N 变化对比 ({s}×{s})", fontsize=12, fontweight="bold", pad=12)
+        ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
+        ax.set_ylabel("耗时 (分钟 min)", fontsize=10.5)
+        ax.set_xticks(x_n)
+        ax.set_xticklabels(n_samples)
+        ax.set_ylim(td["ylim"])
+        ax.grid(True, linestyle=":", alpha=0.6, axis="y")
+        ax.legend(loc="upper left", fontsize=9.5, frameon=True, facecolor="#f8f9fa")
+        plt.tight_layout()
+        fig.savefig(chart_dir / f"05_training_time_comparison_s{s}.png")
+        if s == 448:
+            fig.savefig(chart_dir / "05_training_time_comparison.png")
+            fig.savefig(chart_dir / "08_training_time_comparison.png")
+        plt.close(fig)
 
     # 7. VRAM Usage (Broken down by model)
     fig, ax = plt.subplots(figsize=(8.8, 5.2))

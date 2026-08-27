@@ -259,7 +259,9 @@ def generate_reports(outs_dir: Path):
 ![误报数量 (672x672)](charts/04_false_alarms_fp_s672.png)
 
 ### 6.3 训练耗时、推理吞吐与显存占用
-![训练耗时对比](charts/05_training_time_comparison.png)
+![训练耗时对比 (224x224)](charts/05_training_time_comparison_s224.png)
+![训练耗时对比 (448x448)](charts/05_training_time_comparison_s448.png)
+![训练耗时对比 (672x672)](charts/05_training_time_comparison_s672.png)
 ![推理吞吐量 (FPS)](charts/04_inference_throughput_fps.png)
 ![推理时延对比 (ms)](charts/06_inference_latency_comparison.png)
 ![训练显存占用](charts/07_training_vram_usage.png)
