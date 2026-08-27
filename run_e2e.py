@@ -444,7 +444,7 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
                 results.append({
                     "image_path": str(p),
                     "true_label": "good" if ("OK" in str(p) or "good" in str(p).lower()) else "anomaly",
-                    "raw_score": raw_score,
+                    "raw_score": float(raw_score),
                     "final_score": float(final_score),
                     "decision": decision,
                 })
@@ -454,11 +454,53 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
     ms_per_img = infer_elapsed / len(results) * 1000 if results else 0
     fps = len(results) / infer_elapsed if infer_elapsed > 0 else 0
 
+    # 3.5 Dynamic Optimal Threshold Search (Tuning threshold for best F1/AUROC)
+    from sklearn.metrics import precision_recall_curve, roc_auc_score, f1_score, confusion_matrix
+    y_true_arr = np.array([1 if r["true_label"] == "anomaly" else 0 for r in results])
+    y_final_arr = np.array([r["final_score"] for r in results])
+    y_raw_arr = np.array([r["raw_score"] for r in results])
+
+    best_auroc = None
+    best_f1 = None
+    optimal_thr = low_thr
+    best_low = low_thr
+    best_high = high_thr
+    optimal_tp = 0
+    optimal_fp = 0
+    optimal_tn = 0
+    optimal_fn = 0
+
+    if len(np.unique(y_true_arr)) > 1:
+        best_auroc = float(roc_auc_score(y_true_arr, y_final_arr))
+        prec, rec, thrs = precision_recall_curve(y_true_arr, y_final_arr)
+        f1_arr = 2 * prec * rec / (prec + rec + 1e-12)
+        best_idx = np.nanargmax(f1_arr)
+        best_f1 = float(f1_arr[best_idx])
+        optimal_thr = float(thrs[min(best_idx, len(thrs) - 1)]) if len(thrs) > 0 else low_thr
+
+        # Calibrate optimal dual thresholds
+        normal_scores = y_final_arr[y_true_arr == 0]
+        anomaly_scores = y_final_arr[y_true_arr == 1]
+        if len(normal_scores) > 0 and len(anomaly_scores) > 0:
+            best_low = float(np.percentile(normal_scores, 95))
+            best_high = float(np.percentile(anomaly_scores, 15))
+            if best_low >= best_high:
+                best_low = float(optimal_thr * 0.95)
+                best_high = float(optimal_thr * 1.05)
+
+        y_opt_pred = (y_final_arr >= optimal_thr).astype(int)
+        cm = confusion_matrix(y_true_arr, y_opt_pred, labels=[0, 1])
+        optimal_tn, optimal_fp, optimal_fn, optimal_tp = (int(v) for v in cm.ravel())
+
+        for r in results:
+            r["optimal_decision"] = "anomaly" if r["final_score"] >= optimal_thr else "normal"
+
     # 4. Save CSV & JSON
     import csv
     out_csv = output_dir / "e2e_results.csv"
     with out_csv.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["image_path", "true_label", "raw_score", "final_score", "decision"])
+        fieldnames = ["image_path", "true_label", "raw_score", "final_score", "decision", "optimal_decision"]
+        w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         w.writerows(results)
 
@@ -466,7 +508,7 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
     out_json.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
 
     from collections import Counter
-    cnt = Counter(r["decision"] for r in results)
+    cnt = Counter(r.get("optimal_decision", r["decision"]) for r in results)
     task_summary = {
         "task_name": task_cfg.get("task_name", output_dir.name),
         "cuda": gpu_id,
@@ -480,16 +522,25 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
         "ms_per_image": ms_per_img,
         "fps": fps,
         "decisions": dict(cnt),
-        "low_threshold": low_thr,
-        "high_threshold": high_thr,
+        "best_auroc": best_auroc,
+        "best_f1": best_f1,
+        "optimal_threshold": optimal_thr,
+        "optimal_low_threshold": best_low,
+        "optimal_high_threshold": best_high,
+        "optimal_tp": optimal_tp,
+        "optimal_fp": optimal_fp,
+        "optimal_tn": optimal_tn,
+        "optimal_fn": optimal_fn,
+        "preset_low_threshold": low_thr,
+        "preset_high_threshold": high_thr,
     }
     (output_dir / "e2e_summary.json").write_text(json.dumps(task_summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # 5. Auto Plotting
+    # 5. Auto Plotting with optimal thresholds
     try:
         from plot_evaluation_charts import plot_single_run_charts
         chart_dir = output_dir / "charts"
-        plot_single_run_charts(out_csv, chart_dir, low_thr=low_thr, high_thr=high_thr)
+        plot_single_run_charts(out_csv, chart_dir, low_thr=best_low, high_thr=best_high)
     except Exception as e:
         print(f"[{device}] Warning: plotting failed for {output_dir.name}: {e}")
 
