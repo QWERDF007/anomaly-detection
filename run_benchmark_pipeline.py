@@ -50,7 +50,7 @@ def run_cmd(cmd, cwd=None, env=None):
 def discover_dataset_images(dataset_root: Path):
     """Auto-discovers normal (good/OK) and anomalous (NG/defect) image paths."""
     all_imgs = []
-    for ext in ["*.png", "*.jpg", "*.jpeg", "*.bmp"]:
+    for ext in ["*.png", "*.jpg", "*.jpeg", "*.bmp", "*.PNG", "*.JPG", "*.JPEG", "*.BMP"]:
         all_imgs.extend(list(dataset_root.rglob(ext)))
 
     good_imgs = []
@@ -59,9 +59,9 @@ def discover_dataset_images(dataset_root: Path):
         p_str = str(p).lower()
         if "建库数据" in str(p) or "feature_bank" in p_str:
             continue
-        if "\\ok\\" in str(p) or "/ok/" in str(p) or "good" in p_str or "normal" in p_str:
+        if "\\ok\\" in p_str or "/ok/" in p_str or p.parent.name.lower() == "ok" or "good" in p_str or "normal" in p_str:
             good_imgs.append(p)
-        elif "\\ng\\" in str(p) or "/ng/" in str(p) or "defect" in p_str or "bad" in p_str or "anomaly" in p_str:
+        elif "\\ng\\" in p_str or "/ng/" in p_str or p.parent.name.lower() == "ng" or "defect" in p_str or "bad" in p_str or "anomaly" in p_str:
             bad_imgs.append(p)
 
     good_imgs = sorted(list(set(good_imgs)))
@@ -170,15 +170,16 @@ def main():
 
             if not model_file.exists() and not any(task_out.glob("*/model.pth")):
                 cmd = [
-                    str(PYTHON), str(ROOT / "Dinomaly2" / "train.py"),
-                    "-d", "custom",
-                    "--custom_train_data", str(train_txt),
-                    "--custom_test_data", str(test_full_p),
-                    "--img_size", str(s),
-                    "--max_iters", str(args.max_iters),
-                    "--output_dir", str(task_out),
-                    "--val_freq", "2000",
-                    "--batch_size", "2" if s >= 672 else "4",
+                    str(PYTHON), str(ROOT / "Dinomaly2" / "dinomaly_2D.py"),
+                    "--data_path", str(train_txt),
+                    "--dataset", "custom",
+                    "--image_size", str(s),
+                    "--crop_size", str(s),
+                    "--batch-size", "2" if s >= 672 else "4",
+                    "--max-iters", str(args.max_iters),
+                    "--save_dir", str(task_out),
+                    "--cuda", "0",
+                    "--backbone", "dinov2reg_vit_small_14",
                 ]
                 training_tasks.append(("dinomaly2", cmd, f"Dinomaly2 N={n} Size={s}"))
 
@@ -189,48 +190,20 @@ def main():
             task_out = outs_dir / task_name
             train_txt = splits_dir / f"train_n{n}.txt"
 
-            if not list(task_out.glob("*/*patchcore_params.pkl")):
+            if not list(task_out.glob("*/*patchcore_params.pkl")) and not (task_out / "models" / "patchcore_params.pkl").exists():
                 cmd = [
-                    str(PYTHON), str(ROOT / "patchcore-inspection" / "bin" / "run_patchcore.py"),
+                    str(PYTHON), str(ROOT / "patchcore-inspection" / "train.py"),
+                    "--data_path", str(train_txt),
+                    "--dataset", "custom",
+                    "--backbone", "wideresnet50",
+                    "-imgsz", str(s),
+                    "-csz", str(s),
+                    "--batch_size", "2" if s >= 672 else "4",
+                    "--sampling_percentage", "0.1",
+                    "--save_dir", str(task_out),
                     "--gpu", "0",
-                    "--seed", str(args.seed),
-                    "--save_patchcore_model",
-                    "--log_group", task_name,
-                    "--log_project", str(outs_dir),
-                    "patch_core",
-                    "-b", "wideresnet50",
-                    "-le", "layer2",
-                    "-le", "layer3",
-                    "--faiss_on_gpu",
-                    "--sampler", "approx_greedy_coreset",
-                    "--percentage", "0.1",
-                    "dataset",
-                    "--resize", str(s),
-                    "--imagesize", str(s),
-                    "custom",
-                    "--train_data", str(train_txt),
-                    "--test_data", str(test_full_p),
                 ]
                 training_tasks.append(("patchcore", cmd, f"PatchCore N={n} Size={s}"))
-
-    # Two-Stage Feature Bank Tasks
-    if bank_data and bank_data.is_dir():
-        for s in args.image_sizes:
-            for n in valid_n_samples:
-                task_out = outs_dir / f"dinomaly2_n{n}_s{s}_seed{args.seed}"
-                bank_file = task_out / "feature_bank.npz"
-                train_txt = splits_dir / f"train_n{n}.txt"
-
-                if not bank_file.exists():
-                    cmd = [
-                        str(PYTHON), str(ROOT / "two_stage" / "build_bank.py"),
-                        "--data_root", str(bank_data),
-                        "--normal_list", str(train_txt),
-                        "--output", str(bank_file),
-                        "--image_size", str(s),
-                        "--device", "cuda:0",
-                    ]
-                    training_tasks.append(("feature_bank", cmd, f"FeatureBank N={n} Size={s}"))
 
     # Execute Parallel Training across GPUs
     print("\n" + "=" * 80)
@@ -262,8 +235,27 @@ def main():
                 ok, elapsed = run_cmd(cmd, env=env)
                 status = "OK" if ok else "FAILED"
                 print(f"[GPU {single_gid}] Finished [{status}] in {elapsed:.1f}s: {desc}", flush=True)
-    else:
-        print("[INFO] All training tasks already completed!")
+    # Two-Stage Feature Bank Building
+    if bank_data and bank_data.is_dir():
+        print("\n" + "=" * 80)
+        print("=== Step 3.5: Extracting Two-Stage Feature Banks ===")
+        print("=" * 80)
+        for s in args.image_sizes:
+            for n in valid_n_samples:
+                task_out = outs_dir / f"dinomaly2_n{n}_s{s}_seed{args.seed}"
+                bank_file = task_out / "feature_bank.npz"
+                d_cands = sorted(list(task_out.glob("*/model.pth")) + list(task_out.glob("model.pth")), key=lambda p: p.stat().st_mtime, reverse=True)
+                if not bank_file.exists() and d_cands:
+                    b_cmd = [
+                        str(PYTHON), str(ROOT / "two_stage" / "build_bank.py"),
+                        "--model", str(d_cands[0]),
+                        "--data_dir", str(bank_data),
+                        "--save_bank", str(bank_file),
+                        "--image_size", str(s),
+                        "--cuda", "0"
+                    ]
+                    print(f"Building feature bank for N={n} Size={s}...")
+                    run_cmd(b_cmd)
 
     # 4. Full Evaluation
     print("\n" + "=" * 80)
