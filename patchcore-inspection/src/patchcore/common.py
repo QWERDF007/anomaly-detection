@@ -162,17 +162,29 @@ class FaissNN(object):
         try:
             faiss.write_index(cpu_idx, filename)
         except Exception:
-            chunk = faiss.serialize_index(cpu_idx)
-            with open(filename, "wb") as f:
-                f.write(chunk)
+            import tempfile, shutil
+            with tempfile.NamedTemporaryFile(suffix=".faiss", delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                faiss.write_index(cpu_idx, tmp_path)
+                shutil.copyfile(tmp_path, filename)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
 
     def load(self, filename: str) -> None:
         try:
             raw_idx = faiss.read_index(filename, faiss.IO_FLAG_MMAP)
         except Exception:
-            with open(filename, "rb") as f:
-                buf = f.read()
-            raw_idx = faiss.deserialize_index(np.frombuffer(buf, dtype=np.uint8))
+            import tempfile, shutil
+            with tempfile.NamedTemporaryFile(suffix=".faiss", delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                shutil.copyfile(filename, tmp_path)
+                raw_idx = faiss.read_index(tmp_path, faiss.IO_FLAG_MMAP)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
         self.search_index = self._index_to_gpu(raw_idx)
 
     def reset_index(self):
