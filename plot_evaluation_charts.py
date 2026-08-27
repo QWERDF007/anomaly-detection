@@ -610,19 +610,19 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
         224: {
             "dino": [0.98, 0.98, 0.98, 0.98],
             "patch": [0.65, 0.75, 0.85, 1.05],
-            "e2e": [0.45, 0.45, 0.45, 0.45],
+            "e2e": [0.98, 0.98, 0.98, 0.98],
             "ylim": [0, 1.4]
         },
         448: {
             "dino": [1.56, 1.56, 1.56, 1.56],
             "patch": [1.15, 1.42, 1.95, 0.0],  # N=400 is OOM
-            "e2e": [0.82, 0.82, 0.82, 0.82],
+            "e2e": [1.56, 1.56, 1.56, 1.56],
             "ylim": [0, 2.4]
         },
         672: {
             "dino": [1.72, 1.72, 1.72, 1.72],
             "patch": [1.75, 2.10, 1.40, 0.0],  # N=200 CPU fallback, N=400 OOM
-            "e2e": [1.25, 1.25, 1.25, 1.25],
+            "e2e": [1.72, 1.72, 1.72, 1.72],
             "ylim": [0, 2.8]
         }
     }
@@ -638,7 +638,7 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
 
         ax.bar(x_n - w_t, d_tv, width=w_t, label="Dinomaly2 训练显存", color="#1f77b4", alpha=0.85)
         ax.bar(x_n, p_tv, width=w_t, label="PatchCore 建库显存", color="#d62728", alpha=0.85)
-        ax.bar(x_n + w_t, e_tv, width=w_t, label="二阶段特征库建库显存", color="#2ca02c", alpha=0.85)
+        ax.bar(x_n + w_t, e_tv, width=w_t, label="二阶段总训练显存峰值 (训练+建库)", color="#2ca02c", alpha=0.85)
 
         for i in range(len(n_samples)):
             ax.text(x_n[i] - w_t, d_tv[i] + 0.05, f"{d_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
