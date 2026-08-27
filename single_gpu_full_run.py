@@ -17,6 +17,7 @@ def build_parser():
     parser.add_argument("--max_iters", type=int, default=2000, help="Stage 1 training iterations")
     parser.add_argument("--train_sizes", type=int, nargs="+", default=[50, 100, 200, 400])
     parser.add_argument("--image_sizes", type=int, nargs="+", default=[224, 448, 672])
+    parser.add_argument("--overwrite_patchcore", action="store_true", help="Force re-running PatchCore models with GPU FAISS")
     return parser
 
 def main():
@@ -76,7 +77,7 @@ def main():
             d_models = list(d_save.rglob("model.pth")) if d_save.is_dir() else []
             p_models = list(p_save.rglob("nnscorer_search_index.faiss")) if p_save.is_dir() else []
             d_done = len(d_models) > 0
-            p_done = len(p_models) > 0
+            p_done = (len(p_models) > 0) and (not args.overwrite_patchcore)
             # Dinomaly2
             if d_done:
                 log(f"Skip Dinomaly2 N={n} SZ={sz} already has {d_models[0]}")

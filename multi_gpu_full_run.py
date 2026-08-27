@@ -38,10 +38,11 @@ def build_parser():
     parser.add_argument("--max_iters", type=int, default=2000, help="Stage 1 training iterations")
     parser.add_argument("--train_sizes", type=int, nargs="+", default=[50, 100, 200, 400])
     parser.add_argument("--image_sizes", type=int, nargs="+", default=[224, 448, 672])
+    parser.add_argument("--overwrite_patchcore", action="store_true", help="Force re-running PatchCore models with GPU FAISS")
     return parser
 
 
-def _worker_process(gpu_id: int, task_queue: mp.Queue, result_queue: mp.Queue, outs_dir: Path, bank_data: Path, max_iters: int):
+def _worker_process(gpu_id: int, task_queue: mp.Queue, result_queue: mp.Queue, outs_dir: Path, bank_data: Path, max_iters: int, overwrite_patchcore: bool = False):
     """Worker process assigned to a dedicated GPU."""
     log_file = outs_dir / f"gpu_{gpu_id}.log"
 
@@ -102,7 +103,7 @@ def _worker_process(gpu_id: int, task_queue: mp.Queue, result_queue: mp.Queue, o
 
         # 2. PatchCore Training / Coreset Subsampling
         p_models = list(p_save.rglob("nnscorer_search_index.faiss")) if p_save.is_dir() else []
-        if p_models:
+        if p_models and not overwrite_patchcore:
             log(f"Skip PatchCore: already exists {p_models[0]}")
         else:
             cmd = [str(PYTHON), str(ROOT / "patchcore-inspection" / "train.py"),
@@ -197,7 +198,7 @@ def main():
     for gpu_id in gpu_list:
         p = ctx.Process(
             target=_worker_process,
-            args=(gpu_id, task_queue, result_queue, outs_dir, bank_data, args.max_iters),
+            args=(gpu_id, task_queue, result_queue, outs_dir, bank_data, args.max_iters, args.overwrite_patchcore),
         )
         p.start()
         workers.append(p)
