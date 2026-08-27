@@ -207,14 +207,16 @@ def main():
 
             if not model_file.exists() and not any(task_out.glob("*/model.pth")):
                 cmd = [
-                    str(PYTHON), str(ROOT / "Dinomaly2" / "train.py"),
-                    "-d", "custom",
-                    "--custom_train_data", str(train_txt),
-                    "--custom_test_data", str(test_full_p),
-                    "--img_size", str(s),
+                    str(PYTHON), str(ROOT / "Dinomaly2" / "dinomaly_2D.py"),
+                    "--dataset", "custom",
+                    "--data_path", str(train_txt),
+                    "--test_path", str(test_full_p),
+                    "--image_size", str(s),
+                    "--crop_size", str(s),
                     "--max_iters", str(args.max_iters),
-                    "--output_dir", str(task_out),
-                    "--val_freq", "2000",
+                    "--save_dir", str(task_out),
+                    "--eval_interval", "-1",
+                    "--cuda", "0",
                     "--batch_size", "2" if s >= 672 else "4",
                 ]
                 dino_tasks.append(("dinomaly2", cmd, f"Dinomaly2 N={n} Size={s}"))
