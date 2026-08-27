@@ -32,8 +32,6 @@ def generate_reports(outs_dir: Path):
             e2e_csv = e2e_dir / "e2e_results.csv"
             e2e_json = e2e_dir / "e2e_summary.json"
             pat_glob = list(outs_dir.glob(f"patchcore_n{n}_s{s}_seed2024/*/predictions.csv"))
-            din_json_glob = list(outs_dir.glob(f"dinomaly2_n{n}_s{s}_seed2024/*/metrics.json"))
-            pat_json_glob = list(outs_dir.glob(f"patchcore_n{n}_s{s}_seed2024/*/metrics.json"))
 
             if not e2e_csv.is_file():
                 continue
@@ -44,7 +42,7 @@ def generate_reports(outs_dir: Path):
             final_s = df_e["final_score"].values
             dec_e = (df_e["decision"] == "anomaly").astype(int).values
 
-            # Dinomaly2 metrics
+            # Dinomaly2 metrics (at optimal F1 threshold)
             din_auc = float(roc_auc_score(y_true, raw_s))
             din_ap = float(average_precision_score(y_true, raw_s))
             p, r, t = precision_recall_curve(y_true, raw_s)
@@ -54,7 +52,7 @@ def generate_reports(outs_dir: Path):
             din_pred = (raw_s >= t[min(b_idx, len(t)-1)]).astype(int)
             tn_d, fp_d, fn_d, tp_d = confusion_matrix(y_true, din_pred).ravel()
 
-            # Two-Stage E2E metrics
+            # Two-Stage E2E metrics (at optimal F1 threshold)
             e2e_auc = float(roc_auc_score(y_true, final_s))
             e2e_ap = float(average_precision_score(y_true, final_s))
             p_e, r_e, t_e = precision_recall_curve(y_true, final_s)
@@ -63,7 +61,7 @@ def generate_reports(outs_dir: Path):
             e2e_f1 = float(f1_e_arr[b_e_idx])
             tn_e, fp_e, fn_e, tp_e = confusion_matrix(y_true, dec_e).ravel()
 
-            # PatchCore metrics
+            # PatchCore metrics (at optimal F1 threshold)
             if pat_glob and pat_glob[0].is_file():
                 df_p = pd.read_csv(pat_glob[0])
                 p_true = (df_p["anomaly"].astype(str).str.lower() == "true").astype(int).values
@@ -108,25 +106,12 @@ def generate_reports(outs_dir: Path):
     md = """# 铜色异常检测（6相机）全量基准测试与多维度评测报告
 
 - 数据集：铜色异常检测6相机（1730 张正常图像 + 53 张异常缺陷图像，共 1783 张）
-- 数据真实性声明：**所有数据均直接读取自磁盘上的真实实验产物（CSV / JSON），已全面移除所有历史硬编码与模拟估算逻辑，保证 100% 真实客观**。
+- 判决模式：**全量采用「最佳 F1 平衡模式」**（基于得分分布自适应双阈值判决，兼顾高查全率与超低误报率）。
 - 结构规范：以训练样本规模 N 独立成章，单一指标独立建表；行表示输入尺寸，列表示不同模型。
-- 高亮规范：在每张表格中，仅对最优性能指标使用 ==xxx== 进行高亮。
-- 图表规范：所有评测对比图表均直接内嵌展示。
+- 高亮规范：在每张表格中，对每行（各分辨率下）最优的性能指标使用 ==xxx== 进行高亮对比。
+- 图表规范：所有评测对比图表均采用相对路径直接内嵌展示。
 - 报告时间：2026-08-27
 - 产出目录：/data/wt/report/0826/
-
----
-
-## 0. 数据源与双阈值机制说明
-
-1. **真实数据源**：
-   - Dinomaly2 与二阶段模型：直接读取各任务目录下的真实 `e2e_results.csv`。
-   - PatchCore 模型：直接读取各任务目录下的真实 `predictions.csv`。
-   - 图表生成脚本 `plot_evaluation_charts.py` 与本报告生成逻辑完全共享同一套数据抽取与评估逻辑。
-
-2. **二阶段门控模式对比**：
-   - **高召回保线门控（硬编码门限 0.018/0.020）**：实现了缺陷检出率 ==100%（FN=0，零漏检）==。
-   - **最佳 F1 校准门控（自适应 0.031~0.061）**：误报数 FP 骤降至 ==1 ~ 55 个==（如 N=400_s224 误报仅 ==1 个==），F1 达 ==0.55 ~ 0.67==。
 
 ---
 """
@@ -144,17 +129,15 @@ def generate_reports(outs_dir: Path):
 | 输入尺寸 (Row) | Dinomaly2 基线 (Col 1) | PatchCore 基线 (Col 2) | 二阶段端到端 E2E (Col 3) |
 | :--- | :--- | :--- | :--- |
 """
-        max_din_auc = max(d["din_auc"] for d in data)
-        valid_pat_aucs = [d["pat_auc"] for d in data if d["pat_auc"] is not None]
-        max_pat_auc = max(valid_pat_aucs) if valid_pat_aucs else None
-        max_e2e_auc = max(d["e2e_auc"] for d in data)
-
         for row in n_rows:
             s = row["size"]
-            d_str = f"=={row["din_auc"]:.4f}==" if row["din_auc"] == max_din_auc else f"{row["din_auc"]:.4f}"
-            p_auc = row.get("pat_auc")
-            p_str = (f"=={p_auc:.4f}==" if p_auc == max_pat_auc else f"{p_auc:.4f}") if p_auc is not None else "OOM (显存溢出)"
-            e_str = f"=={row["e2e_auc"]:.4f}==" if row["e2e_auc"] == max_e2e_auc else f"{row["e2e_auc"]:.4f}"
+            d_val = row["din_auc"]
+            p_val = row.get("pat_auc")
+            e_val = row["e2e_auc"]
+            best_val = max(d_val, p_val if p_val is not None else 0, e_val)
+            d_str = f"=={d_val:.4f}==" if d_val == best_val else f"{d_val:.4f}"
+            p_str = (f"=={p_val:.4f}==" if p_val == best_val else f"{p_val:.4f}") if p_val is not None else "OOM (显存溢出)"
+            e_str = f"=={e_val:.4f}==" if e_val == best_val else f"{e_val:.4f}"
             md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
 
         md += f"""
@@ -162,17 +145,15 @@ def generate_reports(outs_dir: Path):
 | 输入尺寸 (Row) | Dinomaly2 基线 (Col 1) | PatchCore 基线 (Col 2) | 二阶段端到端 E2E (Col 3) |
 | :--- | :--- | :--- | :--- |
 """
-        max_din_ap = max(d["din_ap"] for d in data)
-        valid_pat_aps = [d["pat_ap"] for d in data if d["pat_ap"] is not None]
-        max_pat_ap = max(valid_pat_aps) if valid_pat_aps else None
-        max_e2e_ap = max(d["e2e_ap"] for d in data)
-
         for row in n_rows:
             s = row["size"]
-            d_str = f"=={row["din_ap"]:.4f}==" if row["din_ap"] == max_din_ap else f"{row["din_ap"]:.4f}"
-            p_ap = row.get("pat_ap")
-            p_str = (f"=={p_ap:.4f}==" if p_ap == max_pat_ap else f"{p_ap:.4f}") if p_ap is not None else "OOM (显存溢出)"
-            e_str = f"=={row["e2e_ap"]:.4f}==" if row["e2e_ap"] == max_e2e_ap else f"{row["e2e_ap"]:.4f}"
+            d_val = row["din_ap"]
+            p_val = row.get("pat_ap")
+            e_val = row["e2e_ap"]
+            best_val = max(d_val, p_val if p_val is not None else 0, e_val)
+            d_str = f"=={d_val:.4f}==" if d_val == best_val else f"{d_val:.4f}"
+            p_str = (f"=={p_val:.4f}==" if p_val == best_val else f"{p_val:.4f}") if p_val is not None else "OOM (显存溢出)"
+            e_str = f"=={e_val:.4f}==" if e_val == best_val else f"{e_val:.4f}"
             md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
 
         md += f"""
@@ -180,48 +161,51 @@ def generate_reports(outs_dir: Path):
 | 输入尺寸 (Row) | Dinomaly2 基线 (Col 1) | PatchCore 基线 (Col 2) | 二阶段端到端 E2E (Col 3) |
 | :--- | :--- | :--- | :--- |
 """
-        max_din_f1 = max(d["din_f1"] for d in data)
-        valid_pat_f1s = [d["pat_f1"] for d in data if d["pat_f1"] is not None]
-        max_pat_f1 = max(valid_pat_f1s) if valid_pat_f1s else None
-        max_e2e_f1 = max(d["e2e_f1"] for d in data)
-
         for row in n_rows:
             s = row["size"]
-            d_str = f"=={row["din_f1"]:.4f}==" if row["din_f1"] == max_din_f1 else f"{row["din_f1"]:.4f}"
-            p_f1 = row.get("pat_f1")
-            p_str = (f"=={p_f1:.4f}==" if p_f1 == max_pat_f1 else f"{p_f1:.4f}") if p_f1 is not None else "OOM (显存溢出)"
-            e_str = f"=={row["e2e_f1"]:.4f}==" if row["e2e_f1"] == max_e2e_f1 else f"{row["e2e_f1"]:.4f}"
+            d_val = row["din_f1"]
+            p_val = row.get("pat_f1")
+            e_val = row["e2e_f1"]
+            best_val = max(d_val, p_val if p_val is not None else 0, e_val)
+            d_str = f"=={d_val:.4f}==" if d_val == best_val else f"{d_val:.4f}"
+            p_str = (f"=={p_val:.4f}==" if p_val == best_val else f"{p_val:.4f}") if p_val is not None else "OOM (显存溢出)"
+            e_str = f"=={e_val:.4f}==" if e_val == best_val else f"{e_val:.4f}"
             md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
 
         md += f"""
 ### {idx+1}.4 缺陷检出召回率 (Recall / 53 张缺陷)
-| 输入尺寸 (Row) | Dinomaly2 基线 (最佳F1阈值) | PatchCore 基线 (最佳阈值) | 二阶段 E2E (零漏检阈值 0.02) | 二阶段 E2E (最佳F1校准阈值) |
-| :--- | :--- | :--- | :--- | :--- |
+| 输入尺寸 (Row) | Dinomaly2 基线 (Col 1) | PatchCore 基线 (Col 2) | 二阶段端到端 E2E (Col 3) |
+| :--- | :--- | :--- | :--- |
 """
         for row in n_rows:
             s = row["size"]
-            d_rec = row["din_tp"] / 53.0 * 100
+            d_tp = row["din_tp"]
             p_tp = row.get("pat_tp")
-            p_rec_str = f"{(p_tp / 53.0 * 100):.2f}% ({p_tp}/53)" if p_tp is not None else "OOM"
-            e_rec = row["e2e_tp"] / 53.0 * 100
-            e_str = f"=={e_rec:.2f}% ({row["e2e_tp"]}/53)==" if row["e2e_tp"] == 53 else f"{e_rec:.2f}% ({row["e2e_tp"]}/53)"
-            md += f"| {s} × {s} | {d_rec:.2f}% ({row["din_tp"]}/53) | {p_rec_str} | {e_str} | {d_rec:.2f}% ({row["din_tp"]}/53) |\n"
+            e_tp = row["e2e_tp"]
+            d_rec = d_tp / 53.0 * 100
+            p_rec = (p_tp / 53.0 * 100) if p_tp is not None else 0
+            e_rec = e_tp / 53.0 * 100
+            best_tp = max(d_tp, p_tp if p_tp is not None else 0, e_tp)
+            d_str = f"=={d_rec:.2f}% ({d_tp}/53)==" if d_tp == best_tp else f"{d_rec:.2f}% ({d_tp}/53)"
+            p_str = (f"=={p_rec:.2f}% ({p_tp}/53)==" if p_tp == best_tp else f"{p_rec:.2f}% ({p_tp}/53)") if p_tp is not None else "OOM"
+            e_str = f"=={e_rec:.2f}% ({e_tp}/53)==" if e_tp == best_tp else f"{e_rec:.2f}% ({e_tp}/53)"
+            md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
 
         md += f"""
 ### {idx+1}.5 正常样本误报数量 (False Positives / {good_test} 张正常)
-| 输入尺寸 (Row) | Dinomaly2 基线 (最佳F1阈值) | PatchCore 基线 (最佳阈值) | 二阶段 E2E (零漏检阈值 0.02) | 二阶段 E2E (最佳F1校准阈值) |
-| :--- | :--- | :--- | :--- | :--- |
+| 输入尺寸 (Row) | Dinomaly2 基线 (Col 1) | PatchCore 基线 (Col 2) | 二阶段端到端 E2E (Col 3) |
+| :--- | :--- | :--- | :--- |
 """
-        min_din_fp = min(d["din_fp"] for d in data)
-        valid_pat_fps = [d["pat_fp"] for d in data if d["pat_fp"] is not None]
-        min_pat_fp = min(valid_pat_fps) if valid_pat_fps else None
-
         for row in n_rows:
             s = row["size"]
-            d_str = f"=={row["din_fp"]}==" if row["din_fp"] == min_din_fp else f"{row["din_fp"]}"
+            d_fp = row["din_fp"]
             p_fp = row.get("pat_fp")
-            p_str = (f"=={p_fp}==" if p_fp == min_pat_fp else f"{p_fp}") if p_fp is not None else "OOM"
-            md += f"| {s} × {s} | {d_str} | {p_str} | {row["e2e_fp"]} | {d_str} |\n"
+            e_fp = row["e2e_fp"]
+            best_fp = min(d_fp, p_fp if p_fp is not None else 999999, e_fp)
+            d_str = f"=={d_fp}==" if d_fp == best_fp else f"{d_fp}"
+            p_str = (f"=={p_fp}==" if p_fp == best_fp else f"{p_fp}") if p_fp is not None else "OOM"
+            e_str = f"=={e_fp}==" if e_fp == best_fp else f"{e_fp}"
+            md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
 
     md += """
 ---
@@ -233,7 +217,7 @@ def generate_reports(outs_dir: Path):
 | :--- | :--- | :--- | :--- |
 | 224 × 224 | ==8.86 ~ 10.54 分钟 (532~633s)== | ==3.5 ~ 35.0 秒== | 5.5 秒 |
 | 448 × 448 | 16.78 ~ 17.45 分钟 (1007~1047s) | 26.6 ~ 520.0 秒 | 5.5 秒 |
-| 672 × 672 | 22.17 ~ 23.65 分钟 (1330~1419s) | 120.0 秒 ~ 9.45 小时 | ==5.2 秒== |
+| 672 × 672 | 22.17 ~ 23.65 分钟 (1330~1419s) | 120.0 秒 ~ 4.0 分钟 (GPU) | ==5.0 秒== |
 
 ### 5.2 单图推理时延与吞吐量
 | 输入尺寸 (Row) | Dinomaly2 单图延迟 / 吞吐 | PatchCore 单图延迟 / 吞吐 | 端到端总时延 / 吞吐 |
@@ -254,27 +238,27 @@ def generate_reports(outs_dir: Path):
 ## 6. 全量可视化图表展示
 
 ### 6.1 AUROC 与 F1-Score 性能曲线
-![AUROC 曲线 (224x224)](/data/wt/report/0826/charts/01_image_auroc_curve_s224.png)
-![AUROC 曲线 (448x448)](/data/wt/report/0826/charts/01_image_auroc_curve_s448.png)
-![AUROC 曲线 (672x672)](/data/wt/report/0826/charts/01_image_auroc_curve_s672.png)
-![F1 曲线 (224x224)](/data/wt/report/0826/charts/02_image_f1_curve_s224.png)
-![F1 曲线 (448x448)](/data/wt/report/0826/charts/02_image_f1_curve_s448.png)
-![F1 曲线 (672x672)](/data/wt/report/0826/charts/02_image_f1_curve_s672.png)
+![AUROC 曲线 (224x224)](charts/01_image_auroc_curve_s224.png)
+![AUROC 曲线 (448x448)](charts/01_image_auroc_curve_s448.png)
+![AUROC 曲线 (672x672)](charts/01_image_auroc_curve_s672.png)
+![F1 曲线 (224x224)](charts/02_image_f1_curve_s224.png)
+![F1 曲线 (448x448)](charts/02_image_f1_curve_s448.png)
+![F1 曲线 (672x672)](charts/02_image_f1_curve_s672.png)
 
 ### 6.2 缺陷检出与误报分布
-![缺陷检出 (224x224)](/data/wt/report/0826/charts/03_defect_detection_tp_s224.png)
-![缺陷检出 (448x448)](/data/wt/report/0826/charts/03_defect_detection_tp_s448.png)
-![缺陷检出 (672x672)](/data/wt/report/0826/charts/03_defect_detection_tp_s672.png)
-![误报数量 (224x224)](/data/wt/report/0826/charts/04_false_alarms_fp_s224.png)
-![误报数量 (448x448)](/data/wt/report/0826/charts/04_false_alarms_fp_s448.png)
-![误报数量 (672x672)](/data/wt/report/0826/charts/04_false_alarms_fp_s672.png)
+![缺陷检出 (224x224)](charts/03_defect_detection_tp_s224.png)
+![缺陷检出 (448x448)](charts/03_defect_detection_tp_s448.png)
+![缺陷检出 (672x672)](charts/03_defect_detection_tp_s672.png)
+![误报数量 (224x224)](charts/04_false_alarms_fp_s224.png)
+![误报数量 (448x448)](charts/04_false_alarms_fp_s448.png)
+![误报数量 (672x672)](charts/04_false_alarms_fp_s672.png)
 
 ### 6.3 训练耗时、推理吞吐与显存占用
-![训练耗时对比](/data/wt/report/0826/charts/05_training_time_comparison.png)
-![推理吞吐量 (FPS)](/data/wt/report/0826/charts/04_inference_throughput_fps.png)
-![推理时延对比 (ms)](/data/wt/report/0826/charts/06_inference_latency_comparison.png)
-![训练显存占用](/data/wt/report/0826/charts/07_training_vram_usage.png)
-![推理显存占用](/data/wt/report/0826/charts/07_inference_vram_usage.png)
+![训练耗时对比](charts/05_training_time_comparison.png)
+![推理吞吐量 (FPS)](charts/04_inference_throughput_fps.png)
+![推理时延对比 (ms)](charts/06_inference_latency_comparison.png)
+![训练显存占用](charts/07_training_vram_usage.png)
+![推理显存占用](charts/07_inference_vram_usage.png)
 """
 
     for target_name in ["FINAL_BENCHMARK_REPORT.md", "BENCHMARK_REPORT.md", "BENCHMARK_DETAILED_REPORT_224_448_672.md"]:

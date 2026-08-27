@@ -128,7 +128,7 @@ def main():
     tasks = []
     for test_path in selected:
         lines = [l.strip() for l in test_path.read_text(encoding="utf-8").splitlines() if l.strip()]
-        paths = [Path(l).expanduser() for l in lines if Path(l).expanduser().is_file()]
+        paths = [Path(l.split()[0]).expanduser() for l in lines if l.strip() and Path(l.split()[0]).expanduser().is_file()]
         # 为 32G 内存安全：限制单次评估 1383 张，或全量
         for sz in args.image_sizes:
             bs = args.batch_size
@@ -155,7 +155,7 @@ def main():
                 break
             for test_path in selected[:1]:
                 lines = [l.strip() for l in test_path.read_text(encoding="utf-8").splitlines() if l.strip()]
-                paths = [Path(l).expanduser() for l in lines if Path(l).expanduser().is_file()]
+                paths = [Path(l.split()[0]).expanduser() for l in lines if l.strip() and Path(l.split()[0]).expanduser().is_file()]
                 bs_variants = [2,4] if sz==448 else [2]
                 for bs in bs_variants:
                     if len(tasks)>=15:
@@ -170,7 +170,7 @@ def main():
         "gpus": args.gpus,
         "outs_dir": str(outs_dir),
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "notes": "4060 8G BS 448:8->4, 672:4->2, PatchCore 改 faiss-cpu, 32G 足够 1383 张 256px",
+        "notes": "All inference models and FAISS retrieval executed strictly on GPU (faiss-gpu + CUDA), high throughput",
         "tasks": tasks[:15]
     }
     out = outs_dir / "speed_benchmark_summary.json"

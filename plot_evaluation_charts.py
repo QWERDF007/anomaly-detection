@@ -324,13 +324,13 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
         x = np.arange(len(n_samples))
         w = 0.25
         ax.bar(x - w, d["dinomaly_tp"], width=w, label="Dinomaly2 (最佳F1阈值)", color="#1f77b4", alpha=0.85)
-        ax.bar(x, d["twostage_tp"], width=w, label="二阶段 E2E (高召回门控)", color="#2ca02c", alpha=0.85)
+        ax.bar(x, d["twostage_tp"], width=w, label="二阶段端到端 (最佳F1平衡模式)", color="#2ca02c", alpha=0.85)
         p_tp = [v if v is not None else 0 for v in d["patchcore_tp"]]
         ax.bar(x + w, p_tp, width=w, label="PatchCore (最佳阈值)", color="#d62728", alpha=0.85)
         ax.axhline(53, color="#7f7f7f", linestyle="--", lw=1.2, label="缺陷总数 (53)")
         for i in range(len(n_samples)):
-            ax.text(x[i] - w, d["dinomaly_tp"][i] + 0.8, f"{d["dinomaly_tp"][i]}", ha="center", va="bottom", fontsize=8.5)
-            ax.text(x[i], d["twostage_tp"][i] + 0.8, f"{d["twostage_tp"][i]}", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+            ax.text(x[i] - w, d["dinomaly_tp"][i] + 0.8, f"{d['dinomaly_tp'][i]}", ha="center", va="bottom", fontsize=8.5)
+            ax.text(x[i], d["twostage_tp"][i] + 0.8, f"{d['twostage_tp'][i]}", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
             ax.text(x[i] + w, p_tp[i] + 0.8, f"{p_tp[i]}", ha="center", va="bottom", fontsize=8.5, color="#d62728")
 
         ax.set_title(f"缺陷样本准确检出数 TP (总缺陷数 53, {s}×{s})", fontsize=12, fontweight="bold", pad=12)
@@ -352,21 +352,21 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
         x = np.arange(len(n_samples))
         w = 0.25
         ax.bar(x - w, d["dinomaly_fp"], width=w, label="Dinomaly2 (最佳F1阈值)", color="#1f77b4", alpha=0.85)
-        ax.bar(x, d["twostage_fp"], width=w, label="二阶段 E2E (高召回门控)", color="#2ca02c", alpha=0.85)
+        ax.bar(x, d["twostage_fp"], width=w, label="二阶段端到端 (最佳F1平衡模式)", color="#2ca02c", alpha=0.85)
         p_fp = [v if v is not None else 0 for v in d["patchcore_fp"]]
         ax.bar(x + w, p_fp, width=w, label="PatchCore (最佳阈值)", color="#d62728", alpha=0.85)
 
         for i in range(len(n_samples)):
-            ax.text(x[i] - w, d["dinomaly_fp"][i] + 15, f"{d["dinomaly_fp"][i]}", ha="center", va="bottom", fontsize=8.0)
-            ax.text(x[i], d["twostage_fp"][i] + 15, f"{d["twostage_fp"][i]}", ha="center", va="bottom", fontsize=8.0, color="#2ca02c")
-            ax.text(x[i] + w, p_fp[i] + 15, f"{p_fp[i]}", ha="center", va="bottom", fontsize=8.0, color="#d62728")
+            ax.text(x[i] - w, d["dinomaly_fp"][i] + 1.2, f"{d['dinomaly_fp'][i]}", ha="center", va="bottom", fontsize=8.5)
+            ax.text(x[i], d["twostage_fp"][i] + 1.2, f"{d['twostage_fp'][i]}", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+            ax.text(x[i] + w, p_fp[i] + 1.2, f"{p_fp[i]}", ha="center", va="bottom", fontsize=8.5, color="#d62728")
 
         ax.set_title(f"正常样本误报数 FP 对比 ({s}×{s})", fontsize=12, fontweight="bold", pad=12)
         ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
         ax.set_ylabel("误报数 (FP)", fontsize=10.5)
         ax.set_xticks(x)
         ax.set_xticklabels(n_samples)
-        ax.set_ylim([0, 1800])
+        ax.set_ylim([0, 80])
         ax.grid(True, linestyle=":", alpha=0.6, axis="y")
         ax.legend(loc="upper right", fontsize=9.0, frameon=True, facecolor="#f8f9fa")
         plt.tight_layout()
@@ -493,6 +493,35 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
     plt.close(fig)
 
     print(f"[plot_charts] All real benchmark charts successfully generated in -> {chart_dir}")
+
+
+def plot_single_run_charts(csv_path: Union[str, Path], chart_dir: Union[str, Path], low_thr: float = 0.02, high_thr: float = 0.045):
+    """Plot individual ROC and score distribution charts for a single E2E run."""
+    csv_path = Path(csv_path)
+    chart_dir = Path(chart_dir)
+    chart_dir.mkdir(parents=True, exist_ok=True)
+    if not csv_path.is_file():
+        return
+    df = pd.read_csv(csv_path)
+    y_true = (df["true_label"] != "good").astype(int).values
+    final_s = df["final_score"].values
+    if len(np.unique(y_true)) < 2:
+        return
+
+    fpr, tpr, _ = roc_curve(y_true, final_s)
+    auc_val = roc_auc_score(y_true, final_s)
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    ax.plot(fpr, tpr, color="#2ca02c", lw=2, label=f"E2E AUROC = {auc_val:.4f}")
+    ax.plot([0, 1], [0, 1], color="gray", linestyle="--")
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
+    ax.set_title("Single Run ROC Curve", fontsize=11, fontweight="bold")
+    ax.legend(loc="lower right")
+    ax.grid(True, linestyle=":", alpha=0.6)
+    plt.tight_layout()
+    fig.savefig(chart_dir / "roc_curve.png")
+    plt.close(fig)
 
 
 if __name__ == "__main__":
