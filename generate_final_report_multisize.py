@@ -118,12 +118,17 @@ def generate_reports(outs_dir: Path):
 
     for idx, n in enumerate(n_samples):
         n_rows = [d for d in data if d["n"] == n]
-        total_test = 1783 - n
-        good_test = 1730 - n
+        if n_rows:
+            sample_r = n_rows[0]
+            good_test = int(sample_r["e2e_fp"] + sample_r["e2e_tn"])
+            defect_test = int(sample_r["e2e_tp"] + sample_r["e2e_fn"])
+            total_test = good_test + defect_test
+        else:
+            good_test, defect_test, total_test = 1680, 53, 1733
 
         md += f"""
 ## {idx+1}. 训练样本规模 N = {n} 详细评测
-*测试集：共 {total_test} 张（正常 {good_test} 张 + 缺陷 53 张）*
+*全量统一测试集：共 {total_test} 张（正常 {good_test} 张 + 缺陷 {defect_test} 张）*
 
 ### {idx+1}.1 受试者工作特征曲线下面积 (AUROC)
 | 输入尺寸 (Row) | Dinomaly2 基线 (Col 1) | PatchCore 基线 (Col 2) | 二阶段端到端 E2E (Col 3) |
