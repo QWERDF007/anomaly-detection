@@ -52,26 +52,53 @@ def build_model(args, device):
     return model.to(device), embed_dim
 
 class Bank:
-    def __init__(self,dim):
-        self.dim=dim; self.ab_index=None; self.nor_index=None
-    def _norm(self,f):
-        f=f.astype(np.float32); faiss.normalize_L2(f); return f
-    def query(self,q):
-        q=q.astype(np.float32); faiss.normalize_L2(q)
-        ab=np.full(len(q),1.0); nor=np.full(len(q),1.0)
-        if self.ab_index is not None: ip,_=self.ab_index.search(q,1); ab=1-ip[:,0]
-        if self.nor_index is not None: ip,_=self.nor_index.search(q,1); nor=1-ip[:,0]
+    def __init__(self, dim, device_id: int = 0):
+        self.dim = dim
+        self.device_id = device_id
+        self.ab_index = None
+        self.nor_index = None
+
+    def _norm(self, f):
+        f = f.astype(np.float32)
+        faiss.normalize_L2(f)
+        return f
+
+    def query(self, q):
+        q = q.astype(np.float32)
+        faiss.normalize_L2(q)
+        ab = np.full(len(q), 1.0)
+        nor = np.full(len(q), 1.0)
+        if self.ab_index is not None:
+            ip, _ = self.ab_index.search(np.ascontiguousarray(q), 1)
+            ab = 1 - ip[:, 0]
+        if self.nor_index is not None:
+            ip, _ = self.nor_index.search(np.ascontiguousarray(q), 1)
+            nor = 1 - ip[:, 0]
         return ab, nor
-    def load(self,path):
-        data=np.load(path,allow_pickle=True)
+
+    def _to_gpu_if_available(self, idx):
+        if torch.cuda.is_available() and hasattr(faiss, "StandardGpuResources") and hasattr(faiss, "index_cpu_to_gpu"):
+            try:
+                res = faiss.StandardGpuResources()
+                return faiss.index_cpu_to_gpu(res, int(self.device_id), idx)
+            except Exception:
+                return idx
+        return idx
+
+    def load(self, path):
+        data = np.load(path, allow_pickle=True)
         if 'ab_features' in data:
-            ab=data['ab_features'].astype(np.float32); faiss.normalize_L2(ab)
-            self.ab_index=faiss.IndexFlatIP(self.dim); self.ab_index.add(ab)
-            print(f"[Bank] ab {ab.shape[0]}")
+            ab = data['ab_features'].astype(np.float32)
+            faiss.normalize_L2(ab)
+            self.ab_index = self._to_gpu_if_available(faiss.IndexFlatIP(self.dim))
+            self.ab_index.add(np.ascontiguousarray(ab))
+            print(f"[Bank] ab {ab.shape[0]} (GPU FAISS)")
         if 'nor_features' in data:
-            nor=data['nor_features'].astype(np.float32); faiss.normalize_L2(nor)
-            self.nor_index=faiss.IndexFlatIP(self.dim); self.nor_index.add(nor)
-            print(f"[Bank] nor {nor.shape[0]}")
+            nor = data['nor_features'].astype(np.float32)
+            faiss.normalize_L2(nor)
+            self.nor_index = self._to_gpu_if_available(faiss.IndexFlatIP(self.dim))
+            self.nor_index.add(np.ascontiguousarray(nor))
+            print(f"[Bank] nor {nor.shape[0]} (GPU FAISS)")
 
 def predict_with_timing(model, gk, img_path, transform, device, bank, low, high, use_corr=True):
     t0=time.perf_counter()
