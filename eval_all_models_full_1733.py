@@ -39,10 +39,12 @@ from models.vision_transformer import Block as VitBlock, Attention, LinearAttent
 from functools import partial
 
 def build_parser():
-    p = argparse.ArgumentParser(description="Evaluate on Full 1733-Image Test Set")
+    p = argparse.ArgumentParser(description="Evaluate on Unified Full Test Set")
     p.add_argument("--outs_dir", type=str, default="F:/tmp/0826")
     p.add_argument("--test_list", type=str, default="F:/tmp/outs/data_splits/test_50_seed2024.txt")
     p.add_argument("--bank_data", type=str, default=r"F:\data\异常检测测试报告数据\铜色异常检测6相机_建库数据2")
+    p.add_argument("--train_sizes", type=int, nargs="+", default=None)
+    p.add_argument("--image_sizes", type=int, nargs="+", default=[224, 448, 672])
     p.add_argument("--cuda", type=int, default=0)
     return p
 
@@ -57,14 +59,26 @@ def main():
     y_true = np.array([0 if ("\\OK\\" in str(p) or "/OK/" in str(p) or "good" in str(p).lower()) else 1 for p in test_paths], dtype=int)
     print(f"Loaded Unified Full Test Set: {len(test_paths)} images (OK={int((y_true==0).sum())}, NG={int((y_true==1).sum())}) on {device}")
 
-    tasks = []
-    sizes = [224, 448, 672]
-    ns = [50, 100, 200, 400]
+    # Auto-detect train_sizes if not specified
+    if args.train_sizes is not None:
+        ns = sorted(list(set(args.train_sizes)))
+    else:
+        found_ns = set()
+        for p in outs_dir.glob("dinomaly2_n*_s*_seed2024"):
+            parts = p.name.split("_")
+            for part in parts:
+                if part.startswith("n") and part[1:].isdigit():
+                    found_ns.add(int(part[1:]))
+        ns = sorted(list(found_ns)) if found_ns else [50, 100, 200, 400]
 
+    sizes = sorted(list(set(args.image_sizes)))
+    print(f"Evaluating across N={ns} and Image Sizes={sizes}...")
+
+    tasks = []
     for s in sizes:
         for n in ns:
-            din_candidates = sorted(list(outs_dir.glob(f"dinomaly2_n{n}_s{s}_seed2024/*/model.pth")), key=lambda p: p.stat().st_mtime, reverse=True)
-            pat_candidates = sorted(list(outs_dir.glob(f"patchcore_n{n}_s{s}_seed2024/*/*patchcore_params.pkl")), key=lambda p: p.stat().st_mtime, reverse=True)
+            din_candidates = sorted(list(outs_dir.glob(f"dinomaly2_n{n}_s{s}_seed2024/*/model.pth")) + list(outs_dir.glob(f"dinomaly2_n{n}_s{s}_seed2024/model.pth")), key=lambda p: p.stat().st_mtime, reverse=True)
+            pat_candidates = sorted(list(outs_dir.glob(f"patchcore_n{n}_s{s}_seed2024/*/*patchcore_params.pkl")) + list(outs_dir.glob(f"patchcore_n{n}_s{s}_seed2024/models/patchcore_params.pkl")), key=lambda p: p.stat().st_mtime, reverse=True)
             if not din_candidates:
                 print(f"[warn] Missing Dinomaly2 model for N={n} Size={s}")
                 continue
@@ -74,7 +88,7 @@ def main():
             save_bank = outs_dir / f"dinomaly2_n{n}_s{s}_seed2024" / "feature_bank.npz"
             tasks.append((n, s, din_model, pat_pkl, out_e2e, save_bank))
 
-    print(f"Total valid tasks to evaluate on Full 1733: {len(tasks)}")
+    print(f"Total valid tasks to evaluate on Full Test Set: {len(tasks)}")
 
     summary_results = []
     for idx, (n, s, din_model_path, pat_pkl_path, out_e2e, save_bank_path) in enumerate(tasks):

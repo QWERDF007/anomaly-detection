@@ -6,8 +6,6 @@ from pathlib import Path
 
 def generate_reports(outs_dir_str):
     outs_dir = Path(outs_dir_str)
-    sizes = [224, 448, 672]
-    n_samples = [50, 100, 200, 400]
 
     summary_path = outs_dir / "final_multisize_summary.json"
     if summary_path.exists():
@@ -17,16 +15,26 @@ def generate_reports(outs_dir_str):
         print(f"Error: {summary_path} not found.")
         return
 
-    # Build clean markdown report with visual charts placed at the very top
-    md = """# 铜色异常检测（6相机）全量基准测试与多维度评测报告
+    n_samples = sorted(list({d["n"] for d in data})) if data else [50, 100, 200, 400]
+    sizes = sorted(list({d["size"] for d in data})) if data else [224, 448, 672]
 
-- 数据集：铜色异常检测6相机（1730 张正常图像 + 53 张异常缺陷图像，共 1783 张）
+    sample_r = data[0] if data else {}
+    good_test = int(sample_r.get("e2e_fp", 0) + sample_r.get("e2e_tn", 0))
+    defect_test = int(sample_r.get("e2e_tp", 0) + sample_r.get("e2e_fn", 0))
+    total_test = good_test + defect_test
+
+    dataset_name = "透气膜异常检测" if ("0827" in str(outs_dir) or "透气膜" in str(outs_dir)) else "铜色异常检测（6相机）"
+
+    # Build clean markdown report with visual charts placed at the very top
+    md = f"""# {dataset_name} 全量基准测试与多维度评测报告
+
+- 数据集：{dataset_name}（{good_test} 张正常图像 + {defect_test} 张异常缺陷图像，共 {total_test} 张）
 - 判决模式：**全量采用「最佳 F1 平衡模式」**（基于得分分布自适应双阈值判决，兼顾高查全率与超低误报率）。
 - 结构规范：**全量核心可视化图表置于报告首页前部（置顶总览）**，随后依次呈现算力性能基准与各样本规模 N 详细评测数据表。
 - 高亮规范：在每张表格中，对每行（各分辨率下）最优的性能指标使用 ==xxx== 进行高亮对比。
 - 图表规范：所有评测对比图表均采用相对路径直接内嵌展示。
 - 报告时间：2026-08-27
-- 产出目录：/data/wt/report/0826/
+- 产出目录：{outs_dir.as_posix()}/
 
 ---
 

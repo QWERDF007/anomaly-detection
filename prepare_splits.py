@@ -37,6 +37,7 @@ def parse_args():
     parser.add_argument("--seeds", type=int, nargs="+", default=[2024,2025,2026], help="Random seeds")
     parser.add_argument("--ok_names", type=str, nargs="+", default=["OK","ok","good","normal"], help="Names considered normal")
     parser.add_argument("--ng_names", type=str, nargs="+", default=["NG","ng","anomaly","scratch","defect","bad"], help="Names considered anomaly (others also treated as NG if not OK)")
+    parser.add_argument("--ignore_names", type=str, nargs="+", default=["建库数据","建库数据2","bank","bank_data","features"], help="Subdirs to ignore during splitting")
     return parser.parse_args()
 
 def main():
@@ -53,15 +54,18 @@ def main():
     subdirs = [p for p in dataset_root.iterdir() if p.is_dir()]
     ok_lower = {n.lower() for n in args.ok_names}
     ng_lower = {n.lower() for n in args.ng_names}
+    ignore_lower = {n.lower() for n in args.ignore_names}
     if subdirs:
         for sub in subdirs:
+            if sub.name.lower() in ignore_lower:
+                print(f"[info] Ignoring auxiliary subdir {sub.name!r}")
+                continue
             if sub.name.lower() in ok_lower:
                 ok_candidates.extend(iter_images(sub))
             elif sub.name.lower() in ng_lower:
                 ng_candidates.extend(iter_images(sub))
             else:
                 # Unknown subdir: decide by name, default treat as NG if not OK
-                # but log
                 print(f"[warn] Unknown subdir {sub.name!r} treated as NG")
                 ng_candidates.extend(iter_images(sub))
         # also flat images directly under root: treat as OK (fallback)

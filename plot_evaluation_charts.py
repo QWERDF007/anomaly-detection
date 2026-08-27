@@ -594,18 +594,25 @@ def plot_all_benchmark_charts(
 
     gpu_name, gpu_total_gb = get_current_gpu_capacity(gpu_name_override, gpu_vram_override)
 
-    sizes = [224, 448, 672]
-    n_samples = [50, 100, 200, 400]
-
     # 1-4. Extract metrics from final_multisize_summary.json if available
     summary_path = outs_dir / "final_multisize_summary.json"
+    summary_data = []
+    if summary_path.is_file():
+        summary_data = json.loads(summary_path.read_text(encoding="utf-8"))
+
+    if summary_data:
+        sizes = sorted(list({item["size"] for item in summary_data}))
+        n_samples = sorted(list({item["n"] for item in summary_data}))
+    else:
+        sizes = [224, 448, 672]
+        n_samples = [50, 100, 200, 400]
+
     metrics = {s: {"dinomaly_auc": [], "twostage_auc": [], "patchcore_auc": [],
                    "dinomaly_f1": [], "twostage_f1": [], "patchcore_f1": [],
                    "dinomaly_tp": [], "twostage_tp": [], "patchcore_tp": [],
                    "dinomaly_fp": [], "twostage_fp": [], "patchcore_fp": []} for s in sizes}
 
-    if summary_path.is_file():
-        summary_data = json.loads(summary_path.read_text(encoding="utf-8"))
+    if summary_data:
         for item in summary_data:
             s = item["size"]
             if s in metrics:
