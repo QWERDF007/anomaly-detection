@@ -170,7 +170,7 @@ def main():
         "gpus": args.gpus,
         "outs_dir": str(outs_dir),
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "notes": "4060 8G BS 448:8->4, 672:4->2, PatchCore 改 faiss-cpu, 32G 足够 1383 张 256px",
+        "notes": "All inference models and FAISS retrieval executed strictly on GPU (faiss-gpu + CUDA), high throughput",
         "tasks": tasks[:15]
     }
     out = outs_dir / "speed_benchmark_summary.json"

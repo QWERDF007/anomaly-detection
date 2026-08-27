@@ -62,20 +62,16 @@ def setup_seed(seed: int, device: torch.device) -> None:
 
 
 def select_device(gpu: int) -> torch.device:
-    """Return the requested CUDA device; 4060 8G 单卡适配：GPU 不可用时自动回退 CPU，兼容 faiss-cpu。
-
-    原实现强制要求 GPU FAISS，已改为：若 torch.cuda 不可用或 gpu<0 则回退 cpu；
-    faiss-cpu 场景下使用 CPU 索引，避免 faiss-gpu 的 cu12 与 OOM 问题。
-    """
+    """Return the requested CUDA device; GPU-first execution with auto device detection."""
     if gpu is not None and int(gpu) >= 0 and torch.cuda.is_available():
         gpu = int(gpu)
         if 0 <= gpu < torch.cuda.device_count():
             return torch.device(f"cuda:{gpu}")
-        LOGGER.warning("GPU %d unavailable (%d found), fallback to CPU", gpu, torch.cuda.device_count())
-    if torch.cuda.is_available() and (gpu is None or int(gpu) < 0):
-        # 未指定 gpu 但有 cuda：默认 cuda:0
+        LOGGER.warning("Requested GPU %d unavailable (%d found), fallback to cuda:0", gpu, torch.cuda.device_count())
         return torch.device("cuda:0")
-    LOGGER.info("Using CPU (faiss-cpu mode) - 4060 8G 推荐")
+    if torch.cuda.is_available():
+        return torch.device("cuda:0")
+    LOGGER.warning("No CUDA GPU detected; falling back to CPU.")
     return torch.device("cpu")
 
 
