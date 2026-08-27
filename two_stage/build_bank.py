@@ -107,8 +107,9 @@ def build_parser():
     p.add_argument("--model", type=str, required=True, help="Dinomaly2 model.pth path")
     p.add_argument("--data_dir", type=str, required=True, help="Bank data directory")
     p.add_argument("--save_bank", type=str, required=True, help="Output npz path")
+    p.add_argument("--save_dir", type=str, default=None, help="Optional save dir")
     p.add_argument("--image_size", type=int, default=448)
-    p.add_argument("--backbone", type=str, default="dinov2reg_vit_small_14")
+    p.add_argument("--backbone", type=str, default="dinov2reg_vit_base_14")
     p.add_argument("--cuda", type=int, default=0)
     return p
 

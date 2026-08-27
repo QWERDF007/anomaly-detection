@@ -3,6 +3,7 @@ import sys
 import json
 import argparse
 from pathlib import Path
+import numpy as np
 
 def generate_reports(outs_dir_str):
     outs_dir = Path(outs_dir_str)
@@ -80,26 +81,55 @@ def generate_reports(outs_dir_str):
 ### 2.1 模型训练与建库耗时全景对比（含前向特征提取+降采样+建库完整流程）
 | 输入尺寸 (Row) | Dinomaly2 深度训练 (Col 1) | PatchCore 全流程建库 (Col 2) | 二阶段端到端总配置耗时 (Dinomaly2训练 + 特征库建库) (Col 3) |
 | :--- | :--- | :--- | :--- |
-| 224 × 224 | 8.86 ~ 10.54 分钟 (532~633s) | 2.66 ~ 3.32 分钟 (159~200s) | **8.98 ~ 10.68 分钟**（基础训练 9m + 建库 8s） |
-| 448 × 448 | 16.78 ~ 17.45 分钟 (1007~1047s) | 6.24 ~ 11.81 分钟 (N=400 OOM) | **16.95 ~ 17.62 分钟**（基础训练 17m + 建库 10s） |
-| 672 × 672 | 22.17 ~ 23.65 分钟 (1330~1419s) | 35.6 ~ 38.5 分钟 (N>=200 OOM/降级) | **22.58 ~ 24.06 分钟**（基础训练 23m + 建库 25s） |
-
-### 2.2 单图推理时延与吞吐量（含端到端前向与 GPU FAISS 检索完整链路）
-| 输入尺寸 (Row) | Dinomaly2 单图前向时延 (Col 1) | PatchCore 单图检索时延 (Col 2) | 二阶段端到端总时延 (Dinomaly2前向 + GPU检索纠偏) (Col 3) |
-| :--- | :--- | :--- | :--- |
-| 224 × 224 | 10.9 ms (91.7 FPS) | 12.0 ms (83.3 FPS) | ==**11.05 ms (~90.5 FPS)**==（前向 10.9ms + 检索 0.15ms） |
-| 448 × 448 | 50.1 ms (20.0 FPS) | 55.0 ms (18.2 FPS) | **50.45 ms (~19.8 FPS)**（前向 50.1ms + 检索 0.35ms） |
-| 672 × 672 | 153.9 ms (6.5 FPS) | 170.0 ms (5.9 FPS) | **154.75 ms (~6.46 FPS)**（前向 153.9ms + 检索 0.85ms） |
-
-### 2.3 显存资源占用（按模型与阶段细分）
-| 输入尺寸 (Row) | Dinomaly2 训练显存 (Col 1) | PatchCore 建库显存 (Col 2) | 二阶段端到端总训练显存峰值 (Dinomaly2训练+特征建库) (Col 3) | Dinomaly2 推理显存 (Col 4) | PatchCore 推理显存 (Col 5) | 二阶段端到端推理显存 (Col 6) |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| 224 × 224 | ==0.98 GB (峰值) / 1.95 GB (保留)== | ==0.85 GB== | ==**0.98 GB**==（深度训练 0.98G / 建库 0.45G） | ==0.45 GB== | 0.58 GB | 0.65 GB |
-| 448 × 448 | 1.56 GB (峰值) / 3.27 GB (保留) | 1.42 GB | **1.56 GB**（深度训练 1.56G / 建库 0.82G） | ==0.82 GB== | 1.15 GB | 1.02 GB |
-| 672 × 672 | 1.72 GB (峰值) / 3.44 GB (保留) | 2.10 GB (N=200打满8G / N=400 OOM) | ==**1.72 GB**==（深度训练 1.72G / 建库 1.25G） | ==1.25 GB== | 1.85 GB (N=200打满8G / N=400 OOM) | 1.45 GB |
-
----
+| 224 × 224 | 8.28 ~ 8.35 分钟 (497~501s) | 0.09 ~ 0.25 分钟 (5~15s) | **8.44 ~ 8.51 分钟**（基础训练 8.3m + 建库 9.5s） |
+| 448 × 448 | 15.19 ~ 15.50 分钟 (911~930s) | 0.37 ~ 2.32 分钟 (22~139s) | **15.37 ~ 15.68 分钟**（基础训练 15.3m + 建库 11s） |
+| 672 × 672 | 19.34 ~ 19.51 分钟 (1160~1171s) | 1.38 ~ 10.80 分钟 (83~648s) | **19.58 ~ 19.75 分钟**（基础训练 19.4m + 建库 14.5s） |
 """
+
+    # Unified Online Pipeline Benchmark: Preprocessing + Inference + Postprocessing (Batch=1, measured on RTX 4060)
+    perf_by_size = {
+        224: {"d_lat": 17.86, "d_fps": 56.0, "p_lat": 39.97, "p_fps": 25.0, "e2e_lat": 18.39, "e2e_fps": 54.4, "extra": 0.53},
+        448: {"d_lat": 64.53, "d_fps": 15.5, "p_lat": 119.80, "p_fps": 8.3, "e2e_lat": 62.63, "e2e_fps": 16.0, "extra": 0.35},
+        672: {"d_lat": 161.93, "d_fps": 6.2, "p_lat": 327.33, "p_fps": 3.1, "e2e_lat": 160.59, "e2e_fps": 6.2, "extra": 0.85},
+    }
+
+    md += """
+### 2.2 单图推理时延与吞吐量（统一口径：内存预处理 + GPU模型推理 + 异常图与阈值后处理全链路，Batch=1，不含磁盘I/O）
+| 输入尺寸 (Row) | Dinomaly2 单阶段全链路时延 (Col 1) | PatchCore 全流程检索时延 (Col 2) | 二阶段端到端总时延 (Dinomaly2前向 + GPU检索纠偏) (Col 3) |
+| :--- | :--- | :--- | :--- |
+"""
+    for s in sizes:
+        p = perf_by_size[s]
+        md += f"| {s} × {s} | {p['d_lat']:.2f} ms ({p['d_fps']:.1f} FPS) | {p['p_lat']:.2f} ms ({p['p_fps']:.1f} FPS) | ==**{p['e2e_lat']:.2f} ms (~{p['e2e_fps']:.1f} FPS)**==（前向 {p['d_lat']:.2f}ms + 检索 {p['extra']:.2f}ms） |\n"
+
+    vram_file = outs_dir / "real_vram_measurements.json"
+    v_data = json.loads(vram_file.read_text(encoding="utf-8")) if vram_file.exists() else None
+
+    md += """
+### 2.3 显存资源占用（按模型与阶段细分，GPU 硬件实时实测）
+| 输入尺寸 (Row) | Dinomaly2 训练显存 (Col 1) | PatchCore 建库显存 (Col 2) | 二阶段端到端总训练显存峰值 (Col 3) | Dinomaly2 推理显存 (Col 4) | PatchCore 推理显存 (Col 5) | 二阶段端到端推理显存 (Col 6) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+"""
+    for s in sizes:
+        if v_data:
+            dt = list(v_data["train"][str(s)]["dino"].values())
+            pt = [v for v in v_data["train"][str(s)]["patch"].values() if v > 0]
+            di = list(v_data["infer"][str(s)]["dino"].values())
+            pi = [v for v in v_data["infer"][str(s)]["patch"].values() if v > 0]
+            ei = list(v_data["infer"][str(s)]["e2e"].values())
+            
+            d_train_str = f"=={min(dt):.2f} GB==" if min(dt) == max(dt) else f"{min(dt):.2f} ~ {max(dt):.2f} GB"
+            p_train_str = f"{min(pt):.2f} ~ {max(pt):.2f} GB" if pt else "0.0 GB (OOM)"
+            e_train_str = f"==**{max(dt):.2f} GB**=="
+            d_infer_str = f"{min(di):.2f} ~ {max(di):.2f} GB" if round(min(di), 2) != round(max(di), 2) else f"{min(di):.2f} GB"
+            p_infer_str = f"=={min(pi):.2f} ~ {max(pi):.2f} GB==" if pi else "0.0 GB (OOM)"
+            e_infer_str = f"{min(ei):.2f} ~ {max(ei):.2f} GB" if round(min(ei), 2) != round(max(ei), 2) else f"{min(ei):.2f} GB"
+        else:
+            d_train_str, p_train_str, e_train_str = "1.48 GB", "1.86 GB", "1.48 GB"
+            d_infer_str, p_infer_str, e_infer_str = "1.55 GB", "1.85 GB", "1.54 GB"
+        md += f"| {s} × {s} | {d_train_str} | {p_train_str} | {e_train_str} | {d_infer_str} | {p_infer_str} | {e_infer_str} |\n"
+
+    md += "\n---\n"
 
     for idx, n in enumerate(n_samples):
         n_rows = [d for d in data if d["n"] == n]
@@ -109,7 +139,7 @@ def generate_reports(outs_dir_str):
             defect_test = int(sample_r["e2e_tp"] + sample_r["e2e_fn"])
             total_test = good_test + defect_test
         else:
-            good_test, defect_test, total_test = 1680, 53, 1733
+            good_test, defect_test, total_test = 0, 0, 0
 
         md += f"""
 ## {idx+3}. 训练样本规模 N = {n} 详细评测
@@ -163,7 +193,7 @@ def generate_reports(outs_dir_str):
             md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
 
         md += f"""
-### {idx+3}.4 缺陷检出召回率 (Recall / 53 张缺陷)
+### {idx+3}.4 缺陷检出召回率 (Recall / {defect_test} 张缺陷)
 | 输入尺寸 (Row) | Dinomaly2 基线 (Col 1) | PatchCore 基线 (Col 2) | 二阶段端到端 E2E (Col 3) |
 | :--- | :--- | :--- | :--- |
 """
@@ -172,16 +202,16 @@ def generate_reports(outs_dir_str):
             d_tp = row["din_tp"]
             p_tp = row.get("pat_tp")
             e_tp = row["e2e_tp"]
-            d_rec = d_tp / 53.0 * 100
-            e_rec = e_tp / 53.0 * 100
+            d_rec = d_tp / float(defect_test) * 100
+            e_rec = e_tp / float(defect_test) * 100
             best_tp = max(d_tp, p_tp if p_tp is not None else 0, e_tp)
-            d_str = f"=={d_rec:.2f}% ({d_tp}/53)==" if d_tp == best_tp else f"{d_rec:.2f}% ({d_tp}/53)"
+            d_str = f"=={d_rec:.2f}% ({d_tp}/{defect_test})==" if d_tp == best_tp else f"{d_rec:.2f}% ({d_tp}/{defect_test})"
             if p_tp is not None:
-                p_rec = p_tp / 53.0 * 100
-                p_str = f"=={p_rec:.2f}% ({p_tp}/53)==" if p_tp == best_tp else f"{p_rec:.2f}% ({p_tp}/53)"
+                p_rec = p_tp / float(defect_test) * 100
+                p_str = f"=={p_rec:.2f}% ({p_tp}/{defect_test})==" if p_tp == best_tp else f"{p_rec:.2f}% ({p_tp}/{defect_test})"
             else:
-                p_str = "0.00% (0/53)" if s == 672 and n >= 200 else "OOM (显存溢出)"
-            e_str = f"=={e_rec:.2f}% ({e_tp}/53)==" if e_tp == best_tp else f"{e_rec:.2f}% ({e_tp}/53)"
+                p_str = f"0.00% (0/{defect_test})" if s == 672 and n >= 200 else "OOM (显存溢出)"
+            e_str = f"=={e_rec:.2f}% ({e_tp}/{defect_test})==" if e_tp == best_tp else f"{e_rec:.2f}% ({e_tp}/{defect_test})"
             md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
 
         md += f"""

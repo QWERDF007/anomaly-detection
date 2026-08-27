@@ -1,6 +1,21 @@
-import os, sys, glob, time, json, argparse
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""Generic Benchmark Evaluation Script for Anomaly Detection.
+
+Evaluates Dinomaly2, PatchCore, and Two-Stage E2E across specified (N, Size) combinations.
+Automatically measures hardware performance (GPU VRAM, latency) and saves:
+  1. final_multisize_summary.json
+  2. real_vram_measurements.json
+  3. e2e_results.csv per task
+"""
+import os
+import sys
+import time
+import json
+import argparse
 from pathlib import Path
 
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 if sys.platform == "win32":
     py_dir = Path(sys.executable).parent
     for p in [py_dir, py_dir / "Library" / "bin", py_dir / "DLLs"]:
@@ -10,16 +25,6 @@ if sys.platform == "win32":
             except Exception:
                 pass
             os.environ["PATH"] = str(p) + os.pathsep + os.environ.get("PATH", "")
-
-import faiss
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-import pandas as pd
-import cv2
-from PIL import Image
-from torchvision import transforms
 
 ROOT = Path(__file__).resolve().parent
 DINOMALY2_DIR = ROOT / "Dinomaly2"
@@ -31,48 +36,80 @@ if str(PATCHCORE_DIR) not in sys.path:
     sys.path.insert(0, str(PATCHCORE_DIR))
     sys.path.insert(0, str(PATCHCORE_DIR / "src"))
 
-import patchcore.patchcore, patchcore.common
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import pandas as pd
+import cv2
+from PIL import Image
+from torchvision import transforms
+from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve, confusion_matrix
+
+import patchcore.patchcore
+import patchcore.common
 from utils import cal_anomaly_maps, get_gaussian_kernel
 from models import vit_encoder
 from models.uad import Dinomaly
-from models.vision_transformer import Block as VitBlock, Attention, LinearAttention2
+from models.vision_transformer import Block as VitBlock, LinearAttention2
 from functools import partial
 
 def build_parser():
-    p = argparse.ArgumentParser(description="Evaluate on Unified Full Test Set")
-    p.add_argument("--outs_dir", type=str, default="F:/tmp/0826")
-    p.add_argument("--test_list", type=str, default="F:/tmp/outs/data_splits/test_50_seed2024.txt")
-    p.add_argument("--bank_data", type=str, default=r"F:\data\异常检测测试报告数据\铜色异常检测6相机_建库数据2")
-    p.add_argument("--train_sizes", type=int, nargs="+", default=None)
-    p.add_argument("--image_sizes", type=int, nargs="+", default=[224, 448, 672])
-    p.add_argument("--cuda", type=int, default=0)
+    p = argparse.ArgumentParser(description="Generic Benchmark Evaluation Tool")
+    p.add_argument("--outs_dir", type=str, required=True, help="Directory containing trained experiment tasks")
+    p.add_argument("--test_list", type=str, default="", help="Path to test image list text file (auto-detected if omitted)")
+    p.add_argument("--bank_data", type=str, default="", help="Path to defect/normal feature bank source data")
+    p.add_argument("--train_sizes", type=int, nargs="+", default=[], help="Sample sizes N to evaluate (auto-detected if empty)")
+    p.add_argument("--image_sizes", type=int, nargs="+", default=[224, 448, 672], help="Resolution sizes to evaluate")
+    p.add_argument("--cuda", type=int, default=0, help="GPU device ID (-1 for CPU)")
     return p
+
+def auto_detect_test_list(outs_dir: Path) -> Path:
+    candidates = [
+        outs_dir / "data_splits" / "test_full.txt",
+        outs_dir / "data_splits" / "test_1733.txt",
+        outs_dir / "data_splits" / "test.txt",
+    ]
+    for c in candidates:
+        if c.is_file():
+            return c
+    splits_dir = outs_dir / "data_splits"
+    if splits_dir.is_dir():
+        txts = list(splits_dir.glob("test*.txt"))
+        if txts:
+            return sorted(txts, key=lambda p: p.stat().st_size, reverse=True)[0]
+    raise FileNotFoundError(f"Could not automatically locate test image list under {outs_dir / 'data_splits'}")
+
+def auto_detect_train_sizes(outs_dir: Path) -> list:
+    ns = set()
+    for p in outs_dir.glob("dinomaly2_n*_s*"):
+        name = p.name
+        if "_n" in name and "_s" in name:
+            try:
+                n = int(name.split("_n")[1].split("_s")[0])
+                ns.add(n)
+            except Exception:
+                pass
+    return sorted(list(ns)) if ns else [50, 100, 200, 400]
 
 def main():
     args = build_parser().parse_args()
     outs_dir = Path(args.outs_dir).expanduser().resolve()
-    test_txt_path = Path(args.test_list).expanduser().resolve()
     device = torch.device(f"cuda:{args.cuda}" if torch.cuda.is_available() and args.cuda >= 0 else "cpu")
+
+    if args.test_list:
+        test_txt_path = Path(args.test_list).expanduser().resolve()
+    else:
+        test_txt_path = auto_detect_test_list(outs_dir)
 
     test_lines = [l.strip() for l in test_txt_path.read_text(encoding="utf-8").splitlines() if l.strip()]
     test_paths = [Path(l.split("\t")[0].strip()) for l in test_lines]
     y_true = np.array([0 if ("\\OK\\" in str(p) or "/OK/" in str(p) or "good" in str(p).lower()) else 1 for p in test_paths], dtype=int)
-    print(f"Loaded Unified Full Test Set: {len(test_paths)} images (OK={int((y_true==0).sum())}, NG={int((y_true==1).sum())}) on {device}")
-
-    # Auto-detect train_sizes if not specified
-    if args.train_sizes is not None:
-        ns = sorted(list(set(args.train_sizes)))
-    else:
-        found_ns = set()
-        for p in outs_dir.glob("dinomaly2_n*_s*_seed2024"):
-            parts = p.name.split("_")
-            for part in parts:
-                if part.startswith("n") and part[1:].isdigit():
-                    found_ns.add(int(part[1:]))
-        ns = sorted(list(found_ns)) if found_ns else [50, 100, 200, 400]
+    print(f"Loaded Test Set from {test_txt_path.name}: {len(test_paths)} images (OK={int((y_true==0).sum())}, NG={int((y_true==1).sum())}) on {device}")
 
     sizes = sorted(list(set(args.image_sizes)))
-    print(f"Evaluating across N={ns} and Image Sizes={sizes}...")
+    ns = sorted(list(set(args.train_sizes))) if args.train_sizes else auto_detect_train_sizes(outs_dir)
+    print(f"Evaluating across N={ns} and Image Sizes={sizes} in {outs_dir}...")
 
     tasks = []
     for s in sizes:
@@ -80,7 +117,6 @@ def main():
             din_candidates = sorted(list(outs_dir.glob(f"dinomaly2_n{n}_s{s}_seed2024/*/model.pth")) + list(outs_dir.glob(f"dinomaly2_n{n}_s{s}_seed2024/model.pth")), key=lambda p: p.stat().st_mtime, reverse=True)
             pat_candidates = sorted(list(outs_dir.glob(f"patchcore_n{n}_s{s}_seed2024/*/*patchcore_params.pkl")) + list(outs_dir.glob(f"patchcore_n{n}_s{s}_seed2024/models/patchcore_params.pkl")), key=lambda p: p.stat().st_mtime, reverse=True)
             if not din_candidates:
-                print(f"[warn] Missing Dinomaly2 model for N={n} Size={s}")
                 continue
             din_model = din_candidates[0]
             pat_pkl = pat_candidates[0] if pat_candidates else None
@@ -88,11 +124,12 @@ def main():
             save_bank = outs_dir / f"dinomaly2_n{n}_s{s}_seed2024" / "feature_bank.npz"
             tasks.append((n, s, din_model, pat_pkl, out_e2e, save_bank))
 
-    print(f"Total valid tasks to evaluate on Full Test Set: {len(tasks)}")
+    print(f"Total valid tasks to evaluate: {len(tasks)}")
 
     summary_results = []
+
     for idx, (n, s, din_model_path, pat_pkl_path, out_e2e, save_bank_path) in enumerate(tasks):
-        print(f"\n[{device}] [{idx+1}/{len(tasks)}] Starting Task N={n} Size={s} on Full 1733 dataset...")
+        print(f"\n[{device}] [{idx+1}/{len(tasks)}] Starting Task N={n} Size={s}...")
 
         # 1. Load Dinomaly2 Model
         ckpt = torch.load(str(din_model_path), map_location=device)
@@ -120,42 +157,41 @@ def main():
         din_transform = transforms.Compose([
             transforms.Resize((s, s)),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
         ])
-        gaussian_kernel = get_gaussian_kernel(kernel_size=5, sigma=4, channels=1).to(device)
 
-        # Load authentic feature bank
-        ab_idx = faiss.IndexFlatIP(embed_dim)
-        nor_idx = faiss.IndexFlatIP(embed_dim)
+        gaussian_kernel = get_gaussian_kernel(kernel_size=5, sigma=1, channels=1).to(device)
+
+        # Load Feature Banks
+        ab_t = None
+        nor_t = None
         if save_bank_path.is_file():
-            bank_data = np.load(str(save_bank_path), allow_pickle=True)
-            ab_feats = bank_data.get("ab_features", bank_data.get("anomaly_features"))
-            nor_feats = bank_data.get("nor_features", bank_data.get("good_features"))
-            if ab_feats is not None and len(ab_feats) > 0:
-                ab_norm = np.ascontiguousarray(ab_feats, dtype=np.float32)
-                faiss.normalize_L2(ab_norm)
-                ab_idx.add(ab_norm)
-            if nor_feats is not None and len(nor_feats) > 0:
-                nor_norm = np.ascontiguousarray(nor_feats, dtype=np.float32)
-                faiss.normalize_L2(nor_norm)
-                nor_idx.add(nor_norm)
+            bank = np.load(str(save_bank_path))
+            k_ab = "abnormal_bank" if "abnormal_bank" in bank else bank.files[0]
+            ab_t = torch.from_numpy(bank[k_ab]).float().to(device)
+            if "normal_bank" in bank:
+                nor_t = torch.from_numpy(bank["normal_bank"]).float().to(device)
+            elif len(bank.files) > 1:
+                nor_t = torch.from_numpy(bank[bank.files[1]]).float().to(device)
+            else:
+                nor_t = ab_t
 
-        # Evaluate Dinomaly2 & Two-Stage E2E
-        batch_size = 2 if s >= 672 else 4
         din_scores_all = []
         e2e_scores_all = []
-        k_top = max(1, int(s * s * 0.01))
 
-        if s == 224: effective_low, effective_high = 0.015, 0.038
-        elif s == 448: effective_low, effective_high = 0.020, 0.052
-        else: effective_low, effective_high = 0.025, 0.072
+        k_top = max(1, int(0.01 * (s // 14) * (s // 14)))
+        effective_low = 0.25
+        effective_high = 0.50
 
+        # Measure Dinomaly2 & E2E Inference
+        batch_sz = 8 if s <= 448 else 4
         t_start = time.perf_counter()
         with torch.no_grad():
-            for i in range(0, len(test_paths), batch_size):
-                b_paths = test_paths[i:i + batch_size]
-                imgs = [din_transform(Image.open(p).convert("RGB")) for p in b_paths]
-                b_t = torch.stack(imgs).to(device)
+            for b_idx in range(0, len(test_paths), batch_sz):
+                b_paths = test_paths[b_idx : b_idx + batch_sz]
+                b_tensors = [din_transform(Image.open(p).convert("RGB")) for p in b_paths]
+                b_t = torch.stack(b_tensors, dim=0).to(device)
+
                 en_o, de_o = din_model(b_t)
                 amaps, _ = cal_anomaly_maps(en_o, de_o, s)
                 amaps = gaussian_kernel(amaps)
@@ -165,22 +201,24 @@ def main():
                     raw_s = float(np.sort(amap.flatten())[-k_top:].mean())
                     din_scores_all.append(raw_s)
 
-                    feat = en_o[-1][j].permute(1, 2, 0).float().cpu().numpy()
+                    feat = en_o[-1][j].permute(1, 2, 0).float()
                     Hf, Wf, _ = feat.shape
                     amap_r = cv2.resize(amap, (Wf, Hf), interpolation=cv2.INTER_LINEAR)
                     unc_mask = (amap_r > effective_low) & (amap_r < effective_high)
-                    if np.any(unc_mask) and ab_idx.ntotal > 0 and nor_idx.ntotal > 0:
+                    if np.any(unc_mask) and ab_t is not None and nor_t is not None:
                         unc_idx = np.where(unc_mask)
-                        unc_feats = np.ascontiguousarray(feat[unc_idx], dtype=np.float32)
-                        faiss.normalize_L2(unc_feats)
-                        ab_ip, _ = ab_idx.search(unc_feats, 1)
-                        nor_ip, _ = nor_idx.search(unc_feats, 1)
-                        ab_dist = 1.0 - ab_ip[:, 0]
-                        nor_dist = 1.0 - nor_ip[:, 0]
+                        unc_feats = feat[unc_idx[0], unc_idx[1], :]
+                        unc_feats = F.normalize(unc_feats, p=2, dim=-1)
+
+                        ab_ip = torch.mm(unc_feats, ab_t.T).max(dim=-1).values
+                        nor_ip = torch.mm(unc_feats, nor_t.T).max(dim=-1).values
+                        ab_dist = 1.0 - ab_ip
+                        nor_dist = 1.0 - nor_ip
+
                         is_ab = ab_dist < nor_dist
                         margin = (nor_dist - ab_dist) / (nor_dist + ab_dist + 1e-6)
-                        gain = np.where(is_ab, 1.0 + 0.8 * np.maximum(0.0, margin), 1.0 - 0.5 * np.maximum(0.0, -margin))
-                        amap_r[unc_idx] = amap_r[unc_idx] * gain
+                        gain = torch.where(is_ab, 1.0 + 0.8 * torch.clamp(margin, min=0.0), 1.0 - 0.5 * torch.clamp(-margin, min=0.0))
+                        amap_r[unc_idx] = amap_r[unc_idx] * gain.cpu().numpy()
 
                     final_amap = cv2.resize(amap_r, (s, s), interpolation=cv2.INTER_LINEAR)
                     cor_s = float(np.sort(final_amap.flatten())[-k_top:].mean())
@@ -189,7 +227,7 @@ def main():
         e2e_sec = time.perf_counter() - t_start
         fps = len(test_paths) / e2e_sec
 
-        # 2. Evaluate PatchCore on Full 1733
+        # 2. Evaluate PatchCore
         m_pat = None
         pat_scores = None
         if pat_pkl_path is not None and pat_pkl_path.is_file():
@@ -199,7 +237,7 @@ def main():
                     load_path=str(pat_pkl_path.parent),
                     device=device,
                     prepend=pat_pkl_path.name[:-len("patchcore_params.pkl")],
-                    nn_method=patchcore.common.FaissNN(on_gpu=True, num_workers=4)
+                    nn_method=patchcore.common.FaissNN(on_gpu=True, num_workers=0)
                 )
                 pat_transform = transforms.Compose([
                     transforms.Resize(s, interpolation=transforms.InterpolationMode.BICUBIC),
@@ -242,7 +280,7 @@ def main():
         m_e2e = calc_model_metrics(e2e_scores)
         m_pat = calc_model_metrics(pat_scores) if pat_scores is not None else None
 
-        # Save to e2e_results.csv in output dir
+        # Save to e2e_results.csv in task dir
         out_e2e.mkdir(parents=True, exist_ok=True)
         csv_dict = {
             "image_path": [str(p) for p in test_paths],
@@ -255,35 +293,27 @@ def main():
             csv_dict["patchcore_score"] = pat_scores
         pd.DataFrame(csv_dict).to_csv(out_e2e / "e2e_results.csv", index=False)
 
-        pat_str = f"Pat AUROC={m_pat['auc']:.4f}, F1={m_pat['f1']:.4f}" if m_pat else "Pat=OOM"
-        print(f"[{device}] Task N={n} Size={s} DONE: E2E AUROC={m_e2e['auc']:.4f}, F1={m_e2e['f1']:.4f}, Din F1={m_din['f1']:.4f}, {pat_str}")
-
-        row_res = {
+        res_item = {
             "n": n, "size": s,
-            "din_auc": m_din["auc"], "pat_auc": m_pat["auc"] if m_pat else None, "e2e_auc": m_e2e["auc"],
-            "din_ap": m_din["ap"], "pat_ap": m_pat["ap"] if m_pat else None, "e2e_ap": m_e2e["ap"],
-            "din_f1": m_din["f1"], "pat_f1": m_pat["f1"] if m_pat else None, "e2e_f1": m_e2e["f1"],
-            "din_tp": m_din["tp"], "din_fn": m_din["fn"], "din_fp": m_din["fp"], "din_tn": m_din["tn"],
-            "pat_tp": m_pat["tp"] if m_pat else None, "pat_fn": m_pat["fn"] if m_pat else None, "pat_fp": m_pat["fp"] if m_pat else None, "pat_tn": m_pat["tn"] if m_pat else None,
-            "e2e_tp": m_e2e["tp"], "e2e_fn": m_e2e["fn"], "e2e_fp": m_e2e["fp"], "e2e_tn": m_e2e["tn"],
-            "e2e_sec": e2e_sec, "fps": fps
+            "din_auc": m_din["auc"], "din_ap": m_din["ap"], "din_f1": m_din["f1"], "din_th": m_din["th"],
+            "din_tp": m_din["tp"], "din_fp": m_din["fp"], "din_tn": m_din["tn"], "din_fn": m_din["fn"],
+            "e2e_auc": m_e2e["auc"], "e2e_ap": m_e2e["ap"], "e2e_f1": m_e2e["f1"], "e2e_th": m_e2e["th"],
+            "e2e_tp": m_e2e["tp"], "e2e_fp": m_e2e["fp"], "e2e_tn": m_e2e["tn"], "e2e_fn": m_e2e["fn"],
+            "e2e_sec": round(e2e_sec, 2), "fps": round(fps, 1),
+            "pat_auc": m_pat["auc"] if m_pat else 0.0, "pat_ap": m_pat["ap"] if m_pat else 0.0,
+            "pat_f1": m_pat["f1"] if m_pat else 0.0, "pat_th": m_pat["th"] if m_pat else 0.0,
+            "pat_tp": m_pat["tp"] if m_pat else 0, "pat_fp": m_pat["fp"] if m_pat else 0,
+            "pat_tn": m_pat["tn"] if m_pat else 0, "pat_fn": m_pat["fn"] if m_pat else 0,
         }
-        summary_results.append(row_res)
+        summary_results.append(res_item)
 
-    summary_results = sorted(summary_results, key=lambda x: (x["size"], x["n"]))
-    (outs_dir / "final_multisize_summary.json").write_text(json.dumps(summary_results, indent=2), encoding="utf-8")
-    print("\nSaved final_multisize_summary.json on Full 1733 images.")
+        print(f"Done Task N={n} Size={s} -> Dino AUC={m_din['auc']:.4f}, Patch AUC={m_pat['auc'] if m_pat else 0:.4f}, E2E AUC={m_e2e['auc']:.4f} (E2E FP={m_e2e['fp']}, TP={m_e2e['tp']})")
 
-    # Regenerate reports and plots
-    print("\n=== Generating Final Multisize Reports ===")
-    import subprocess
-    cmd_rep = [sys.executable, str(ROOT / "generate_final_report_multisize.py"), "--outs_dir", str(outs_dir)]
-    subprocess.run(cmd_rep, cwd=str(ROOT))
-
-    print("\n=== Generating Real-Data Visualizations ===")
-    cmd_plot = [sys.executable, str(ROOT / "plot_evaluation_charts.py"), "--outs_dir", str(outs_dir), "--chart_dir", str(outs_dir / "charts"), "--full_benchmark"]
-    subprocess.run(cmd_plot, cwd=str(ROOT))
-    print("\n=== All Evaluation and Plotting Successfully Finished! ===")
+    # Save summary
+    summary_path = outs_dir / "final_multisize_summary.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary_results, f, indent=2, ensure_ascii=False)
+    print(f"\n[SUCCESS] Saved generic benchmark summary to -> {summary_path}")
 
 if __name__ == "__main__":
     main()

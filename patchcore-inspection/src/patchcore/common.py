@@ -74,9 +74,12 @@ class FaissNN(object):
     def _index_to_gpu(self, index):
         if self.on_gpu and hasattr(faiss, "index_cpu_to_gpu"):
             try:
+                dev_id = self.device_id.index if hasattr(self.device_id, 'index') and self.device_id.index is not None else int(self.device_id if isinstance(self.device_id, int) else 0)
+                res = faiss.StandardGpuResources()
+                res.setTempMemory(32 * 1024 * 1024)
                 return faiss.index_cpu_to_gpu(
-                    faiss.StandardGpuResources(),
-                    self.device_id,
+                    res,
+                    dev_id,
                     index,
                     self._gpu_cloner_options(),
                 )
@@ -97,9 +100,11 @@ class FaissNN(object):
     def _create_index(self, dimension):
         if self.on_gpu and hasattr(faiss, "GpuIndexFlatL2"):
             try:
+                dev_id = self.device_id.index if hasattr(self.device_id, 'index') and self.device_id.index is not None else int(self.device_id if isinstance(self.device_id, int) else 0)
                 res = faiss.StandardGpuResources()
+                res.setTempMemory(32 * 1024 * 1024)
                 cfg = faiss.GpuIndexFlatConfig()
-                cfg.device = self.device_id
+                cfg.device = dev_id
                 return faiss.GpuIndexFlatL2(res, dimension, cfg)
             except Exception as exc:
                 LOGGER.warning("GpuIndexFlatL2 creation failed (%s), falling back to faiss-cpu IndexFlatL2", exc)
@@ -149,7 +154,7 @@ class FaissNN(object):
         faiss.write_index(self._index_to_cpu(self.search_index), filename)
 
     def load(self, filename: str) -> None:
-        self.search_index = self._index_to_gpu(faiss.read_index(filename))
+        self.search_index = self._index_to_gpu(faiss.read_index(filename, faiss.IO_FLAG_MMAP))
 
     def reset_index(self):
         if self.search_index:
