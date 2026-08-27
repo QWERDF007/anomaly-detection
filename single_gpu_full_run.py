@@ -117,22 +117,20 @@ def main():
                 if not ok:
                     log(f"FAILED PatchCore N={n} SZ={sz}")
                 results.append({"step":"patchcore_train", "n":n, "sz":sz, "elapsed":elapsed, "ok":ok})
-            # Build bank (if dinomaly model exists)
+            # Build bank (freshly build Two-Stage feature bank & GPU FAISS index)
             d_models = list(d_save.rglob("model.pth")) if d_save.is_dir() else []
             if d_models:
                 model = sorted(d_models, key=lambda p: p.stat().st_mtime, reverse=True)[0]
                 bank_npz = d_save / "feature_bank.npz"
-                if bank_npz.is_file():
-                    log(f"Skip bank N={n} SZ={sz} exists {bank_npz}")
-                else:
-                    cmd = [str(PYTHON), str(ROOT / "two_stage" / "build_bank.py"),
-                           "--model", str(model),
-                           "--data_dir", r"F:\data\异常检测测试报告数据\铜色异常检测6相机_建库数据",
-                           "--save_bank", str(bank_npz),
-                           "--image_size", str(sz),
-                           "--cuda", str(args.cuda)]
-                    ok, elapsed = run_cmd(cmd, cwd=str(ROOT))
-                    results.append({"step":"build_bank", "n":n, "sz":sz, "elapsed":elapsed, "ok":ok})
+                cmd = [str(PYTHON), str(ROOT / "two_stage" / "build_bank.py"),
+                       "--model", str(model),
+                       "--data_dir", r"F:\data\异常检测测试报告数据\铜色异常检测6相机_建库数据",
+                       "--save_bank", str(bank_npz),
+                       "--save_dir", str(d_save),
+                       "--image_size", str(sz),
+                       "--cuda", str(args.cuda)]
+                ok, elapsed = run_cmd(cmd, cwd=str(ROOT))
+                results.append({"step":"build_bank", "n":n, "sz":sz, "elapsed":elapsed, "ok":ok})
             else:
                 log(f"No dinomaly model for bank N={n} SZ={sz}")
 

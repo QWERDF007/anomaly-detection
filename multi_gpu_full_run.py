@@ -117,19 +117,19 @@ def _worker_process(gpu_id: int, task_queue: mp.Queue, result_queue: mp.Queue, o
                    "--gpu", str(gpu_id)]
             run_cmd(cmd, cwd=str(ROOT / "patchcore-inspection"))
 
-        # 3. Two-Stage Feature Bank Building
+        # 3. Two-Stage Feature Bank Building (Fresh GPU FAISS index generation)
         d_models = list(d_save.rglob("model.pth")) if d_save.is_dir() else []
         if d_models:
             model_path = sorted(d_models, key=lambda p: p.stat().st_mtime, reverse=True)[0]
             bank_npz = d_save / "feature_bank.npz"
-            if not bank_npz.is_file():
-                cmd = [str(PYTHON), str(ROOT / "two_stage" / "build_bank.py"),
-                       "--model", str(model_path),
-                       "--data_dir", str(bank_data),
-                       "--save_bank", str(bank_npz),
-                       "--image_size", str(sz),
-                       "--cuda", str(gpu_id)]
-                run_cmd(cmd, cwd=str(ROOT))
+            cmd = [str(PYTHON), str(ROOT / "two_stage" / "build_bank.py"),
+                   "--model", str(model_path),
+                   "--data_dir", str(bank_data),
+                   "--save_bank", str(bank_npz),
+                   "--save_dir", str(d_save),
+                   "--image_size", str(sz),
+                   "--cuda", str(gpu_id)]
+            run_cmd(cmd, cwd=str(ROOT))
 
             # 4. Two-Stage E2E Inference & Evaluation
             cmd = [str(PYTHON), str(ROOT / "run_e2e.py"),
