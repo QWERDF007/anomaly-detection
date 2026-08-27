@@ -50,7 +50,7 @@ def main():
     parser.add_argument("--dataset_root", type=str, default=r"F:\data\异常检测测试报告数据\透气膜")
     parser.add_argument("--bank_data", type=str, default=r"F:\data\异常检测测试报告数据\透气膜\建库数据")
     parser.add_argument("--outs_dir", type=str, default=r"F:\tmp\0827")
-    parser.add_argument("--train_sizes", type=int, nargs="+", default=[50, 100, 200])
+    parser.add_argument("--train_sizes", type=int, nargs="+", default=[50, 100, 150])
     parser.add_argument("--image_sizes", type=int, nargs="+", default=[224, 448, 672])
     parser.add_argument("--max_iters", type=int, default=2000)
     parser.add_argument("--cuda", type=int, default=0)
@@ -78,8 +78,8 @@ def main():
         str(PYTHON), str(ROOT / "prepare_splits.py"),
         "--dataset_root", str(dataset_root),
         "--outs_dir", str(outs_dir),
-        "--ok_names", "OK", "ok", "good", "normal", "建库数据",
-        "--ignore_names", "none",
+        "--ok_names", "OK", "ok", "good", "normal",
+        "--ignore_names", "建库数据", "建库数据2", "bank", "bank_data",
         "--train_sizes"
     ] + [str(n) for n in args.train_sizes] + ["--seeds", "2024", "2025", "2026"]
     run_cmd(cmd, cwd=str(ROOT))
