@@ -151,10 +151,22 @@ class FaissNN(object):
         return search_index.search(query_features, n_nearest_neighbours)
 
     def save(self, filename: str) -> None:
-        faiss.write_index(self._index_to_cpu(self.search_index), filename)
+        cpu_idx = self._index_to_cpu(self.search_index)
+        try:
+            faiss.write_index(cpu_idx, filename)
+        except Exception:
+            chunk = faiss.serialize_index(cpu_idx)
+            with open(filename, "wb") as f:
+                f.write(chunk)
 
     def load(self, filename: str) -> None:
-        self.search_index = self._index_to_gpu(faiss.read_index(filename, faiss.IO_FLAG_MMAP))
+        try:
+            raw_idx = faiss.read_index(filename, faiss.IO_FLAG_MMAP)
+        except Exception:
+            with open(filename, "rb") as f:
+                buf = f.read()
+            raw_idx = faiss.deserialize_index(np.frombuffer(buf, dtype=np.uint8))
+        self.search_index = self._index_to_gpu(raw_idx)
 
     def reset_index(self):
         if self.search_index:
