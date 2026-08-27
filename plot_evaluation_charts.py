@@ -878,7 +878,7 @@ def plot_all_benchmark_charts(
         training_time_measured[s] = {"dino": [], "patch": [], "bank": []}
         for n in n_samples:
             # Dino
-            d_cands = sorted(list(outs_dir.glob(f"dinomaly2_n{n}_s{s}_seed2024/*/model.pth")), key=lambda p: p.stat().st_mtime, reverse=True)
+            d_cands = sorted(list(outs_dir.glob(f"dinomaly2_n{n}_s{s}_*/**/model.pth")) + list(outs_dir.glob(f"dinomaly2_n{n}_s{s}_*/model.pth")), key=lambda p: p.stat().st_mtime, reverse=True)
             if d_cands:
                 p = d_cands[0]
                 try:
@@ -892,7 +892,7 @@ def plot_all_benchmark_charts(
             training_time_measured[s]["dino"].append(d_m)
 
             # PatchCore
-            p_cands = sorted(list(outs_dir.glob(f"patchcore_n{n}_s{s}_seed2024/*/*patchcore_params.pkl")), key=lambda p: p.stat().st_mtime, reverse=True)
+            p_cands = sorted(list(outs_dir.glob(f"patchcore_n{n}_s{s}_*/**/patchcore_params.pkl")) + list(outs_dir.glob(f"patchcore_n{n}_s{s}_*/**/patchcore_params.pkl")), key=lambda p: p.stat().st_mtime, reverse=True)
             if p_cands:
                 p = p_cands[0]
                 try:

@@ -132,14 +132,15 @@ def main():
     tasks = []
     for s in sizes:
         for n in ns:
-            din_candidates = sorted(list(outs_dir.glob(f"dinomaly2_n{n}_s{s}_seed2024/*/model.pth")) + list(outs_dir.glob(f"dinomaly2_n{n}_s{s}_seed2024/model.pth")), key=lambda p: p.stat().st_mtime, reverse=True)
-            pat_candidates = sorted(list(outs_dir.glob(f"patchcore_n{n}_s{s}_seed2024/*/*patchcore_params.pkl")) + list(outs_dir.glob(f"patchcore_n{n}_s{s}_seed2024/models/patchcore_params.pkl")), key=lambda p: p.stat().st_mtime, reverse=True)
+            din_candidates = sorted(list(outs_dir.glob(f"dinomaly2_n{n}_s{s}_*/**/model.pth")) + list(outs_dir.glob(f"dinomaly2_n{n}_s{s}_*/model.pth")), key=lambda p: p.stat().st_mtime, reverse=True)
+            pat_candidates = sorted(list(outs_dir.glob(f"patchcore_n{n}_s{s}_*/**/patchcore_params.pkl")) + list(outs_dir.glob(f"patchcore_n{n}_s{s}_*/**/patchcore_params.pkl")), key=lambda p: p.stat().st_mtime, reverse=True)
+            bank_candidates = sorted(list(outs_dir.glob(f"dinomaly2_n{n}_s{s}_*/**/feature_bank.npz")) + list(outs_dir.glob(f"dinomaly2_n{n}_s{s}_*/feature_bank.npz")), key=lambda p: p.stat().st_mtime, reverse=True)
             if not din_candidates:
                 continue
             din_model = din_candidates[0]
             pat_pkl = pat_candidates[0] if pat_candidates else None
             out_e2e = outs_dir / f"e2e_out_n{n}_s{s}"
-            save_bank = outs_dir / f"dinomaly2_n{n}_s{s}_seed2024" / "feature_bank.npz"
+            save_bank = bank_candidates[0] if bank_candidates else (outs_dir / f"dinomaly2_n{n}_s{s}_seed2024" / "feature_bank.npz")
             tasks.append((n, s, din_model, pat_pkl, out_e2e, save_bank))
 
     print(f"Total valid tasks to evaluate: {len(tasks)}")
