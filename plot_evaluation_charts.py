@@ -547,72 +547,372 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
         plt.close(fig)
 
     # 7. VRAM Usage Across Different N
-    infer_vram_data = {
-        224: {
-            "dino": [0.45, 0.45, 0.45, 0.45],
-            "patch": [0.52, 0.58, 0.65, 0.72],
-            "e2e": [0.65, 0.65, 0.65, 0.65],
-            "ylim": [0, 1.2]
-        },
-        448: {
-            "dino": [0.82, 0.82, 0.82, 0.82],
-            "patch": [0.95, 1.15, 1.45, 8.0],  # N=400 hits 8.0G OOM
-            "e2e": [1.02, 1.02, 1.02, 1.02],
-            "ylim": [0, 9.8]
-        },
-        672: {
-            "dino": [1.25, 1.25, 1.25, 1.25],
-            "patch": [1.45, 1.85, 8.0, 8.5],  # N=200 hits 8.0G 打满降级, N=400 is >8.0G OOM
-            "e2e": [1.45, 1.45, 1.45, 1.45],
-            "ylim": [0, 9.8]
-        }
+def get_current_gpu_capacity(override_name: Optional[str] = None, override_vram_gb: Optional[float] = None) -> tuple[str, float]:
+    """Dynamically query the local GPU model and total memory capacity (GB)."""
+    if override_name and override_vram_gb:
+        return override_name, float(override_vram_gb)
+    try:
+        import torch
+        if torch.cuda.is_available():
+            dev_idx = torch.cuda.current_device()
+            raw_name = torch.cuda.get_device_name(dev_idx)
+            total_bytes = torch.cuda.get_device_properties(dev_idx).total_memory
+            total_gb = round(total_bytes / (1024 ** 3), 1)
+            # Simplify GPU name for clean chart labels
+            clean_name = raw_name.replace("NVIDIA ", "").replace("GeForce ", "").replace(" Laptop GPU", "").strip()
+            return clean_name or "GPU", total_gb
+    except Exception:
+        pass
+    return "RTX 4060", 8.0
+
+
+def plot_all_benchmark_charts(
+    outs_dir: Union[str, Path] = "F:\\tmp\\0826",
+    chart_dir: Optional[Union[str, Path]] = None,
+    gpu_name_override: Optional[str] = None,
+    gpu_vram_override: Optional[float] = None,
+) -> None:
+    """Generate the full multi-size comparison charts dynamically."""
+    outs_dir = Path(outs_dir)
+    chart_dir = Path(chart_dir or (outs_dir / "charts"))
+    chart_dir.mkdir(parents=True, exist_ok=True)
+
+    gpu_name, gpu_total_gb = get_current_gpu_capacity(gpu_name_override, gpu_vram_override)
+
+    sizes = [224, 448, 672]
+    n_samples = [50, 100, 200, 400]
+
+    # 1-4. Extract metrics from final_multisize_summary.json if available
+    summary_path = outs_dir / "final_multisize_summary.json"
+    metrics = {s: {"dinomaly_auc": [], "twostage_auc": [], "patchcore_auc": [],
+                   "dinomaly_f1": [], "twostage_f1": [], "patchcore_f1": [],
+                   "dinomaly_tp": [], "twostage_tp": [], "patchcore_tp": [],
+                   "dinomaly_fp": [], "twostage_fp": [], "patchcore_fp": []} for s in sizes}
+
+    if summary_path.is_file():
+        summary_data = json.loads(summary_path.read_text(encoding="utf-8"))
+        for item in summary_data:
+            s = item["size"]
+            if s in metrics:
+                metrics[s]["dinomaly_auc"].append(item["din_auc"])
+                metrics[s]["twostage_auc"].append(item["e2e_auc"])
+                metrics[s]["patchcore_auc"].append(item.get("pat_auc"))
+
+                metrics[s]["dinomaly_f1"].append(item["din_f1"])
+                metrics[s]["twostage_f1"].append(item["e2e_f1"])
+                metrics[s]["patchcore_f1"].append(item.get("pat_f1"))
+
+                metrics[s]["dinomaly_tp"].append(item["din_tp"])
+                metrics[s]["twostage_tp"].append(item["e2e_tp"])
+                metrics[s]["patchcore_tp"].append(item.get("pat_tp"))
+
+                metrics[s]["dinomaly_fp"].append(item["din_fp"])
+                metrics[s]["twostage_fp"].append(item["e2e_fp"])
+                metrics[s]["patchcore_fp"].append(item.get("pat_fp"))
+
+    # 1. AUROC Curve
+    for s in sizes:
+        fig, ax = plt.subplots(figsize=(7.5, 5.2))
+        d = metrics[s]
+        ax.plot(n_samples, d["dinomaly_auc"], marker="o", lw=2.2, label="Dinomaly2 (单阶段基线)", color="#1f77b4")
+        ax.plot(n_samples, d["twostage_auc"], marker="s", lw=2.5, label="二阶段端到端 (前向+GPU检索)", color="#2ca02c")
+        p_auc = [v for v in d["patchcore_auc"] if v is not None]
+        p_n = [n_samples[i] for i, v in enumerate(d["patchcore_auc"]) if v is not None]
+        if p_auc:
+            ax.plot(p_n, p_auc, marker="^", lw=2.0, linestyle="--", label="PatchCore (基线)", color="#d62728")
+        ax.set_title(f"图像级 AUROC 随训练样本量 N 变化曲线 ({s}×{s})", fontsize=12, fontweight="bold", pad=12)
+        ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
+        ax.set_ylabel("图像级 AUROC", fontsize=10.5)
+        ax.set_xticks(n_samples)
+        ax.set_ylim([0.80, 1.00])
+        ax.grid(True, linestyle=":", alpha=0.6)
+        ax.legend(loc="lower right", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
+        plt.tight_layout()
+        fig.savefig(chart_dir / f"01_image_auroc_curve_s{s}.png")
+        plt.close(fig)
+
+    # 2. F1-Score Curve
+    for s in sizes:
+        fig, ax = plt.subplots(figsize=(7.5, 5.2))
+        d = metrics[s]
+        ax.plot(n_samples, d["dinomaly_f1"], marker="o", lw=2.2, label="Dinomaly2 (单阶段基线)", color="#1f77b4")
+        ax.plot(n_samples, d["twostage_f1"], marker="s", lw=2.5, label="二阶段端到端 (前向+GPU检索)", color="#2ca02c")
+        p_f1 = [v for v in d["patchcore_f1"] if v is not None]
+        p_n = [n_samples[i] for i, v in enumerate(d["patchcore_f1"]) if v is not None]
+        if p_f1:
+            ax.plot(p_n, p_f1, marker="^", lw=2.0, linestyle="--", label="PatchCore (基线)", color="#d62728")
+        ax.set_title(f"图像级 F1-Score 随训练样本量 N 变化曲线 ({s}×{s})", fontsize=12, fontweight="bold", pad=12)
+        ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
+        ax.set_ylabel("图像级 F1-Score", fontsize=10.5)
+        ax.set_xticks(n_samples)
+        ax.set_ylim([0.30, 0.75])
+        ax.grid(True, linestyle=":", alpha=0.6)
+        ax.legend(loc="lower right", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
+        plt.tight_layout()
+        fig.savefig(chart_dir / f"02_image_f1_curve_s{s}.png")
+        plt.close(fig)
+
+    # 3. Standalone TP charts
+    for s in sizes:
+        fig, ax = plt.subplots(figsize=(7.5, 5.2))
+        d = metrics[s]
+        x = np.arange(len(n_samples))
+        w = 0.25
+        ax.bar(x - w, d["dinomaly_tp"], width=w, label="Dinomaly2 (最佳F1阈值)", color="#1f77b4", alpha=0.85)
+        ax.bar(x, d["twostage_tp"], width=w, label="二阶段端到端 (最佳F1平衡模式)", color="#2ca02c", alpha=0.85)
+        p_tp = [v if v is not None else 0 for v in d["patchcore_tp"]]
+        ax.bar(x + w, p_tp, width=w, label="PatchCore (最佳阈值)", color="#d62728", alpha=0.85)
+        ax.axhline(53, color="#7f7f7f", linestyle="--", lw=1.2, label="缺陷总数 (53)")
+        for i in range(len(n_samples)):
+            ax.text(x[i] - w, d["dinomaly_tp"][i] + 0.8, f"{d['dinomaly_tp'][i]}", ha="center", va="bottom", fontsize=8.5)
+            ax.text(x[i], d["twostage_tp"][i] + 0.8, f"{d['twostage_tp'][i]}", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+            ax.text(x[i] + w, p_tp[i] + 0.8, f"{p_tp[i]}", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+
+        ax.set_title(f"缺陷样本准确检出数 TP 对比 ({s}×{s})", fontsize=12, fontweight="bold", pad=12)
+        ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
+        ax.set_ylabel("检出缺陷数 (TP)", fontsize=10.5)
+        ax.set_xticks(x)
+        ax.set_xticklabels(n_samples)
+        ax.set_ylim([0, 60])
+        ax.grid(True, linestyle=":", alpha=0.6, axis="y")
+        ax.legend(loc="lower right", fontsize=9.0, frameon=True, facecolor="#f8f9fa")
+        plt.tight_layout()
+        fig.savefig(chart_dir / f"03_defect_detection_tp_s{s}.png")
+        plt.close(fig)
+
+    # 4. Standalone FP charts
+    for s in sizes:
+        fig, ax = plt.subplots(figsize=(7.5, 5.2))
+        d = metrics[s]
+        x = np.arange(len(n_samples))
+        w = 0.25
+        ax.bar(x - w, d["dinomaly_fp"], width=w, label="Dinomaly2 (最佳F1阈值)", color="#1f77b4", alpha=0.85)
+        ax.bar(x, d["twostage_fp"], width=w, label="二阶段端到端 (最佳F1平衡模式)", color="#2ca02c", alpha=0.85)
+        p_fp = [v if v is not None else 0 for v in d["patchcore_fp"]]
+        ax.bar(x + w, p_fp, width=w, label="PatchCore (最佳阈值)", color="#d62728", alpha=0.85)
+
+        for i in range(len(n_samples)):
+            ax.text(x[i] - w, d["dinomaly_fp"][i] + 1.2, f"{d['dinomaly_fp'][i]}", ha="center", va="bottom", fontsize=8.5)
+            ax.text(x[i], d["twostage_fp"][i] + 1.2, f"{d['twostage_fp'][i]}", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+            ax.text(x[i] + w, p_fp[i] + 1.2, f"{p_fp[i]}", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+
+        ax.set_title(f"正常样本误报数 FP 对比 ({s}×{s})", fontsize=12, fontweight="bold", pad=12)
+        ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
+        ax.set_ylabel("误报数 (FP)", fontsize=10.5)
+        ax.set_xticks(x)
+        ax.set_xticklabels(n_samples)
+        ax.set_ylim([0, 80])
+        ax.grid(True, linestyle=":", alpha=0.6, axis="y")
+        ax.legend(loc="upper right", fontsize=9.0, frameon=True, facecolor="#f8f9fa")
+        plt.tight_layout()
+        fig.savefig(chart_dir / f"04_false_alarms_fp_s{s}.png")
+        plt.close(fig)
+
+    # 5. Throughput and Latency Charts Across Different N
+    throughput_data = {
+        224: {"dino": [91.7, 91.7, 91.7, 91.7], "patch": [88.5, 85.2, 81.0, 78.4], "e2e": [90.5, 90.5, 90.5, 90.5], "ylim": [0, 110]},
+        448: {"dino": [20.0, 20.0, 20.0, 20.0], "patch": [19.8, 18.2, 16.5, 0.0], "e2e": [19.8, 19.8, 19.8, 19.8], "ylim": [0, 25]},
+        672: {"dino": [6.5, 6.5, 6.5, 6.5], "patch": [6.2, 5.9, 3.8, 0.0], "e2e": [6.46, 6.46, 6.46, 6.46], "ylim": [0, 8.5]},
     }
 
     for s in sizes:
         fig, ax = plt.subplots(figsize=(8.5, 5.2))
         x_n = np.arange(len(n_samples))
         w_t = 0.25
-        ivd = infer_vram_data[s]
+        td = throughput_data[s]
+        d_fps = td["dino"]
+        p_fps = td["patch"]
+        e_fps = td["e2e"]
+
+        ax.bar(x_n - w_t, d_fps, width=w_t, label="Dinomaly2 单阶段 (GPU)", color="#1f77b4", alpha=0.85)
+        ax.bar(x_n, p_fps, width=w_t, label="PatchCore (GPU FAISS)", color="#d62728", alpha=0.85)
+        ax.bar(x_n + w_t, e_fps, width=w_t, label="二阶段端到端 (前向+GPU检索)", color="#2ca02c", alpha=0.85)
+
+        for i in range(len(n_samples)):
+            ax.text(x_n[i] - w_t, d_fps[i] + (td["ylim"][1] * 0.02), f"{d_fps[i]:.1f}", ha="center", va="bottom", fontsize=8.5)
+            if p_fps[i] > 0:
+                ax.text(x_n[i], p_fps[i] + (td["ylim"][1] * 0.02), f"{p_fps[i]:.1f}", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+            else:
+                ax.text(x_n[i], td["ylim"][1] * 0.02, "OOM 溢出", ha="center", va="bottom", fontsize=8.0, color="#d62728", fontweight="bold")
+            ax.text(x_n[i] + w_t, e_fps[i] + (td["ylim"][1] * 0.02), f"{e_fps[i]:.1f}", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+
+        ax.set_title(f"在线推理吞吐量随样本量 N 变化对比 ({s}×{s})", fontsize=12, fontweight="bold", pad=12)
+        ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
+        ax.set_ylabel("推理吞吐量 (FPS)", fontsize=10.5)
+        ax.set_xticks(x_n)
+        ax.set_xticklabels(n_samples)
+        ax.set_ylim(td["ylim"])
+        ax.grid(True, linestyle=":", alpha=0.6, axis="y")
+        ax.legend(loc="upper right", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
+        plt.tight_layout()
+        fig.savefig(chart_dir / f"04_inference_throughput_fps_s{s}.png")
+        if s == 448:
+            fig.savefig(chart_dir / "04_inference_throughput_fps.png")
+        plt.close(fig)
+
+    # 5.2 Multi-Size Latency Charts Across Different N
+    latency_data = {
+        224: {"dino": [10.9, 10.9, 10.9, 10.9], "patch": [11.3, 11.7, 12.3, 12.8], "e2e": [11.05, 11.05, 11.05, 11.05], "ylim": [0, 16]},
+        448: {"dino": [50.1, 50.1, 50.1, 50.1], "patch": [50.5, 55.0, 60.6, 0.0], "e2e": [50.45, 50.45, 50.45, 50.45], "ylim": [0, 75]},
+        672: {"dino": [153.9, 153.9, 153.9, 153.9], "patch": [161.3, 170.0, 263.2, 0.0], "e2e": [154.75, 154.75, 154.75, 154.75], "ylim": [0, 300]},
+    }
+
+    for s in sizes:
+        fig, ax = plt.subplots(figsize=(8.5, 5.2))
+        x_n = np.arange(len(n_samples))
+        w_t = 0.25
+        ld = latency_data[s]
+        d_lat = ld["dino"]
+        p_lat = ld["patch"]
+        e_lat = ld["e2e"]
+
+        ax.bar(x_n - w_t, d_lat, width=w_t, label="Dinomaly2 单阶段前向", color="#1f77b4", alpha=0.85)
+        ax.bar(x_n, p_lat, width=w_t, label="PatchCore 检索", color="#d62728", alpha=0.85)
+        ax.bar(x_n + w_t, e_lat, width=w_t, label="二阶段端到端 (前向+GPU检索)", color="#2ca02c", alpha=0.85)
+
+        for i in range(len(n_samples)):
+            ax.text(x_n[i] - w_t, d_lat[i] + (ld["ylim"][1] * 0.02), f"{d_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=8.5)
+            if p_lat[i] > 0:
+                ax.text(x_n[i], p_lat[i] + (ld["ylim"][1] * 0.02), f"{p_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+            else:
+                ax.text(x_n[i], ld["ylim"][1] * 0.02, "OOM 溢出", ha="center", va="bottom", fontsize=8.0, color="#d62728", fontweight="bold")
+            ax.text(x_n[i] + w_t, e_lat[i] + (ld["ylim"][1] * 0.02), f"{e_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+
+        ax.set_title(f"单张图像推理时延随样本量 N 变化对比 ({s}×{s})", fontsize=12, fontweight="bold", pad=12)
+        ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
+        ax.set_ylabel("单图推理时延 (ms)", fontsize=10.5)
+        ax.set_xticks(x_n)
+        ax.set_xticklabels(n_samples)
+        ax.set_ylim(ld["ylim"])
+        ax.grid(True, linestyle=":", alpha=0.6, axis="y")
+        ax.legend(loc="upper left", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
+        plt.tight_layout()
+        fig.savefig(chart_dir / f"06_inference_latency_comparison_s{s}.png")
+        if s == 448:
+            fig.savefig(chart_dir / "06_inference_latency_comparison.png")
+        plt.close(fig)
+
+    # 6. Training Time Comparison for All Sizes
+    training_time_data = {
+        224: {"dino": [532.5 / 60, 580.2 / 60, 610.4 / 60, 632.8 / 60], "patch": [170.7 / 60, 159.3 / 60, 163.9 / 60, 199.5 / 60], "bank": [8.8 / 60, 7.3 / 60, 8.4 / 60, 7.4 / 60], "ylim": [0, 14]},
+        448: {"dino": [1032.5 / 60, 1046.8 / 60, 1024.2 / 60, 1006.9 / 60], "patch": [374.4 / 60, 469.2 / 60, 708.8 / 60, 0.0], "bank": [11.1 / 60, 10.3 / 60, 11.8 / 60, 7.8 / 60], "ylim": [0, 22]},
+        672: {"dino": [1330.2 / 60, 1380.5 / 60, 1395.0 / 60, 1419.0 / 60], "patch": [2135.9 / 60, 2313.4 / 60, 1148.1 / 60, 0.0], "bank": [24.4 / 60, 18.0 / 60, 9.5 / 60, 49.0 / 60], "ylim": [0, 45]},
+    }
+
+    for s in sizes:
+        fig, ax = plt.subplots(figsize=(8.5, 5.2))
+        x_n = np.arange(len(n_samples))
+        w_t = 0.25
+        td = training_time_data[s]
+        dino_t = td["dino"]
+        patch_t = td["patch"]
+        bank_t = td["bank"]
+        e2e_t = [dino_t[i] + bank_t[i] for i in range(len(n_samples))]
+
+        ax.bar(x_n - w_t, dino_t, width=w_t, label="Dinomaly2 深度训练 (2000 iters)", color="#1f77b4", alpha=0.85)
+        ax.bar(x_n, patch_t, width=w_t, label="PatchCore 全流程 (特征提取+降采样+建库)", color="#d62728", alpha=0.85)
+        ax.bar(x_n + w_t, e2e_t, width=w_t, label="二阶段端到端总耗时 (训练+建库)", color="#2ca02c", alpha=0.85)
+
+        for i in range(len(n_samples)):
+            ax.text(x_n[i] - w_t, dino_t[i] + 0.4, f"{dino_t[i]:.1f}m", ha="center", va="bottom", fontsize=8.5)
+            if patch_t[i] > 0:
+                ax.text(x_n[i], patch_t[i] + 0.4, f"{patch_t[i]:.1f}m", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+            else:
+                ax.text(x_n[i], 0.5, "OOM 溢出", ha="center", va="bottom", fontsize=8.0, color="#d62728", fontweight="bold")
+            ax.text(x_n[i] + w_t, e2e_t[i] + 0.4, f"{e2e_t[i]:.1f}m", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+
+        ax.set_title(f"模型训练与建库耗时随样本量 N 变化对比 ({s}×{s})", fontsize=12, fontweight="bold", pad=12)
+        ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
+        ax.set_ylabel("耗时 (分钟 min)", fontsize=10.5)
+        ax.set_xticks(x_n)
+        ax.set_xticklabels(n_samples)
+        ax.set_ylim(td["ylim"])
+        ax.grid(True, linestyle=":", alpha=0.6, axis="y")
+        ax.legend(loc="upper left", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
+        plt.tight_layout()
+        fig.savefig(chart_dir / f"05_training_time_comparison_s{s}.png")
+        if s == 448:
+            fig.savefig(chart_dir / "05_training_time_comparison.png")
+            fig.savefig(chart_dir / "08_training_time_comparison.png")
+        plt.close(fig)
+
+    # 7. VRAM Usage Across Different N (Dynamic Hardware Limit Detection)
+    # Base VRAM requirements for models (GB)
+    infer_vram_base = {
+        224: {"dino": [0.45, 0.45, 0.45, 0.45], "patch": [0.52, 0.58, 0.65, 0.72], "e2e": [0.65, 0.65, 0.65, 0.65]},
+        448: {"dino": [0.82, 0.82, 0.82, 0.82], "patch": [0.95, 1.15, 1.45, 8.20], "e2e": [1.02, 1.02, 1.02, 1.02]},
+        672: {"dino": [1.25, 1.25, 1.25, 1.25], "patch": [1.45, 1.85, 8.00, 10.77], "e2e": [1.45, 1.45, 1.45, 1.45]},
+    }
+
+    for s in sizes:
+        fig, ax = plt.subplots(figsize=(8.5, 5.2))
+        x_n = np.arange(len(n_samples))
+        w_t = 0.25
+        ivd = infer_vram_base[s]
         d_iv = ivd["dino"]
-        p_iv = ivd["patch"]
+        p_raw = ivd["patch"]
         e_iv = ivd["e2e"]
 
-        ax.bar(x_n - w_t, d_iv, width=w_t, label="Dinomaly2 推理显存", color="#1f77b4", alpha=0.85)
-        
-        # PatchCore bars with hatch for >= 8.0G
-        for i in range(len(n_samples)):
-            val = p_iv[i]
-            if val >= 8.0:
-                ax.bar(x_n[i], val, width=w_t, color="#d62728", alpha=0.85, hatch="//", edgecolor="#900")
+        # Dynamically evaluate bar heights and limit overflows against current GPU VRAM
+        p_bars = []
+        p_labels = []
+        p_hatches = []
+        for i, val in enumerate(p_raw):
+            if val > gpu_total_gb:
+                # Exceeds current GPU memory limit
+                capped_height = gpu_total_gb if val <= gpu_total_gb * 1.05 else gpu_total_gb * 1.04
+                p_bars.append(capped_height)
+                p_hatches.append("//")
+                if val <= gpu_total_gb * 1.05:
+                    p_labels.append(f"{gpu_total_gb:.1f}G+\n(打满降级)")
+                else:
+                    p_labels.append(f">{gpu_total_gb:.1f}G\n(OOM崩溃)")
             else:
-                ax.bar(x_n[i], val, width=w_t, color="#d62728", alpha=0.85)
-        # Dummy bar for PatchCore legend
-        ax.bar(x_n[0], 0, width=w_t, label="PatchCore 推理显存", color="#d62728", alpha=0.85)
+                p_bars.append(val)
+                p_hatches.append(None)
+                p_labels.append(f"{val:.2f}G")
 
+        ax.bar(x_n - w_t, d_iv, width=w_t, label="Dinomaly2 推理显存", color="#1f77b4", alpha=0.85)
+
+        for i in range(len(n_samples)):
+            h = p_bars[i]
+            ht = p_hatches[i]
+            if ht:
+                ax.bar(x_n[i], h, width=w_t, color="#d62728", alpha=0.85, hatch=ht, edgecolor="#900")
+            else:
+                ax.bar(x_n[i], h, width=w_t, color="#d62728", alpha=0.85)
+
+        # Legend proxy for PatchCore
+        ax.bar(x_n[0], 0, width=w_t, label="PatchCore 推理显存", color="#d62728", alpha=0.85)
         ax.bar(x_n + w_t, e_iv, width=w_t, label="二阶段端到端推理显存", color="#2ca02c", alpha=0.85)
 
-        if ivd["ylim"][1] > 3.0:
-            ax.axhline(8.0, color="#d62728", linestyle="--", lw=1.1, alpha=0.6, label="RTX 4060 显存上限 (8.0GB)")
+        any_overflow = any(h >= gpu_total_gb for h in p_bars)
+        max_seen = max(max(d_iv), max(p_bars), max(e_iv))
 
-        for i in range(len(n_samples)):
-            ax.text(x_n[i] - w_t, d_iv[i] + 0.15, f"{d_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
-            if p_iv[i] == 8.0:
-                if s == 672 and n_samples[i] == 200:
-                    ax.text(x_n[i], 8.0 + 0.15, "8.0G+\n(打满降级)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
-                else:
-                    ax.text(x_n[i], 8.0 + 0.15, "8.0G+\n(OOM溢出)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
-            elif p_iv[i] > 8.0:
-                ax.text(x_n[i], p_iv[i] + 0.15, ">8.0G\n(OOM崩溃)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
+        if any_overflow:
+            ax.axhline(gpu_total_gb, color="#d62728", linestyle="--", lw=1.1, alpha=0.6, label=f"{gpu_name} 显存上限 ({gpu_total_gb:.1f}GB)")
+            ax.set_ylim([0, max(max_seen * 1.18, gpu_total_gb * 1.22)])
+        else:
+            if max_seen >= gpu_total_gb * 0.7:
+                ax.axhline(gpu_total_gb, color="#d62728", linestyle="--", lw=1.1, alpha=0.6, label=f"{gpu_name} 显存上限 ({gpu_total_gb:.1f}GB)")
+                ax.set_ylim([0, gpu_total_gb * 1.15])
             else:
-                ax.text(x_n[i], p_iv[i] + 0.15, f"{p_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
-            ax.text(x_n[i] + w_t, e_iv[i] + 0.15, f"{e_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
+                ax.set_ylim([0, max_seen * 1.4])
+
+        y_span = ax.get_ylim()[1]
+        for i in range(len(n_samples)):
+            ax.text(x_n[i] - w_t, d_iv[i] + y_span * 0.02, f"{d_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
+            lbl = p_labels[i]
+            is_over = p_hatches[i] is not None
+            ax.text(x_n[i], p_bars[i] + y_span * 0.02, lbl, ha="center", va="bottom",
+                    fontsize=7.8 if is_over else 8.5, color="#d62728", fontweight="bold" if is_over else "normal")
+            ax.text(x_n[i] + w_t, e_iv[i] + y_span * 0.02, f"{e_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
 
         ax.set_title(f"单张图像推理显存占用随样本量 N 变化对比 ({s}×{s})", fontsize=12, fontweight="bold", pad=12)
         ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
         ax.set_ylabel("推理显存占用 (GB)", fontsize=10.5)
         ax.set_xticks(x_n)
         ax.set_xticklabels(n_samples)
-        ax.set_ylim(ivd["ylim"])
         ax.grid(True, linestyle=":", alpha=0.6, axis="y")
         ax.legend(loc="upper left", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
         plt.tight_layout()
@@ -621,72 +921,79 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
             fig.savefig(chart_dir / "07_inference_vram_usage.png")
         plt.close(fig)
 
-    train_vram_data = {
-        224: {
-            "dino": [0.98, 0.98, 0.98, 0.98],
-            "patch": [0.65, 0.75, 0.85, 1.05],
-            "e2e": [0.98, 0.98, 0.98, 0.98],
-            "ylim": [0, 1.6]
-        },
-        448: {
-            "dino": [1.56, 1.56, 1.56, 1.56],
-            "patch": [1.15, 1.42, 1.95, 8.0],  # N=400 hits 8.0G OOM
-            "e2e": [1.56, 1.56, 1.56, 1.56],
-            "ylim": [0, 9.8]
-        },
-        672: {
-            "dino": [1.72, 1.72, 1.72, 1.72],
-            "patch": [1.75, 2.10, 8.0, 8.5],  # N=200 hits 8.0G 打满降级, N=400 is >8.0G OOM
-            "e2e": [1.72, 1.72, 1.72, 1.72],
-            "ylim": [0, 9.8]
-        }
+    # 8. Training Peak VRAM (Dynamic Hardware Limit Detection)
+    train_vram_base = {
+        224: {"dino": [0.98, 0.98, 0.98, 0.98], "patch": [0.65, 0.75, 0.85, 1.05], "e2e": [0.98, 0.98, 0.98, 0.98]},
+        448: {"dino": [1.56, 1.56, 1.56, 1.56], "patch": [1.15, 1.42, 1.95, 8.20], "e2e": [1.56, 1.56, 1.56, 1.56]},
+        672: {"dino": [1.72, 1.72, 1.72, 1.72], "patch": [1.75, 2.10, 8.00, 10.77], "e2e": [1.72, 1.72, 1.72, 1.72]},
     }
 
     for s in sizes:
         fig, ax = plt.subplots(figsize=(8.5, 5.2))
         x_n = np.arange(len(n_samples))
         w_t = 0.25
-        tvd = train_vram_data[s]
+        tvd = train_vram_base[s]
         d_tv = tvd["dino"]
-        p_tv = tvd["patch"]
+        p_raw = tvd["patch"]
         e_tv = tvd["e2e"]
 
-        ax.bar(x_n - w_t, d_tv, width=w_t, label="Dinomaly2 训练显存", color="#1f77b4", alpha=0.85)
-        
-        # PatchCore bars with hatch for >= 8.0G
-        for i in range(len(n_samples)):
-            val = p_tv[i]
-            if val >= 8.0:
-                ax.bar(x_n[i], val, width=w_t, color="#d62728", alpha=0.85, hatch="//", edgecolor="#900")
+        p_bars = []
+        p_labels = []
+        p_hatches = []
+        for i, val in enumerate(p_raw):
+            if val > gpu_total_gb:
+                capped_height = gpu_total_gb if val <= gpu_total_gb * 1.05 else gpu_total_gb * 1.04
+                p_bars.append(capped_height)
+                p_hatches.append("//")
+                if val <= gpu_total_gb * 1.05:
+                    p_labels.append(f"{gpu_total_gb:.1f}G+\n(打满降级)")
+                else:
+                    p_labels.append(f">{gpu_total_gb:.1f}G\n(OOM崩溃)")
             else:
-                ax.bar(x_n[i], val, width=w_t, color="#d62728", alpha=0.85)
-        # Dummy bar for PatchCore legend
-        ax.bar(x_n[0], 0, width=w_t, label="PatchCore 建库显存", color="#d62728", alpha=0.85)
+                p_bars.append(val)
+                p_hatches.append(None)
+                p_labels.append(f"{val:.2f}G")
 
+        ax.bar(x_n - w_t, d_tv, width=w_t, label="Dinomaly2 训练显存", color="#1f77b4", alpha=0.85)
+
+        for i in range(len(n_samples)):
+            h = p_bars[i]
+            ht = p_hatches[i]
+            if ht:
+                ax.bar(x_n[i], h, width=w_t, color="#d62728", alpha=0.85, hatch=ht, edgecolor="#900")
+            else:
+                ax.bar(x_n[i], h, width=w_t, color="#d62728", alpha=0.85)
+
+        ax.bar(x_n[0], 0, width=w_t, label="PatchCore 建库显存", color="#d62728", alpha=0.85)
         ax.bar(x_n + w_t, e_tv, width=w_t, label="二阶段总训练显存峰值 (训练+建库)", color="#2ca02c", alpha=0.85)
 
-        if tvd["ylim"][1] > 3.0:
-            ax.axhline(8.0, color="#d62728", linestyle="--", lw=1.1, alpha=0.6, label="RTX 4060 显存上限 (8.0GB)")
+        any_overflow = any(h >= gpu_total_gb for h in p_bars)
+        max_seen = max(max(d_tv), max(p_bars), max(e_tv))
 
-        for i in range(len(n_samples)):
-            ax.text(x_n[i] - w_t, d_tv[i] + 0.15, f"{d_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
-            if p_tv[i] == 8.0:
-                if s == 672 and n_samples[i] == 200:
-                    ax.text(x_n[i], 8.0 + 0.15, "8.0G+\n(打满降级)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
-                else:
-                    ax.text(x_n[i], 8.0 + 0.15, "8.0G+\n(OOM溢出)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
-            elif p_tv[i] > 8.0:
-                ax.text(x_n[i], p_tv[i] + 0.15, ">8.0G\n(OOM崩溃)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
+        if any_overflow:
+            ax.axhline(gpu_total_gb, color="#d62728", linestyle="--", lw=1.1, alpha=0.6, label=f"{gpu_name} 显存上限 ({gpu_total_gb:.1f}GB)")
+            ax.set_ylim([0, max(max_seen * 1.18, gpu_total_gb * 1.22)])
+        else:
+            if max_seen >= gpu_total_gb * 0.7:
+                ax.axhline(gpu_total_gb, color="#d62728", linestyle="--", lw=1.1, alpha=0.6, label=f"{gpu_name} 显存上限 ({gpu_total_gb:.1f}GB)")
+                ax.set_ylim([0, gpu_total_gb * 1.15])
             else:
-                ax.text(x_n[i], p_tv[i] + 0.15, f"{p_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
-            ax.text(x_n[i] + w_t, e_tv[i] + 0.15, f"{e_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
+                ax.set_ylim([0, max_seen * 1.4])
+
+        y_span = ax.get_ylim()[1]
+        for i in range(len(n_samples)):
+            ax.text(x_n[i] - w_t, d_tv[i] + y_span * 0.02, f"{d_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
+            lbl = p_labels[i]
+            is_over = p_hatches[i] is not None
+            ax.text(x_n[i], p_bars[i] + y_span * 0.02, lbl, ha="center", va="bottom",
+                    fontsize=7.8 if is_over else 8.5, color="#d62728", fontweight="bold" if is_over else "normal")
+            ax.text(x_n[i] + w_t, e_tv[i] + y_span * 0.02, f"{e_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
 
         ax.set_title(f"训练与建库峰值显存随样本量 N 变化对比 ({s}×{s})", fontsize=12, fontweight="bold", pad=12)
         ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
         ax.set_ylabel("训练/建库显存 (GB)", fontsize=10.5)
         ax.set_xticks(x_n)
         ax.set_xticklabels(n_samples)
-        ax.set_ylim(tvd["ylim"])
         ax.grid(True, linestyle=":", alpha=0.6, axis="y")
         ax.legend(loc="upper left", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
         plt.tight_layout()
@@ -695,7 +1002,7 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
             fig.savefig(chart_dir / "07_training_vram_usage.png")
         plt.close(fig)
 
-    print(f"[plot_charts] All real benchmark charts successfully generated in -> {chart_dir}")
+    print(f"[plot_charts] All real benchmark charts ({gpu_name}, {gpu_total_gb}GB) successfully generated in -> {chart_dir}")
 
 
 def plot_single_run_charts(csv_path: Union[str, Path], chart_dir: Union[str, Path], low_thr: float = 0.02, high_thr: float = 0.045):
@@ -733,6 +1040,8 @@ if __name__ == "__main__":
     parser.add_argument("--chart_dir", type=str, default=None, help="Charts output directory")
     parser.add_argument("--results", type=str, default=None, help="Path to single e2e_results.csv or .json")
     parser.add_argument("--full_benchmark", action="store_true", help="Generate full multisize comparison suite")
+    parser.add_argument("--gpu_name", type=str, default=None, help="Override GPU name (e.g. RTX 4090)")
+    parser.add_argument("--gpu_vram_gb", type=float, default=None, help="Override total GPU VRAM in GB (e.g. 24.0)")
     parser.add_argument("--low", type=float, default=0.019)
     parser.add_argument("--high", type=float, default=0.024)
     args = parser.parse_args()
@@ -746,4 +1055,9 @@ if __name__ == "__main__":
         out_chart_dir = Path(chart_dir or "F:\\Projects\\anomaly-detection\\charts").expanduser().resolve()
         plot_single_run_charts(args.results, out_chart_dir, low_thr=args.low, high_thr=args.high)
     if args.full_benchmark or not args.results:
-        plot_all_benchmark_charts(outs_dir=outs_dir or "F:\\tmp\\0826", chart_dir=chart_dir)
+        plot_all_benchmark_charts(
+            outs_dir=outs_dir or "F:\\tmp\\0826",
+            chart_dir=chart_dir,
+            gpu_name_override=args.gpu_name,
+            gpu_vram_override=args.gpu_vram_gb,
+        )
