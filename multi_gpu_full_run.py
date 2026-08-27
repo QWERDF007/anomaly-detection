@@ -23,18 +23,18 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-PYTHON = Path(r"D:\Software\anaconda3\envs\py312\python.exe")
+PYTHON = Path(sys.executable)
 if not PYTHON.is_file():
-    PYTHON = Path(sys.executable)
+    PYTHON = Path("/home/dell/miniconda3/envs/anomaly/bin/python")
 ROOT = Path(__file__).resolve().parent
 
 
 def build_parser():
     parser = argparse.ArgumentParser(description="Multi-GPU Full Benchmark Matrix Runner")
     parser.add_argument("--gpus", type=str, default="auto", help="List of GPU IDs (e.g. '0,1,2,3' or 'auto')")
-    parser.add_argument("--outs_dir", type=str, default=r"F:\tmp\0826", help="Output directory for all benchmark artifacts")
-    parser.add_argument("--splits_dir", type=str, default=r"F:\tmp\outs\data_splits", help="Directory containing train_N_seed2024.txt")
-    parser.add_argument("--bank_data", type=str, default=r"F:\data\异常检测测试报告数据\铜色异常检测6相机_建库数据", help="Feature bank dataset directory")
+    parser.add_argument("--outs_dir", type=str, default="/data/wt/report/0826", help="Output directory for all benchmark artifacts")
+    parser.add_argument("--splits_dir", type=str, default="/data/wt/outs/data_splits", help="Directory containing train_N_seed2024.txt")
+    parser.add_argument("--bank_data", type=str, default="/data/wt/ramdisk/铜色异常检测6相机_建库数据", help="Feature bank dataset directory")
     parser.add_argument("--max_iters", type=int, default=2000, help="Stage 1 training iterations")
     parser.add_argument("--train_sizes", type=int, nargs="+", default=[50, 100, 200, 400])
     parser.add_argument("--image_sizes", type=int, nargs="+", default=[224, 448, 672])
@@ -55,7 +55,10 @@ def _worker_process(gpu_id: int, task_queue: mp.Queue, result_queue: mp.Queue, o
     def run_cmd(cmd, cwd=None):
         log(f"RUN: {' '.join(str(c) for c in cmd)}")
         t0 = time.perf_counter()
-        proc = subprocess.run(cmd, cwd=str(cwd) if cwd else None, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        import os
+        env = os.environ.copy()
+        env["PYTHONPATH"] = f"{ROOT}:{ROOT / 'patchcore-inspection' / 'src'}:{ROOT / 'Dinomaly2'}:" + env.get("PYTHONPATH", "")
+        proc = subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
         elapsed = time.perf_counter() - t0
         log(f"EXIT {proc.returncode} in {elapsed:.1f}s")
         if proc.returncode != 0:
@@ -97,7 +100,7 @@ def _worker_process(gpu_id: int, task_queue: mp.Queue, result_queue: mp.Queue, o
                    "--max-iters", str(max_iters),
                    "--save_dir", str(d_save),
                    "--cuda", str(gpu_id),
-                   "--backbone", "dinov2reg_vit_base_14"]
+                   "--backbone", "dinov2reg_vit_small_14"]
             run_cmd(cmd, cwd=str(ROOT / "Dinomaly2"))
 
         # 2. PatchCore Training / Coreset Subsampling
@@ -112,6 +115,7 @@ def _worker_process(gpu_id: int, task_queue: mp.Queue, result_queue: mp.Queue, o
                    "-imgsz", str(sz),
                    "-csz", str(sz),
                    "--batch_size", str(bs),
+                   "--sampling_percentage", "0.1",
                    "--save_dir", str(p_save),
                    "--gpu", str(gpu_id)]
             run_cmd(cmd, cwd=str(ROOT / "patchcore-inspection"))
@@ -127,7 +131,8 @@ def _worker_process(gpu_id: int, task_queue: mp.Queue, result_queue: mp.Queue, o
                        "--data_dir", str(bank_data),
                        "--save_bank", str(bank_npz),
                        "--image_size", str(sz),
-                       "--cuda", str(gpu_id)]
+                       "--cuda", str(gpu_id),
+                       "--backbone", "dinov2reg_vit_small_14"]
                 run_cmd(cmd, cwd=str(ROOT))
 
             # 4. Two-Stage E2E Inference & Evaluation
@@ -137,9 +142,10 @@ def _worker_process(gpu_id: int, task_queue: mp.Queue, result_queue: mp.Queue, o
                    "--test_list", str(test_txt),
                    "--output_dir", str(out_e2e),
                    "--cuda", str(gpu_id),
-                   "--low", "0.019",
-                   "--high", "0.024",
-                   "--image_size", str(sz)]
+                   "--low", "0.018",
+                   "--high", "0.020",
+                   "--image_size", str(sz),
+                   "--backbone", "dinov2reg_vit_small_14"]
             run_cmd(cmd, cwd=str(ROOT))
 
         elapsed = time.perf_counter() - t_task_start
@@ -217,10 +223,10 @@ def main():
     subprocess.run([str(PYTHON), str(ROOT / "generate_final_report_multisize.py"), "--outs_dir", str(outs_dir)], cwd=str(ROOT))
     subprocess.run([str(PYTHON), str(ROOT / "analyze_and_report.py"), "--outs_dir", str(outs_dir)], cwd=str(ROOT))
 
-    # 7. Plot All Benchmark Charts (including Training Time and Inference Time)
+    # 7. Plot All Benchmark Charts (dynamically extracted from real test outputs)
     chart_dir = outs_dir / "charts"
     print(f"\n=== Plotting Full Benchmark Visual Charts into {chart_dir} ===")
-    subprocess.run([str(PYTHON), str(ROOT / "plot_evaluation_charts.py"), "--chart_dir", str(chart_dir), "--full_benchmark"], cwd=str(ROOT))
+    subprocess.run([str(PYTHON), str(ROOT / "plot_evaluation_charts.py"), "--outs_dir", str(outs_dir), "--chart_dir", str(chart_dir)], cwd=str(ROOT))
 
     print(f"\n[ALL DONE] All benchmark reports, matrices, and charts are ready in -> {outs_dir}")
 

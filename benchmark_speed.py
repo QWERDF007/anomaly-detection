@@ -43,7 +43,11 @@ def find_test_lists(outs_dir: Path):
         tests = sorted(splits.glob("test_*.txt"))
         if tests:
             return tests
-    # fallback: 任意 txt
+    for cand in [Path("/data/wt/outs/data_splits"), ROOT / "data_splits", ROOT.parent / "outs" / "data_splits"]:
+        if cand.is_dir():
+            tests = sorted(cand.glob("test_*.txt"))
+            if tests:
+                return tests
     return []
 
 def load_image(path: Path):
