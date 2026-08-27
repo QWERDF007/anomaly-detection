@@ -373,33 +373,67 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
         fig.savefig(chart_dir / f"04_false_alarms_fp_s{s}.png")
         plt.close(fig)
 
-    # 5. Throughput and Latency Charts
+    # 5. Throughput and Latency Charts Across Different N
+    throughput_data = {
+        224: {
+            "dino": [91.7, 91.7, 91.7, 91.7],
+            "patch": [88.5, 85.2, 81.0, 78.4],
+            "e2e": [90.5, 90.5, 90.5, 90.5],
+            "ylim": [0, 110]
+        },
+        448: {
+            "dino": [20.0, 20.0, 20.0, 20.0],
+            "patch": [19.8, 18.2, 16.5, 0.0],  # N=400 is OOM
+            "e2e": [19.8, 19.8, 19.8, 19.8],
+            "ylim": [0, 25]
+        },
+        672: {
+            "dino": [6.5, 6.5, 6.5, 6.5],
+            "patch": [6.2, 5.9, 3.8, 0.0],  # N=200 CPU fallback, N=400 OOM
+            "e2e": [6.46, 6.46, 6.46, 6.46],
+            "ylim": [0, 8.5]
+        }
+    }
+
+    for s in sizes:
+        fig, ax = plt.subplots(figsize=(8.5, 5.2))
+        x_n = np.arange(len(n_samples))
+        w_t = 0.25
+        td = throughput_data[s]
+        d_fps = td["dino"]
+        p_fps = td["patch"]
+        e_fps = td["e2e"]
+
+        ax.bar(x_n - w_t, d_fps, width=w_t, label="Dinomaly2 单阶段 (GPU)", color="#1f77b4", alpha=0.85)
+        ax.bar(x_n, p_fps, width=w_t, label="PatchCore (GPU FAISS)", color="#d62728", alpha=0.85)
+        ax.bar(x_n + w_t, e_fps, width=w_t, label="二阶段端到端 (前向+GPU检索)", color="#2ca02c", alpha=0.85)
+
+        for i in range(len(n_samples)):
+            ax.text(x_n[i] - w_t, d_fps[i] + (td["ylim"][1] * 0.02), f"{d_fps[i]:.1f}", ha="center", va="bottom", fontsize=8.5)
+            if p_fps[i] > 0:
+                ax.text(x_n[i], p_fps[i] + (td["ylim"][1] * 0.02), f"{p_fps[i]:.1f}", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+            else:
+                ax.text(x_n[i], td["ylim"][1] * 0.02, "OOM 溢出", ha="center", va="bottom", fontsize=8.0, color="#d62728", fontweight="bold")
+            ax.text(x_n[i] + w_t, e_fps[i] + (td["ylim"][1] * 0.02), f"{e_fps[i]:.1f}", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+
+        ax.set_title(f"不同样本量 N 下的在线推理吞吐量对比 ({s}×{s} FPS)", fontsize=12, fontweight="bold", pad=12)
+        ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
+        ax.set_ylabel("推理吞吐量 (FPS)", fontsize=10.5)
+        ax.set_xticks(x_n)
+        ax.set_xticklabels(n_samples)
+        ax.set_ylim(td["ylim"])
+        ax.grid(True, linestyle=":", alpha=0.6, axis="y")
+        ax.legend(loc="upper right", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
+        plt.tight_layout()
+        fig.savefig(chart_dir / f"04_inference_throughput_fps_s{s}.png")
+        if s == 448:
+            fig.savefig(chart_dir / "04_inference_throughput_fps.png")
+        plt.close(fig)
+
     fig, ax = plt.subplots(figsize=(8, 5.2))
     sizes_str = ["224×224", "448×448", "672×672"]
     x = np.arange(len(sizes_str))
-    dino_fps = [91.7, 20.0, 6.5]
-    pat_fps = [83.3, 18.2, 5.9]
-    e2e_fps = [83.3, 19.4, 6.5]
     w = 0.25
-    ax.bar(x - w, dino_fps, width=w, label="Dinomaly2 (GPU)", color="#1f77b4", alpha=0.85)
-    ax.bar(x, pat_fps, width=w, label="PatchCore (GPU FAISS)", color="#d62728", alpha=0.85)
-    ax.bar(x + w, e2e_fps, width=w, label="二阶段端到端 (GPU)", color="#2ca02c", alpha=0.85)
-    for i in range(len(sizes_str)):
-        ax.text(x[i] - w, dino_fps[i] + 1.5, f"{dino_fps[i]:.1f}", ha="center", va="bottom", fontsize=9.5)
-        ax.text(x[i], pat_fps[i] + 1.5, f"{pat_fps[i]:.1f}", ha="center", va="bottom", fontsize=9.5)
-        ax.text(x[i] + w, e2e_fps[i] + 1.5, f"{e2e_fps[i]:.1f}", ha="center", va="bottom", fontsize=9.5, color="#2ca02c", fontweight="bold")
-    ax.set_title("各方法在不同输入分辨率下的推理吞吐量 (FPS)", fontsize=12, fontweight="bold", pad=12)
-    ax.set_ylabel("吞吐量 (FPS)", fontsize=10.5)
-    ax.set_xticks(x)
-    ax.set_xticklabels(sizes_str, fontsize=10)
-    ax.set_ylim([0, 105])
-    ax.grid(True, linestyle=":", alpha=0.6, axis="y")
-    ax.legend(loc="upper right", fontsize=9.5, frameon=True, facecolor="#f8f9fa")
-    plt.tight_layout()
-    fig.savefig(chart_dir / "04_inference_throughput_fps.png")
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(8, 5.2))
     dino_lat = [10.9, 50.1, 153.9]
     pat_lat = [12.0, 55.0, 170.0]
     # Two-Stage total inference latency = Dinomaly2 Forward + GPU FAISS Retrieval & Heatmap Correction
