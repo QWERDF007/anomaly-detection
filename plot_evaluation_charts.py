@@ -584,7 +584,10 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
         for i in range(len(n_samples)):
             ax.text(x_n[i] - w_t, d_iv[i] + 0.03, f"{d_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
             if p_iv[i] > 0:
-                ax.text(x_n[i], p_iv[i] + 0.03, f"{p_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+                if s == 672 and n_samples[i] == 200:
+                    ax.text(x_n[i], p_iv[i] + 0.03, f"{p_iv[i]:.2f}G\n(CPU降级)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
+                else:
+                    ax.text(x_n[i], p_iv[i] + 0.03, f"{p_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
             else:
                 ax.text(x_n[i], 0.03, "OOM 溢出", ha="center", va="bottom", fontsize=8.0, color="#d62728", fontweight="bold")
             ax.text(x_n[i] + w_t, e_iv[i] + 0.03, f"{e_iv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
@@ -640,7 +643,10 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
         for i in range(len(n_samples)):
             ax.text(x_n[i] - w_t, d_tv[i] + 0.05, f"{d_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
             if p_tv[i] > 0:
-                ax.text(x_n[i], p_tv[i] + 0.05, f"{p_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+                if s == 672 and n_samples[i] == 200:
+                    ax.text(x_n[i], p_tv[i] + 0.05, f"{p_tv[i]:.2f}G\n(CPU降级)", ha="center", va="bottom", fontsize=7.8, color="#d62728", fontweight="bold")
+                else:
+                    ax.text(x_n[i], p_tv[i] + 0.05, f"{p_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
             else:
                 ax.text(x_n[i], 0.05, "OOM 溢出", ha="center", va="bottom", fontsize=8.0, color="#d62728", fontweight="bold")
             ax.text(x_n[i] + w_t, e_tv[i] + 0.05, f"{e_tv[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c")
