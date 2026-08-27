@@ -487,7 +487,10 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
                     nor_dist = 1.0 - nor_ip[:, 0]
 
                     is_ab = ab_dist < nor_dist
-                    amap_resized[uncertain_idx] = np.where(is_ab, 1.5 * effective_high, effective_low * 0.5)
+                    # Smooth margin-based continuous score modulation
+                    margin = (nor_dist - ab_dist) / (nor_dist + ab_dist + 1e-6)
+                    gain = np.where(is_ab, 1.0 + 0.8 * np.maximum(0.0, margin), 1.0 - 0.5 * np.maximum(0.0, -margin))
+                    amap_resized[uncertain_idx] = amap_resized[uncertain_idx] * gain
 
                 final_amap = cv2.resize(amap_resized, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
                 flat_c = final_amap.flatten()

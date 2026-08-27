@@ -124,7 +124,7 @@ def main():
                 bank_npz = d_save / "feature_bank.npz"
                 cmd = [str(PYTHON), str(ROOT / "two_stage" / "build_bank.py"),
                        "--model", str(model),
-                       "--data_dir", r"F:\data\异常检测测试报告数据\铜色异常检测6相机_建库数据",
+                       "--data_dir", r"F:\data\异常检测测试报告数据\铜色异常检测6相机_建库数据2",
                        "--save_bank", str(bank_npz),
                        "--save_dir", str(d_save),
                        "--image_size", str(sz),
@@ -149,7 +149,7 @@ def main():
             out_e2e = outs_dir / f"e2e_out_n{n}_s{sz}"
             cmd = [str(PYTHON), str(ROOT / "run_e2e.py"),
                    "--dinomaly_model", str(model),
-                   "--bank_data", r"F:\data\异常检测测试报告数据\铜色异常检测6相机_建库数据",
+                   "--bank_data", r"F:\data\异常检测测试报告数据\铜色异常检测6相机_建库数据2",
                    "--test_list", str(test_txt),
                    "--output_dir", str(out_e2e),
                    "--cuda", str(args.cuda),
