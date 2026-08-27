@@ -180,7 +180,7 @@ def main():
                 "-le", "layer3",
                 "--faiss_on_gpu",
                 "--sampler", "approx_greedy_coreset",
-                "--percentage", "0.01",
+                "--percentage", "0.1",
                 "dataset",
                 "--resize", str(s),
                 "--imagesize", str(s),
