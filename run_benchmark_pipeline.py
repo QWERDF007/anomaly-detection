@@ -145,6 +145,7 @@ def main():
     parser.add_argument("--outs_dir", type=str, required=True, help="Output directory for experiments, models, charts, and report")
     parser.add_argument("--train_sizes", type=int, nargs="+", default=[50, 100, 200, 400], help="Sample sizes N to evaluate")
     parser.add_argument("--image_sizes", type=int, nargs="+", default=[224, 448, 672], help="Resolution sizes to evaluate")
+    parser.add_argument("--backbone", type=str, default="dinov2reg_vit_base_14", help="Backbone encoder model for Dinomaly2")
     parser.add_argument("--max_iters", type=int, default=2000, help="Training iterations for Dinomaly2")
     parser.add_argument("--gpus", type=str, default="auto", help="GPU device IDs (e.g. '0', '0,1', '0,1,2,3', or 'auto')")
     parser.add_argument("--seed", type=int, default=2024, help="Random seed")
@@ -160,10 +161,11 @@ def main():
     bank_data = Path(args.bank_data).expanduser().resolve() if args.bank_data else (dataset_root / "建库数据" if (dataset_root / "建库数据").is_dir() else None)
 
     print("=" * 80)
-    print(f"=== Multi-GPU Anomaly Detection Benchmark Pipeline ===")
+    print("=== Multi-GPU Anomaly Detection Benchmark Pipeline ===")
     print(f"Dataset Root: {dataset_root}")
     print(f"Bank Data: {bank_data}")
     print(f"Outs Dir: {outs_dir}")
+    print(f"Backbone: {args.backbone}")
     print(f"Train Sizes N: {args.train_sizes}")
     print(f"Image Sizes S: {args.image_sizes}")
     print(f"GPUs Allocated: {gpu_list} (Total: {len(gpu_list)} GPU workers)")
@@ -211,6 +213,7 @@ def main():
                     "--dataset", "custom",
                     "--data_path", str(train_txt),
                     "--test_path", str(test_full_p),
+                    "--backbone", str(args.backbone),
                     "--image_size", str(s),
                     "--crop_size", str(s),
                     "--batch_size", "2" if s >= 672 else "4",
@@ -267,6 +270,7 @@ def main():
                         "--model", str(m_p),
                         "--data_dir", str(bank_data),
                         "--save_bank", str(bank_file),
+                        "--backbone", str(args.backbone),
                         "--image_size", str(s),
                         "--cuda", "0",
                     ]
