@@ -295,11 +295,10 @@ def generate_reports(outs_dir_str):
             e_str = f"=={e_fp}==" if e_fp == min_fp else f"{e_fp}"
             md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
 
-    for target_name in ["FINAL_BENCHMARK_REPORT.md", "BENCHMARK_REPORT.md", "BENCHMARK_DETAILED_REPORT_224_448_672.md"]:
-        target_p = outs_dir / target_name
-        with open(target_p, "w", encoding="utf-8") as f:
-            f.write(md)
-        print(f"Updated report -> {target_p}")
+    target_p = outs_dir / "FINAL_BENCHMARK_REPORT.md"
+    with open(target_p, "w", encoding="utf-8") as f:
+        f.write(md)
+    print(f"Updated report -> {target_p}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate Comprehensive Benchmark Markdown Reports")

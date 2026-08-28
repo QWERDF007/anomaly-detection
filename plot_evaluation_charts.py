@@ -564,9 +564,6 @@ def plot_all_benchmark_charts(outs_dir: Union[str, Path], chart_dir: Optional[Un
         ax.legend(loc="upper left", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
         plt.tight_layout()
         fig.savefig(chart_dir / f"05_training_time_comparison_s{s}.png")
-        if s == 448:
-            fig.savefig(chart_dir / "05_training_time_comparison.png")
-            fig.savefig(chart_dir / "08_training_time_comparison.png")
         plt.close(fig)
 
     # 7. VRAM Usage Across Different N
@@ -828,8 +825,6 @@ def plot_all_benchmark_charts(
         ax.legend(loc="upper right", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
         plt.tight_layout()
         fig.savefig(chart_dir / f"04_inference_throughput_fps_s{s}.png")
-        if s == 448:
-            fig.savefig(chart_dir / "04_inference_throughput_fps.png")
         plt.close(fig)
 
     # 5.2 Multi-Size Latency Charts Across Different N
@@ -867,8 +862,6 @@ def plot_all_benchmark_charts(
         ax.legend(loc="upper left", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
         plt.tight_layout()
         fig.savefig(chart_dir / f"06_inference_latency_comparison_s{s}.png")
-        if s == 448:
-            fig.savefig(chart_dir / "06_inference_latency_comparison.png")
         plt.close(fig)
 
     # 6. Training Time Comparison for All Sizes (Dynamically Measured)
@@ -944,9 +937,6 @@ def plot_all_benchmark_charts(
         ax.legend(loc="upper left", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
         plt.tight_layout()
         fig.savefig(chart_dir / f"05_training_time_comparison_s{s}.png")
-        if s == 448:
-            fig.savefig(chart_dir / "05_training_time_comparison.png")
-            fig.savefig(chart_dir / "08_training_time_comparison.png")
         plt.close(fig)
 
     # 7. VRAM Usage Across Different N (Real Live Measured on GPU)
@@ -1083,8 +1073,6 @@ def plot_all_benchmark_charts(
         ax.legend(loc="upper left", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
         plt.tight_layout()
         fig.savefig(chart_dir / f"07_inference_vram_usage_s{s}.png")
-        if s == 448:
-            fig.savefig(chart_dir / "07_inference_vram_usage.png")
         plt.close(fig)
 
     # 8. Training Peak VRAM (Real Live Measured on GPU: Extract + Coreset Sampling Buffer)
@@ -1188,8 +1176,6 @@ def plot_all_benchmark_charts(
         ax.legend(loc="upper left", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
         plt.tight_layout()
         fig.savefig(chart_dir / f"07_training_vram_usage_s{s}.png")
-        if s == 448:
-            fig.savefig(chart_dir / "07_training_vram_usage.png")
         plt.close(fig)
 
     print(f"[plot_charts] All real benchmark charts ({gpu_name}, {gpu_total_gb}GB) successfully generated in -> {chart_dir}")
