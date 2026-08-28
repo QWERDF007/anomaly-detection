@@ -90,26 +90,21 @@ class FaissNN(object):
         return index
 
     def _index_to_cpu(self, index):
-        if self.on_gpu and hasattr(faiss, "index_gpu_to_cpu"):
+        if index is None:
+            return None
+        if hasattr(index, "to_cpu"):
+            try:
+                return index.to_cpu()
+            except Exception:
+                pass
+        if hasattr(faiss, "index_gpu_to_cpu"):
             try:
                 return faiss.index_gpu_to_cpu(index)
             except Exception:
-                return index
+                pass
         return index
 
     def _create_index(self, dimension):
-        if self.on_gpu and hasattr(faiss, "GpuIndexFlatL2"):
-            try:
-                dev_id = self.device_id.index if hasattr(self.device_id, 'index') and self.device_id.index is not None else int(self.device_id if isinstance(self.device_id, int) else 0)
-                res = faiss.StandardGpuResources()
-                res.setTempMemory(32 * 1024 * 1024)
-                cfg = faiss.GpuIndexFlatConfig()
-                cfg.device = dev_id
-                return faiss.GpuIndexFlatL2(res, dimension, cfg)
-            except Exception as exc:
-                LOGGER.warning("GpuIndexFlatL2 creation failed (%s), falling back to faiss-cpu IndexFlatL2", exc)
-                self.on_gpu = False
-                return faiss.IndexFlatL2(dimension)
         return faiss.IndexFlatL2(dimension)
 
     def fit(self, features: np.ndarray) -> None:
@@ -155,17 +150,29 @@ class FaissNN(object):
         try:
             faiss.write_index(cpu_idx, filename)
         except Exception:
-            chunk = faiss.serialize_index(cpu_idx)
-            with open(filename, "wb") as f:
-                f.write(chunk)
+            import tempfile, shutil
+            with tempfile.NamedTemporaryFile(suffix=".faiss", delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                faiss.write_index(cpu_idx, tmp_path)
+                shutil.copyfile(tmp_path, filename)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
 
     def load(self, filename: str) -> None:
         try:
             raw_idx = faiss.read_index(filename, faiss.IO_FLAG_MMAP)
         except Exception:
-            with open(filename, "rb") as f:
-                buf = f.read()
-            raw_idx = faiss.deserialize_index(np.frombuffer(buf, dtype=np.uint8))
+            import tempfile, shutil
+            with tempfile.NamedTemporaryFile(suffix=".faiss", delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                shutil.copyfile(filename, tmp_path)
+                raw_idx = faiss.read_index(tmp_path, faiss.IO_FLAG_MMAP)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
         self.search_index = self._index_to_gpu(raw_idx)
 
     def reset_index(self):

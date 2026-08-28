@@ -325,7 +325,7 @@ def train(args) -> List[Dict[str, object]]:
                 shuffle=False,
                 **loader_kwargs,
             )
-            if test_dataset is not None
+            if (test_dataset is not None and not getattr(args, "skip_eval", False))
             else None
         )
 
@@ -454,6 +454,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="CUDA device index (default: 0).",
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--skip_eval", action="store_true", help="Skip evaluation during training.")
     return parser
 
 

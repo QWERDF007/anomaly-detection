@@ -51,11 +51,6 @@ IMAGE_EXTS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 
 
 def resolve_model(path_str: str) -> Path:
-    candidates = glob.glob(path_str, recursive=True)
-    if candidates:
-        candidates = sorted([Path(p) for p in candidates if Path(p).is_file()], key=lambda p: p.stat().st_mtime, reverse=True)
-        if candidates:
-            return candidates[0]
     p = Path(path_str).expanduser()
     if p.is_file():
         return p
@@ -63,6 +58,15 @@ def resolve_model(path_str: str) -> Path:
         found = sorted(list(p.rglob("model.pth")), key=lambda x: x.stat().st_mtime, reverse=True)
         if found:
             return found[0]
+    if p.parent.is_dir():
+        found = sorted(list(p.parent.rglob("model.pth")), key=lambda x: x.stat().st_mtime, reverse=True)
+        if found:
+            return found[0]
+    candidates = glob.glob(path_str, recursive=True)
+    if candidates:
+        candidates = sorted([Path(c) for c in candidates if Path(c).is_file()], key=lambda c: c.stat().st_mtime, reverse=True)
+        if candidates:
+            return candidates[0]
     raise FileNotFoundError(f"Model not found: {path_str}")
 
 
