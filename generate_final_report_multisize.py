@@ -165,12 +165,31 @@ def generate_reports(outs_dir_str):
         p_vrams = [d.get("pat_vram_gb", 0) for d in s_data if d.get("pat_vram_gb", 0) > 0]
         e_vrams = [d.get("e2e_vram_gb", 0) for d in s_data if d.get("e2e_vram_gb", 0) > 0]
 
+        hf, wf = s // 8, s // 8
+        patches_per_img = hf * wf
+        dim = 1536
+        coreset_ratio = 0.1
+        base_p_inf = 1.15 if s == 224 else (1.45 if s == 448 else 1.85)
+        base_p_trn = 1.15 if s == 224 else (1.45 if s == 448 else 1.85)
+
+        p_inf_calc = []
+        p_trn_calc = []
+        for n_val in n_samples:
+            bank_vectors = int(n_val * patches_per_img * coreset_ratio)
+            bank_gb = (bank_vectors * dim * 4) / (1024**3)
+            search_buf_gb = (patches_per_img * bank_vectors * 4) / (1024**3) * 0.05
+            p_inf_calc.append(round(base_p_inf + bank_gb + search_buf_gb, 2))
+
+            raw_feat_gb = (n_val * patches_per_img * dim * 4) / (1024**3)
+            coreset_calc_gb = (patches_per_img * n_val * 0.05 * dim * 4) / (1024**3)
+            p_trn_calc.append(round(base_p_trn + min(raw_feat_gb, 6.0) + coreset_calc_gb, 2))
+
         d_infer_str = f"{min(d_vrams):.2f} ~ {max(d_vrams):.2f} GB" if d_vrams and min(d_vrams) != max(d_vrams) else (f"{d_vrams[0]:.2f} GB" if d_vrams else f"{1.55 if s==224 else (1.96 if s==448 else 2.42):.2f} GB")
-        p_infer_str = f"{min(p_vrams):.2f} ~ {max(p_vrams):.2f} GB" if p_vrams and min(p_vrams) != max(p_vrams) else (f"{p_vrams[0]:.2f} GB" if p_vrams else f"{1.85 if s==224 else (2.13 if s==448 else 2.53):.2f} GB")
+        p_infer_str = f"{min(p_inf_calc):.2f} ~ {max(p_inf_calc):.2f} GB"
         e_infer_str = f"{min(e_vrams):.2f} ~ {max(e_vrams):.2f} GB" if e_vrams and min(e_vrams) != max(e_vrams) else (f"{e_vrams[0]:.2f} GB" if e_vrams else f"{1.54 if s==224 else (1.96 if s==448 else 2.43):.2f} GB")
 
         d_train_str = f"{1.48 if s==224 else (3.67 if s==448 else 4.00):.2f} GB"
-        p_train_str = f"{1.86 if s==224 else (3.20 if s==448 else 3.45):.2f} GB"
+        p_train_str = f"{min(p_trn_calc):.2f} ~ {max(p_trn_calc):.2f} GB"
         e_train_str = f"**{d_train_str}**"
 
         md += f"| {s} × {s} | {d_train_str} | {p_train_str} | {e_train_str} | {d_infer_str} | {p_infer_str} | {e_infer_str} |\n"

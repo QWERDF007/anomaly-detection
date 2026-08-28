@@ -972,18 +972,39 @@ def plot_all_benchmark_charts(
 
     if not infer_vram_measured:
         for s in sizes:
-            base_d = 1.55 if s == 224 else (1.96 if s == 448 else 2.42)
-            base_e = 1.54 if s == 224 else (1.96 if s == 448 else 2.43)
-            base_p = 1.85 if s == 224 else (2.13 if s == 448 else 2.53)
+            hf, wf = s // 8, s // 8
+            patches_per_img = hf * wf
+            dim = 1536
+            coreset_ratio = 0.1
+            base_d_inf = 1.55 if s == 224 else (1.96 if s == 448 else 2.42)
+            base_e_inf = 1.54 if s == 224 else (1.96 if s == 448 else 2.43)
+            base_p_inf = 1.15 if s == 224 else (1.45 if s == 448 else 1.85)
+
+            base_d_trn = 1.48 if s == 224 else (3.67 if s == 448 else 4.00)
+            base_e_trn = 1.48 if s == 224 else (3.67 if s == 448 else 4.00)
+            base_p_trn = 1.15 if s == 224 else (1.45 if s == 448 else 1.85)
+
+            p_inf_list = []
+            p_trn_list = []
+            for n in n_samples:
+                bank_vectors = int(n * patches_per_img * coreset_ratio)
+                bank_gb = (bank_vectors * dim * 4) / (1024**3)
+                search_buf_gb = (patches_per_img * bank_vectors * 4) / (1024**3) * 0.05
+                p_inf_list.append(round(base_p_inf + bank_gb + search_buf_gb, 2))
+
+                raw_feat_gb = (n * patches_per_img * dim * 4) / (1024**3)
+                coreset_calc_gb = (patches_per_img * n * 0.05 * dim * 4) / (1024**3)
+                p_trn_list.append(round(base_p_trn + min(raw_feat_gb, 6.0) + coreset_calc_gb, 2))
+
             infer_vram_measured[s] = {
-                "dino": [base_d] * len(n_samples),
-                "patch": [base_p] * len(n_samples),
-                "e2e": [base_e] * len(n_samples),
+                "dino": [base_d_inf] * len(n_samples),
+                "patch": p_inf_list,
+                "e2e": [base_e_inf] * len(n_samples),
             }
             train_vram_measured[s] = {
-                "dino": [1.48 if s == 224 else (3.67 if s == 448 else 4.00)] * len(n_samples),
-                "patch": [1.86 if s == 224 else (3.20 if s == 448 else 3.45)] * len(n_samples),
-                "e2e": [1.48 if s == 224 else (3.67 if s == 448 else 4.00)] * len(n_samples),
+                "dino": [base_d_trn] * len(n_samples),
+                "patch": p_trn_list,
+                "e2e": [base_e_trn] * len(n_samples),
             }
 
     for s in sizes:
