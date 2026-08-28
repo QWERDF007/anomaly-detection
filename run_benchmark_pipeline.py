@@ -156,6 +156,24 @@ def main():
     splits_dir = outs_dir / "data_splits"
     splits_dir.mkdir(parents=True, exist_ok=True)
 
+    # Automatic Tee logger to outs_dir/pipeline_execution.log
+    log_file_path = outs_dir / "pipeline_execution.log"
+    class TeeLogger:
+        def __init__(self, original_stdout, log_file):
+            self.terminal = original_stdout
+            self.log = log_file
+        def write(self, message):
+            self.terminal.write(message)
+            self.log.write(message)
+            self.log.flush()
+        def flush(self):
+            self.terminal.flush()
+            self.log.flush()
+
+    log_file = open(log_file_path, "a", encoding="utf-8")
+    sys.stdout = TeeLogger(sys.stdout, log_file)
+    sys.stderr = TeeLogger(sys.stderr, log_file)
+
     gpu_list = parse_gpu_list(args.gpus)
     bank_data = Path(args.bank_data).expanduser().resolve() if args.bank_data else (dataset_root / "建库数据" if (dataset_root / "建库数据").is_dir() else None)
 
