@@ -555,27 +555,27 @@ def build_interactive_html(
           <input type="checkbox" id="chkSize224" checked data-size="224">
           <svg width="22" height="14" class="hatch-swatch">
             <defs>
-              <pattern id="sb-pat-224" width="8" height="8" patternUnits="userSpaceOnUse">
-                <line x1="0" y1="4" x2="8" y2="4" stroke="rgba(255,255,255,0.85)" stroke-width="2.2" />
+              <pattern id="sb-pat-224" width="7" height="7" patternUnits="userSpaceOnUse">
+                <circle cx="3.5" cy="3.5" r="1.5" fill="rgba(255,255,255,0.88)" />
               </pattern>
             </defs>
             <rect width="22" height="14" fill="#475569" rx="2" />
             <rect width="22" height="14" fill="url(#sb-pat-224)" rx="2" />
           </svg>
-          <span>224 × 224 (横线纹理)</span>
+          <span>224 × 224 (圆点纹理)</span>
         </label>
         <label class="checkbox-item">
           <input type="checkbox" id="chkSize448" checked data-size="448">
           <svg width="22" height="14" class="hatch-swatch">
             <defs>
-              <pattern id="sb-pat-448" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
-                <line x1="0" y1="0" x2="0" y2="9" stroke="rgba(255,255,255,0.85)" stroke-width="2.6" />
+              <pattern id="sb-pat-448" width="8" height="8" patternUnits="userSpaceOnUse">
+                <line x1="0" y1="4" x2="8" y2="4" stroke="rgba(255,255,255,0.85)" stroke-width="2.2" />
               </pattern>
             </defs>
             <rect width="22" height="14" fill="#475569" rx="2" />
             <rect width="22" height="14" fill="url(#sb-pat-448)" rx="2" />
           </svg>
-          <span>448 × 448 (左斜线纹理)</span>
+          <span>448 × 448 (横线纹理)</span>
         </label>
         <label class="checkbox-item">
           <input type="checkbox" id="chkSize672" checked data-size="672">
@@ -588,7 +588,7 @@ def build_interactive_html(
             <rect width="22" height="14" fill="#475569" rx="2" />
             <rect width="22" height="14" fill="url(#sb-pat-672)" rx="2" />
           </svg>
-          <span>672 × 672 (右斜线纹理)</span>
+          <span>672 × 672 (斜线纹理)</span>
         </label>
       </div>
     </div>
@@ -671,20 +671,20 @@ def build_interactive_html(
             <rect id="clipRect" x="85" y="65" width="1165" height="530" />
           </clipPath>
 
-          <!-- Academic Line Hatch Patterns for Image Resolutions -->
-          <!-- 672x672: +45° Right Diagonal Stripes /// -->
+          <!-- Academic Line & Dot Hatch Patterns for Image Resolutions -->
+          <!-- 672x672: +45° Diagonal Stripes /// -->
           <pattern id="pat-672" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
             <line x1="0" y1="0" x2="0" y2="9" stroke="rgba(255,255,255,0.78)" stroke-width="2.6" />
           </pattern>
 
-          <!-- 448x448: -45° Left Diagonal Stripes (Left Diagonal) -->
-          <pattern id="pat-448" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
-            <line x1="0" y1="0" x2="0" y2="9" stroke="rgba(255,255,255,0.78)" stroke-width="2.6" />
+          <!-- 448x448: Horizontal Stripes --- -->
+          <pattern id="pat-448" width="8" height="8" patternUnits="userSpaceOnUse">
+            <line x1="0" y1="4" x2="8" y2="4" stroke="rgba(255,255,255,0.80)" stroke-width="2.4" />
           </pattern>
 
-          <!-- 224x224: Horizontal Stripes --- -->
-          <pattern id="pat-224" width="8" height="8" patternUnits="userSpaceOnUse">
-            <line x1="0" y1="4" x2="8" y2="4" stroke="rgba(255,255,255,0.80)" stroke-width="2.4" />
+          <!-- 224x224: Circular Polka Dots ::: -->
+          <pattern id="pat-224" width="7" height="7" patternUnits="userSpaceOnUse">
+            <circle cx="3.5" cy="3.5" r="1.5" fill="rgba(255,255,255,0.88)" />
           </pattern>
         </defs>
 
@@ -1646,9 +1646,9 @@ function renderTopHeaderLegend(group) {{
   let rightX = MARGIN.left + PLOT_WIDTH;
 
   const sizes = [
-    {{ s: 672, id: "chkSize672", label: "672×672 (右斜线)" }},
-    {{ s: 448, id: "chkSize448", label: "448×448 (左斜线)" }},
-    {{ s: 224, id: "chkSize224", label: "224×224 (横线)" }}
+    {{ s: 672, id: "chkSize672", label: "672×672 (斜线)" }},
+    {{ s: 448, id: "chkSize448", label: "448×448 (横线)" }},
+    {{ s: 224, id: "chkSize224", label: "224×224 (圆点)" }}
   ];
 
   sizes.reverse().forEach(sz => {{
@@ -1707,7 +1707,7 @@ const tooltip = document.getElementById("tooltip");
 function showTooltip(e, p) {{
   const activeCfg = METRIC_CONFIG[currentMetric];
   const activeValStr = formatMetricVal(p.y_val, currentMetric);
-  const sizeDesc = p.size === 672 ? "672 × 672 (右斜线)" : (p.size === 448 ? "448 × 448 (左斜线)" : "224 × 224 (横线)");
+  const sizeDesc = p.size === 672 ? "672 × 672 (斜线)" : (p.size === 448 ? "448 × 448 (横线)" : "224 × 224 (圆点)");
 
   tooltip.innerHTML = `
     <div class="tt-title">
@@ -1756,7 +1756,7 @@ function hideTooltip() {{
 function showDetailCard(p) {{
   const activeCfg = METRIC_CONFIG[currentMetric];
   const panel = document.getElementById("detailPanel");
-  const sizeDesc = p.size === 672 ? "672 × 672 (右斜线)" : (p.size === 448 ? "448 × 448 (左斜线)" : "224 × 224 (横线)");
+  const sizeDesc = p.size === 672 ? "672 × 672 (斜线)" : (p.size === 448 ? "448 × 448 (横线)" : "224 × 224 (圆点)");
   panel.innerHTML = `
     <span><strong>选中实验:</strong> <span style="color: ${{p.color}}; font-weight: 700;">${{p.model}}</span> | <strong>${{activeCfg.label}}:</strong> <span style="color: #2563eb; font-weight: 700;">${{formatMetricVal(p.y_val, currentMetric)}}</span> | <strong>AUROC:</strong> ${{p.auc.toFixed(4)}} | <strong>F1:</strong> ${{p.f1 ? p.f1.toFixed(4) : 'N/A'}} | <strong>TP/FP:</strong> ${{p.tp}}/${{p.fp}} | <strong>N:</strong> ${{p.n}} ${{NON_ITERATION_METRICS.includes(currentMetric) ? "" : `| <strong>迭代:</strong> ${{p.iters.toLocaleString()}}`}} | <strong>尺寸:</strong> ${{sizeDesc}} | <strong>延迟:</strong> ${{p.lat_ms.toFixed(1)}}ms | <strong>耗时:</strong> ${{p.train_time_m.toFixed(1)}}min</span>
   `;
