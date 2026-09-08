@@ -1401,7 +1401,7 @@ function renderBarChart(selectedModels, selectedSizes, selectedNs, selectedIters
         }} else if (currentMetric === "vram_gb") {{
           valLabel = item.y_val.toFixed(2) + "G";
         }} else if (currentMetric === "lat_ms") {{
-          valLabel = item.y_val < 10 ? item.y_val.toFixed(1) + "ms" : Math.round(item.y_val) + "ms";
+          valLabel = item.y_val.toFixed(1) + "ms";
         }} else if (["fps", "tp", "fp"].includes(currentMetric) || cfg.digits === 0) {{
           valLabel = Math.round(item.y_val).toString();
         }} else {{
