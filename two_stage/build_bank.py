@@ -149,6 +149,8 @@ def main():
             backbone = "dinov2reg_vit_small_14"
         elif in_dim == 768 and "base" not in backbone:
             backbone = "dinov2reg_vit_base_14"
+        elif in_dim == 1024 and "large" not in backbone:
+            backbone = "dinov2reg_vit_large_14"
 
     encoder = vit_encoder.load(backbone)
     if "small" in backbone:
@@ -171,12 +173,31 @@ def main():
         VitBlock(dim=embed_dim, num_heads=num_heads, mlp_ratio=4.0, qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-8), attn=partial(LinearAttention2, eps=1e-8))
         for _ in range(8)
     ])
-    model = Dinomaly(encoder=encoder, bottleneck=bottleneck, decoder=decoder, target_layers=target_layers, remove_class_token=False, fuse_layer_encoder=fuse_layer_encoder, fuse_layer_decoder=fuse_layer_decoder, context_aware_recenter=1)
+    has_adapters = any(k.startswith('feature_adapters') for k in ckpt.keys())
+    feature_adapters = []
+    if has_adapters:
+        from models.domain_adapter import CanonicalizationAdapter
+        feature_adapters = [
+            CanonicalizationAdapter(embed_dim, bottleneck_ratio=0.25, alpha_init=0.0)
+            for _ in fuse_layer_encoder
+        ]
+    model = Dinomaly(
+        encoder=encoder,
+        bottleneck=bottleneck,
+        decoder=decoder,
+        target_layers=target_layers,
+        remove_class_token=False,
+        fuse_layer_encoder=fuse_layer_encoder,
+        fuse_layer_decoder=fuse_layer_decoder,
+        context_aware_recenter=1,
+        feature_adapters=feature_adapters,
+    )
     model.load_state_dict(ckpt, strict=True)
     model.to(device).eval()
 
+    dino_s = (args.image_size // 14) * 14 if args.image_size % 14 != 0 else args.image_size
     transform = transforms.Compose([
-        transforms.Resize((args.image_size, args.image_size)),
+        transforms.Resize((dino_s, dino_s)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
@@ -249,6 +270,18 @@ def main():
         backbone=np.array(backbone),
     )
     print(f"[build_bank] saved -> {save_bank} ({save_bank.stat().st_size / 1024:.1f} KB)")
+
+    peak_mem_mb = torch.cuda.max_memory_allocated(device) / (1024 * 1024) if torch.cuda.is_available() else 0.0
+    bank_metrics = {
+        "peak_gpu_mem_mb": round(peak_mem_mb, 2),
+        "ab_patches": int(ab_feats.shape[0]),
+        "nor_patches": int(nor_feats.shape[0]),
+    }
+    try:
+        with open(save_bank.parent / "bank_metrics.json", "w", encoding="utf-8") as f:
+            json.dump(bank_metrics, f, indent=2)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

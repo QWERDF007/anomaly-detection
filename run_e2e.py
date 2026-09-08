@@ -89,7 +89,7 @@ def resolve_model(path_str: Optional[str]) -> Optional[Path]:
     return None
 
 
-def build_dinomaly_model(backbone: str = "dinov2reg_vit_base_14") -> Tuple[nn.Module, int]:
+def build_dinomaly_model(backbone: str = "dinov2reg_vit_base_14", feature_adapters=None) -> Tuple[nn.Module, int]:
     from models import vit_encoder
     from models.uad import Dinomaly
     from models.vision_transformer import Block as VitBlock, LinearAttention2
@@ -143,6 +143,7 @@ def build_dinomaly_model(backbone: str = "dinov2reg_vit_base_14") -> Tuple[nn.Mo
         fuse_layer_encoder=fuse_layer_encoder,
         fuse_layer_decoder=fuse_layer_decoder,
         context_aware_recenter=1,
+        feature_adapters=feature_adapters,
     )
     return model, embed_dim
 
@@ -310,7 +311,16 @@ def run_single_task(task_cfg: Dict[str, Any]) -> Dict[str, Any]:
         elif in_dim == 1024 and "large" not in backbone:
             backbone = "dinov2reg_vit_large_14"
 
-    model, embed_dim = build_dinomaly_model(backbone)
+    has_adapters = any(k.startswith('feature_adapters') for k in ckpt.keys())
+    feature_adapters = None
+    if has_adapters:
+        from models.domain_adapter import CanonicalizationAdapter
+        embed_dim = 384 if "small" in backbone else (768 if "base" in backbone else 1024)
+        feature_adapters = [
+            CanonicalizationAdapter(embed_dim, bottleneck_ratio=0.25, alpha_init=0.0)
+            for _ in [[0, 1, 2, 3], [4, 5, 6, 7]]
+        ]
+    model, embed_dim = build_dinomaly_model(backbone, feature_adapters=feature_adapters)
     model.load_state_dict(ckpt, strict=True)
     model.to(device).eval()
 

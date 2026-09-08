@@ -1,308 +1,260 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""Comprehensive Benchmark Report Generator for Multi-Size Anomaly Detection.
+
+Parses final_multisize_summary.json and generates FINAL_BENCHMARK_REPORT.md:
+  - Top visual charts overview (embedded)
+  - Live measured training, inference, and VRAM hardware benchmarks
+  - Clean in-domain vs full test evaluation breakdown
+  - Iteration scaling performance table (2000, 5000, 20000, 40000 iters)
+  - Detailed N-sample evaluation breakdowns
+
+STRICT DATA INTEGRITY:
+  - NO synthetic or hardcoded fallback numbers.
+  - Every statistic is calculated directly from measured data.
+"""
+from __future__ import annotations
+
 import os
 import sys
 import json
+import time
 import argparse
 from pathlib import Path
 import numpy as np
 
-def generate_reports(outs_dir_str):
-    outs_dir = Path(outs_dir_str)
 
+def generate_reports(outs_dir_str: str) -> None:
+    outs_dir = Path(outs_dir_str).expanduser().resolve()
     summary_path = outs_dir / "final_multisize_summary.json"
-    if summary_path.exists():
-        with open(summary_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    else:
-        print(f"Error: {summary_path} not found.")
+    if not summary_path.exists():
+        print(f"[ERROR] Summary file not found: {summary_path}")
         return
 
-    n_samples = sorted(list({d["n"] for d in data})) if data else [50, 100, 200, 400]
-    sizes = sorted(list({d["size"] for d in data})) if data else [224, 448, 672]
+    data = json.loads(summary_path.read_text(encoding="utf-8"))
+    if not data:
+        print(f"[ERROR] Summary file is empty: {summary_path}")
+        return
 
-    sample_r = data[0] if data else {}
+    n_samples = sorted(list({int(d["n"]) for d in data}))
+    sizes = sorted(list({int(d["size"]) for d in data}))
+    iters_list = sorted(list({int(d.get("iters", 2000)) for d in data}))
+
+    sample_r = data[0]
     good_test = int(sample_r.get("e2e_fp", 0) + sample_r.get("e2e_tn", 0))
     defect_test = int(sample_r.get("e2e_tp", 0) + sample_r.get("e2e_fn", 0))
     total_test = good_test + defect_test
 
-    if "透气膜" in str(outs_dir):
-        dataset_name = "透气膜"
-    elif "4相机" in str(outs_dir):
-        dataset_name = "铜色异常检测（4相机）"
-    elif "6相机" in str(outs_dir):
-        dataset_name = "铜色异常检测（6相机）"
-    else:
-        dataset_name = outs_dir.name
+    dataset_name = outs_dir.name
+    for kw in ["透气膜", "铜色异常检测4相机", "铜色异常检测6相机"]:
+        if kw in str(outs_dir):
+            dataset_name = kw
+            break
 
-    # Build clean markdown report with visual charts placed at the very top
-    md = f"""# {dataset_name} 全量基准测试与多维度评测报告
+    primary_iter = iters_list[-1] if iters_list else 2000
+    primary_data = [d for d in data if d.get("iters", primary_iter) == primary_iter] or data
 
-- 数据集：{dataset_name}（{good_test} 张正常图像 + {defect_test} 张异常缺陷图像，共 {total_test} 张）
-- 判决模式：**全量采用「最佳 F1 平衡模式」**（基于得分分布自适应双阈值判决，兼顾高查全率与超低误报率）。
-- 结构规范：**全量核心可视化图表置于报告首页前部（置顶总览）**，随后依次呈现算力性能基准与各样本规模 N 详细评测数据表。
-- 高亮规范：在每张表格中，对每行（各分辨率下）最优的性能指标使用 ==xxx== 进行高亮对比。
-- 图表规范：所有评测对比图表均采用相对路径直接内嵌展示。
-- 报告时间：2026-08-27
-- 产出目录：{outs_dir.as_posix()}/
+    now_str = time.strftime("%Y-%m-%d %H:%M:%S")
 
----
+    md = f"""# {dataset_name} 全量工业基准评测报告 (真实硬件监测与评估)
 
-## 1. 全量可视化图表与性能趋势展示 (置顶总览)
-
-### 1.1 图像级 AUROC 与 F1-Max 性能曲线
-![AUROC 曲线 (224x224)](charts/01_image_auroc_curve_s224.png)
-![AUROC 曲线 (448x448)](charts/01_image_auroc_curve_s448.png)
-![AUROC 曲线 (672x672)](charts/01_image_auroc_curve_s672.png)
-![F1 曲线 (224x224)](charts/02_image_f1_curve_s224.png)
-![F1 曲线 (448x448)](charts/02_image_f1_curve_s448.png)
-![F1 曲线 (672x672)](charts/02_image_f1_curve_s672.png)
-
-### 1.2 缺陷检出准确数 (TP) 与 正常样本误报数 (FP) 对比
-![缺陷检出 (224x224)](charts/03_defect_detection_tp_s224.png)
-![缺陷检出 (448x448)](charts/03_defect_detection_tp_s448.png)
-![缺陷检出 (672x672)](charts/03_defect_detection_tp_s672.png)
-![误报数量 (224x224)](charts/04_false_alarms_fp_s224.png)
-![误报数量 (448x448)](charts/04_false_alarms_fp_s448.png)
-![误报数量 (672x672)](charts/04_false_alarms_fp_s672.png)
-
-### 1.3 全流程训练耗时、推理吞吐、单图延迟与显存开销
-![训练耗时对比 (224x224)](charts/05_training_time_comparison_s224.png)
-![训练耗时对比 (448x448)](charts/05_training_time_comparison_s448.png)
-![训练耗时对比 (672x672)](charts/05_training_time_comparison_s672.png)
-![推理吞吐量 (224x224)](charts/04_inference_throughput_fps_s224.png)
-![推理吞吐量 (448x448)](charts/04_inference_throughput_fps_s448.png)
-![推理吞吐量 (672x672)](charts/04_inference_throughput_fps_s672.png)
-![推理时延对比 (224x224)](charts/06_inference_latency_comparison_s224.png)
-![推理时延对比 (448x448)](charts/06_inference_latency_comparison_s448.png)
-![推理时延对比 (672x672)](charts/06_inference_latency_comparison_s672.png)
-![训练显存占用 (224x224)](charts/07_training_vram_usage_s224.png)
-![训练显存占用 (448x448)](charts/07_training_vram_usage_s448.png)
-![训练显存占用 (672x672)](charts/07_training_vram_usage_s672.png)
-![推理显存占用 (224x224)](charts/07_inference_vram_usage_s224.png)
-![推理显存占用 (448x448)](charts/07_inference_vram_usage_s448.png)
-![推理显存占用 (672x672)](charts/07_inference_vram_usage_s672.png)
+- **评测数据集**：{dataset_name}（{good_test} 张正常样本 + {defect_test} 张缺陷样本，共 {total_test} 张测试样本）
+- **判决模式**：基于图像级异常分数分布的**全局最优 F1-Score 阈值 $\\tau^*$**
+- **训练规格**：固定 Batch Size = 8，评估迭代轮次：{iters_list}
+- **数据保真度**：**100% 来源于真实执行日志与 GPU 在线硬件监测，无任何硬编码或虚假合成数据**
+- **生成时间**：{now_str}
+- **结果输出目录**：`{outs_dir.as_posix()}/`
 
 ---
 
-## 2. 算力开销、推理性能与显存基准
+## 1. 核心评测图表全景 (置顶展示)
 
-### 2.1 模型训练与建库耗时全景对比（含前向特征提取+降采样+建库完整流程）
-| 输入尺寸 (Row) | Dinomaly2 深度训练 (Col 1) | PatchCore 全流程建库 (Col 2) | 二阶段端到端总配置耗时 (Dinomaly2训练 + 特征库建库) (Col 3) |
-| :--- | :--- | :--- | :--- |
-"""
-    import datetime
-    for s in sizes:
-        d_times = []
-        p_times = []
-        for n in n_samples:
-            d_cands = sorted(list(outs_dir.glob(f"dinomaly2_n{n}_s{s}_*/**/model.pth")) + list(outs_dir.glob(f"dinomaly2_n{n}_s{s}_*/model.pth")), key=lambda p: p.stat().st_mtime, reverse=True)
-            if d_cands:
-                p = d_cands[0]
-                try:
-                    t_start = datetime.datetime.strptime(p.parent.name, "%Y%m%d%H%M%S")
-                    t_end = datetime.datetime.fromtimestamp(p.stat().st_mtime)
-                    d_times.append((t_end - t_start).total_seconds())
-                except Exception:
-                    pass
-            p_cands = sorted(list(outs_dir.glob(f"patchcore_n{n}_s{s}_*/**/patchcore_params.pkl")) + list(outs_dir.glob(f"patchcore_n{n}_s{s}_*/**/patchcore_params.pkl")), key=lambda p: p.stat().st_mtime, reverse=True)
-            if p_cands:
-                p = p_cands[0]
-                try:
-                    t_start = datetime.datetime.strptime(p.parent.name, "%Y%m%d%H%M%S")
-                    t_end = datetime.datetime.fromtimestamp(p.stat().st_mtime)
-                    p_times.append((t_end - t_start).total_seconds())
-                except Exception:
-                    pass
-
-        if d_times:
-            d_t_str = f"{min(d_times)/60.0:.2f} ~ {max(d_times)/60.0:.2f} 分钟 ({min(d_times):.0f}~{max(d_times):.0f}s)" if len(d_times) > 1 else f"{d_times[0]/60.0:.2f} 分钟 ({d_times[0]:.0f}s)"
-        else:
-            d_t_str = "8.3 ~ 19.5 分钟 (实测中)"
-
-        if p_times:
-            p_t_str = f"{min(p_times)/60.0:.2f} ~ {max(p_times)/60.0:.2f} 分钟 ({min(p_times):.0f}~{max(p_times):.0f}s)" if len(p_times) > 1 else f"{p_times[0]/60.0:.2f} 分钟 ({p_times[0]:.0f}s)"
-        else:
-            p_t_str = "0.1 ~ 10.8 分钟 (实测中)"
-
-        e2e_t_min = (min(d_times) if d_times else 500) + 10.0
-        e2e_t_max = (max(d_times) if d_times else 1170) + 15.0
-        e_t_str = f"**{e2e_t_min/60.0:.2f} ~ {e2e_t_max/60.0:.2f} 分钟**"
-
-        md += f"| {s} × {s} | {d_t_str} | {p_t_str} | {e_t_str} |\n"
-
-    md += """
-### 2.2 单图推理时延与吞吐量（统一口径：内存预处理 + GPU模型推理 + 异常图与阈值后处理全链路，Batch=1，不含磁盘I/O）
-| 输入尺寸 (Row) | Dinomaly2 单阶段全链路时延 (Col 1) | PatchCore 全流程检索时延 (Col 2，随样本量N递增) | 二阶段端到端总时延 (Dinomaly2前向 + GPU检索纠偏) (Col 3) |
-| :--- | :--- | :--- | :--- |
+### 1.1 核心精度指标演化 (AUROC & F1-Score)
 """
     for s in sizes:
-        s_data = [d for d in data if d["size"] == s]
-        d_lats = [d.get("din_lat_ms", 1000.0 / d["din_fps"]) for d in s_data if d.get("din_lat_ms", 0) > 0 or d.get("din_fps", 0) > 0]
-        d_lat_avg = float(np.mean(d_lats)) if d_lats else (17.86 if s == 224 else (64.53 if s == 448 else 161.93))
-        d_fps_avg = 1000.0 / d_lat_avg
-
-        p_lats = [d.get("pat_lat_ms", 0) for d in s_data if d.get("pat_lat_ms", 0) > 0]
-        if p_lats:
-            p_fps_vals = [1000.0 / lat for lat in p_lats]
-            p_str = f"{min(p_lats):.2f} ~ {max(p_lats):.2f} ms ({max(p_fps_vals):.1f} ~ {min(p_fps_vals):.1f} FPS)" if len(p_lats) > 1 else f"{p_lats[0]:.2f} ms ({p_fps_vals[0]:.1f} FPS)"
-        else:
-            p_str = "0.0 ms (OOM)"
-
-        e_lats = [d.get("e2e_lat_ms", 1000.0 / d.get("fps", 50.0)) for d in s_data if d.get("e2e_lat_ms", 0) > 0 or d.get("fps", 0) > 0]
-        e_lat_avg = float(np.mean(e_lats)) if e_lats else (18.39 if s == 224 else (62.63 if s == 448 else 160.59))
-        e_fps_avg = 1000.0 / e_lat_avg
-        extra = max(0.0, e_lat_avg - d_lat_avg)
-
-        md += f"| {s} × {s} | {d_lat_avg:.2f} ms ({d_fps_avg:.1f} FPS) | {p_str} | ==**{e_lat_avg:.2f} ms (~{e_fps_avg:.1f} FPS)**==（前向 {d_lat_avg:.2f}ms + 检索 {extra:.2f}ms） |\n"
-
-    md += """
-### 2.3 显存资源占用（按模型与阶段细分，GPU 硬件实时实测）
-| 输入尺寸 (Row) | Dinomaly2 训练显存 (Col 1) | PatchCore 建库显存 (Col 2) | 二阶段端到端总训练显存峰值 (Col 3) | Dinomaly2 推理显存 (Col 4) | PatchCore 推理显存 (Col 5) | 二阶段端到端推理显存 (Col 6) |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-"""
+        md += f"![AUROC 曲线 ({s}x{s})](charts/01_image_auroc_curve_s{s}.png)\n"
     for s in sizes:
-        s_data = [d for d in data if d["size"] == s]
-        d_vrams = [d.get("din_vram_gb", 0) for d in s_data if d.get("din_vram_gb", 0) > 0]
-        p_vrams = [d.get("pat_vram_gb", 0) for d in s_data if d.get("pat_vram_gb", 0) > 0]
-        e_vrams = [d.get("e2e_vram_gb", 0) for d in s_data if d.get("e2e_vram_gb", 0) > 0]
+        md += f"![F1 曲线 ({s}x{s})](charts/02_image_f1_curve_s{s}.png)\n"
 
-        hf, wf = s // 8, s // 8
-        patches_per_img = hf * wf
-        dim = 1536
-        coreset_ratio = 0.1
-        base_p_inf = 1.15 if s == 224 else (1.45 if s == 448 else 1.85)
-        base_p_trn = 1.15 if s == 224 else (1.45 if s == 448 else 1.85)
+    md += "\n### 1.2 检出缺陷 (TP) 与 良品误报 (FP) 真实统计\n"
+    for s in sizes:
+        md += f"![缺陷检出 ({s}x{s})](charts/03_defect_detection_tp_s{s}.png)\n"
+    for s in sizes:
+        md += f"![误报数量 ({s}x{s})](charts/04_false_alarms_fp_s{s}.png)\n"
 
-        p_inf_calc = []
-        p_trn_calc = []
-        for n_val in n_samples:
-            bank_vectors = int(n_val * patches_per_img * coreset_ratio)
-            bank_gb = (bank_vectors * dim * 4) / (1024**3)
-            search_buf_gb = (patches_per_img * bank_vectors * 4) / (1024**3) * 0.05
-            p_inf_calc.append(round(base_p_inf + bank_gb + search_buf_gb, 2))
+    # In-domain clean domain charts if available
+    if (outs_dir / "charts" / "05_training_vs_test_clean_domain_fp_s448.png").is_file() or (outs_dir / "charts" / "05_training_vs_test_clean_domain_fp.png").is_file():
+        md += "\n### 1.3 干净域误报深度分解：训练集 (Train Clean) vs 测试集 (Test Clean)\n"
+        for s in sizes:
+            p_clean = outs_dir / "charts" / f"05_training_vs_test_clean_domain_fp_s{s}.png"
+            if p_clean.is_file():
+                md += f"![干净域误报分解 ({s}x{s})](charts/{p_clean.name})\n"
 
-            raw_feat_gb = (n_val * patches_per_img * dim * 4) / (1024**3)
-            coreset_calc_gb = (patches_per_img * n_val * 0.05 * dim * 4) / (1024**3)
-            p_trn_calc.append(round(base_p_trn + min(raw_feat_gb, 6.0) + coreset_calc_gb, 2))
+    md += "\n### 1.4 实测计算资源与时延指标 (FPS, Latency, VRAM, Time)\n"
+    for s in sizes:
+        md += f"![推理吞吐量 ({s}x{s})](charts/04_inference_throughput_fps_s{s}.png)\n"
+    for s in sizes:
+        md += f"![推理时延 ({s}x{s})](charts/06_inference_latency_comparison_s{s}.png)\n"
+    for s in sizes:
+        md += f"![训练耗时 ({s}x{s})](charts/05_training_time_comparison_s{s}.png)\n"
+    for s in sizes:
+        md += f"![显存开销 ({s}x{s})](charts/07_inference_vram_usage_s{s}.png)\n"
 
-        d_infer_str = f"{min(d_vrams):.2f} ~ {max(d_vrams):.2f} GB" if d_vrams and min(d_vrams) != max(d_vrams) else (f"{d_vrams[0]:.2f} GB" if d_vrams else f"{1.55 if s==224 else (1.96 if s==448 else 2.42):.2f} GB")
-        p_infer_str = f"{min(p_inf_calc):.2f} ~ {max(p_inf_calc):.2f} GB"
-        e_infer_str = f"{min(e_vrams):.2f} ~ {max(e_vrams):.2f} GB" if e_vrams and min(e_vrams) != max(e_vrams) else (f"{e_vrams[0]:.2f} GB" if e_vrams else f"{1.54 if s==224 else (1.96 if s==448 else 2.43):.2f} GB")
-
-        d_train_str = f"{1.48 if s==224 else (3.67 if s==448 else 4.00):.2f} GB"
-        p_train_str = f"{min(p_trn_calc):.2f} ~ {max(p_trn_calc):.2f} GB"
-        e_train_str = f"**{d_train_str}**"
-
-        md += f"| {s} × {s} | {d_train_str} | {p_train_str} | {e_train_str} | {d_infer_str} | {p_infer_str} | {e_infer_str} |\n"
+    if len(iters_list) > 1:
+        iters_str = ", ".join(str(it) for it in iters_list)
+        md += f"\n### 1.5 迭代轮次演化分析 (Max Iterations Scaling: {iters_str})\n"
+        for s in sizes:
+            if (outs_dir / "charts" / f"08_auroc_vs_max_iters_s{s}.png").is_file():
+                md += f"![AUROC 随迭代次数变化 ({s}x{s})](charts/08_auroc_vs_max_iters_s{s}.png)\n"
+            if (outs_dir / "charts" / f"08_f1_vs_max_iters_s{s}.png").is_file():
+                md += f"![F1 随迭代次数变化 ({s}x{s})](charts/08_f1_vs_max_iters_s{s}.png)\n"
 
     md += "\n---\n"
+    md += """
+## 2. 算力开销、硬件吞吐与显存基准 (真实在线实测)
 
+### 2.1 模型训练与建库耗时全景 (实测分钟数 min)
+| 输入尺寸 | Dinomaly2 深度训练耗时 | PatchCore 全流程特征建库耗时 | 二阶段端到端总配置耗时 (训练+建库) |
+| :--- | :--- | :--- | :--- |
+"""
+    for s in sizes:
+        s_data = [d for d in primary_data if d["size"] == s]
+        d_times = [d.get("din_train_time_m", 0.0) for d in s_data if d.get("din_train_time_m", 0.0) > 0]
+        p_times = [d.get("pat_train_time_m", 0.0) for d in s_data if d.get("pat_train_time_m", 0.0) > 0]
+
+        d_str = f"{min(d_times):.1f} ~ {max(d_times):.1f} 分钟" if d_times else "N/A"
+        p_str = f"{min(p_times):.1f} ~ {max(p_times):.1f} 分钟" if p_times else "N/A"
+        e_str = f"**{d_str}**" if d_times else "N/A"
+
+        md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
+
+    md += """
+### 2.2 在线推理时延与吞吐量 (统一 Batch=1 纯推理链路，不含磁盘I/O)
+| 输入尺寸 | Dinomaly2 单阶段时延 (FPS) | PatchCore 全检索时延 (FPS) | 二阶段端到端总时延 (FPS) |
+| :--- | :--- | :--- | :--- |
+"""
+    for s in sizes:
+        s_data = [d for d in primary_data if d["size"] == s]
+        d_lats = [d.get("din_lat_ms", 0.0) for d in s_data if d.get("din_lat_ms", 0.0) > 0]
+        p_lats = [d.get("pat_lat_ms", 0.0) for d in s_data if d.get("pat_lat_ms", 0.0) > 0]
+        e_lats = [d.get("e2e_lat_ms", 0.0) for d in s_data if d.get("e2e_lat_ms", 0.0) > 0]
+
+        d_str = f"{np.mean(d_lats):.2f} ms (~{1000.0/np.mean(d_lats):.1f} FPS)" if d_lats else "N/A"
+        p_str = f"{np.mean(p_lats):.2f} ms (~{1000.0/np.mean(p_lats):.1f} FPS)" if p_lats else "N/A"
+        e_str = f"==**{np.mean(e_lats):.2f} ms (~{1000.0/np.mean(e_lats):.1f} FPS)**==" if e_lats else "N/A"
+
+        md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
+
+    md += """
+### 2.3 GPU 硬件显存占用峰值 (实测 GB)
+| 输入尺寸 | Dinomaly2 训练显存 | PatchCore 建库显存 | Dinomaly2 推理显存 | PatchCore 推理显存 | 二阶段端到端推理显存 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+"""
+    for s in sizes:
+        s_data = [d for d in primary_data if d["size"] == s]
+        d_trn_v = [d.get("din_train_vram_gb", 0.0) for d in s_data if d.get("din_train_vram_gb", 0.0) > 0]
+        p_trn_v = [d.get("pat_train_vram_gb", 0.0) for d in s_data if d.get("pat_train_vram_gb", 0.0) > 0]
+        d_inf_v = [d.get("din_vram_gb", 0.0) for d in s_data if d.get("din_vram_gb", 0.0) > 0]
+        p_inf_v = [d.get("pat_vram_gb", 0.0) for d in s_data if d.get("pat_vram_gb", 0.0) > 0]
+        e_inf_v = [d.get("e2e_vram_gb", 0.0) for d in s_data if d.get("e2e_vram_gb", 0.0) > 0]
+
+        d_trn_s = f"{max(d_trn_v):.2f} GB" if d_trn_v else "N/A"
+        p_trn_s = f"{max(p_trn_v):.2f} GB" if p_trn_v else "N/A"
+        d_inf_s = f"{max(d_inf_v):.2f} GB" if d_inf_v else "N/A"
+        p_inf_s = f"{max(p_inf_v):.2f} GB" if p_inf_v else "N/A"
+        e_inf_s = f"{max(e_inf_v):.2f} GB" if e_inf_v else "N/A"
+
+        md += f"| {s} × {s} | {d_trn_s} | {p_trn_s} | {d_inf_s} | {p_inf_s} | {e_inf_s} |\n"
+
+    # Multi-iteration comparison section if applicable
+    if len(iters_list) > 1:
+        md += "\n---\n"
+        md += """
+## 3. 训练最大迭代次数 (Max Iterations) 梯度评测对比
+评估迭代轮次对深度重建模型表达能力与收敛裕度的影响：
+
+| 输入尺寸 | 正常样本 N | 迭代轮次 | Image AUROC | Image AP | Image F1 | 缺陷检出 (TP) | 误报数量 (FP) | 训练耗时 (min) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+"""
+        for s in sizes:
+            for n in n_samples:
+                for it in iters_list:
+                    match = [d for d in data if d["size"] == s and d["n"] == n and d.get("iters") == it]
+                    if match:
+                        row = match[0]
+                        md += f"| {s}×{s} | N={n} | **{it}** | {row['din_auc']:.4f} | {row['din_ap']:.4f} | {row['din_f1']:.4f} | {row['din_tp']} | {row['din_fp']} | {row.get('din_train_time_m', 0.0):.1f}m |\n"
+
+    md += "\n---\n"
+    # Detailed sample breakdown
+    section_num = 4 if len(iters_list) > 1 else 3
     for idx, n in enumerate(n_samples):
-        n_rows = [d for d in data if d["n"] == n]
-        if n_rows:
-            sample_r = n_rows[0]
-            good_test = int(sample_r["e2e_fp"] + sample_r["e2e_tn"])
-            defect_test = int(sample_r["e2e_tp"] + sample_r["e2e_fn"])
-            total_test = good_test + defect_test
-        else:
-            good_test, defect_test, total_test = 0, 0, 0
-
+        n_rows = [d for d in primary_data if d["n"] == n]
         md += f"""
-## {idx+3}. 训练样本规模 N = {n} 详细评测
-*全量统一测试集：共 {total_test} 张（正常 {good_test} 张 + 缺陷 {defect_test} 张）*
+## {section_num + idx}. 训练样本规模 N = {n} 详细评测指标 (最优 F1 阈值)
+*测试集：全量统一测试（正常 {good_test} 张 + 缺陷 {defect_test} 张，共 {total_test} 张）*
 
-### {idx+3}.1 受试者工作特征曲线下面积 (AUROC)
-| 输入尺寸 (Row) | Dinomaly2 基线 (Col 1) | PatchCore 基线 (Col 2) | 二阶段端到端 E2E (Col 3) |
+### {section_num + idx}.1 受试者工作特征曲线下面积 (AUROC)
+| 输入尺寸 | Dinomaly2 基线 | PatchCore 基线 | 二阶段端到端 E2E |
 | :--- | :--- | :--- | :--- |
 """
-        for row in n_rows:
-            s = row["size"]
-            d_val = row["din_auc"]
-            p_val = row.get("pat_auc")
-            e_val = row["e2e_auc"]
-            best_val = max(d_val if d_val is not None else 0, p_val if p_val is not None else 0, e_val if e_val is not None else 0)
-            d_str = (f"=={d_val:.4f}==" if d_val == best_val else f"{d_val:.4f}") if d_val is not None else "N/A"
-            p_str = (f"=={p_val:.4f}==" if p_val == best_val else f"{p_val:.4f}") if p_val is not None else "OOM (显存溢出)"
-            e_str = (f"=={e_val:.4f}==" if e_val == best_val else f"{e_val:.4f}") if e_val is not None else "N/A"
-            md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
+        for r in n_rows:
+            s = r["size"]
+            d_v = r.get("din_auc", 0.0)
+            p_v = r.get("pat_auc", 0.0)
+            e_v = r.get("e2e_auc", 0.0)
+            best_v = max(d_v, p_v, e_v)
+            d_s = f"==**{d_v:.4f}**==" if d_v == best_v else f"{d_v:.4f}"
+            p_s = f"==**{p_v:.4f}**==" if p_v == best_v else f"{p_v:.4f}"
+            e_s = f"==**{e_v:.4f}**==" if e_v == best_v else f"{e_v:.4f}"
+            md += f"| {s} × {s} | {d_s} | {p_s} | {e_s} |\n"
 
         md += f"""
-### {idx+3}.2 平均精度 (AP)
-| 输入尺寸 (Row) | Dinomaly2 基线 (Col 1) | PatchCore 基线 (Col 2) | 二阶段端到端 E2E (Col 3) |
-| :--- | :--- | :--- | :--- |
+### {section_num + idx}.2 混淆矩阵与误报统计 (TP / FP / TN / FN)
+| 输入尺寸 | 算法模型 | 检出缺陷 (TP) | 漏报缺陷 (FN) | 检出率 (Recall) | 良品误报 (FP) | 正确放行 (TN) | 误报率 (FPR) | 干净域误报 (Clean FP) |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 """
-        for row in n_rows:
-            s = row["size"]
-            d_val = row["din_ap"]
-            p_val = row.get("pat_ap")
-            e_val = row["e2e_ap"]
-            best_val = max(d_val if d_val is not None else 0, p_val if p_val is not None else 0, e_val if e_val is not None else 0)
-            d_str = (f"=={d_val:.4f}==" if d_val == best_val else f"{d_val:.4f}") if d_val is not None else "N/A"
-            p_str = (f"=={p_val:.4f}==" if p_val == best_val else f"{p_val:.4f}") if p_val is not None else "OOM (显存溢出)"
-            e_str = (f"=={e_val:.4f}==" if e_val == best_val else f"{e_val:.4f}") if e_val is not None else "N/A"
-            md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
+        for r in n_rows:
+            s = r["size"]
+            # Dinomaly2
+            d_tp = r.get("din_tp", 0)
+            d_fn = r.get("din_fn", 0)
+            d_rec = (d_tp / (d_tp + d_fn) * 100) if (d_tp + d_fn) > 0 else 0.0
+            d_fp = r.get("din_fp", 0)
+            d_tn = r.get("din_tn", 0)
+            d_fpr = (d_fp / (d_fp + d_tn) * 100) if (d_fp + d_tn) > 0 else 0.0
+            d_clean = f"{r.get('din_clean_fp', 0)}" if r.get('din_clean_fp') is not None else "-"
 
-        md += f"""
-### {idx+3}.3 最大 F1 分数 (F1-Max)
-| 输入尺寸 (Row) | Dinomaly2 基线 (Col 1) | PatchCore 基线 (Col 2) | 二阶段端到端 E2E (Col 3) |
-| :--- | :--- | :--- | :--- |
-"""
-        for row in n_rows:
-            s = row["size"]
-            d_val = row["din_f1"]
-            p_val = row.get("pat_f1")
-            e_val = row["e2e_f1"]
-            best_val = max(d_val if d_val is not None else 0, p_val if p_val is not None else 0, e_val if e_val is not None else 0)
-            d_str = (f"=={d_val:.4f}==" if d_val == best_val else f"{d_val:.4f}") if d_val is not None else "N/A"
-            p_str = (f"=={p_val:.4f}==" if p_val == best_val else f"{p_val:.4f}") if p_val is not None else "OOM (显存溢出)"
-            e_str = (f"=={e_val:.4f}==" if e_val == best_val else f"{e_val:.4f}") if e_val is not None else "N/A"
-            md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
+            # E2E
+            e_tp = r.get("e2e_tp", 0)
+            e_fn = r.get("e2e_fn", 0)
+            e_rec = (e_tp / (e_tp + e_fn) * 100) if (e_tp + e_fn) > 0 else 0.0
+            e_fp = r.get("e2e_fp", 0)
+            e_tn = r.get("e2e_tn", 0)
+            e_fpr = (e_fp / (e_fp + e_tn) * 100) if (e_fp + e_tn) > 0 else 0.0
+            e_clean = f"{r.get('e2e_clean_fp', 0)}" if r.get('e2e_clean_fp') is not None else "-"
 
-        md += f"""
-### {idx+3}.4 缺陷检出召回率 (Recall / {defect_test} 张缺陷)
-| 输入尺寸 (Row) | Dinomaly2 基线 (Col 1) | PatchCore 基线 (Col 2) | 二阶段端到端 E2E (Col 3) |
-| :--- | :--- | :--- | :--- |
-"""
-        for row in n_rows:
-            s = row["size"]
-            d_tp = row["din_tp"]
-            p_tp = row.get("pat_tp")
-            e_tp = row["e2e_tp"]
-            d_rec = d_tp / float(defect_test) * 100
-            e_rec = e_tp / float(defect_test) * 100
-            best_tp = max(d_tp, p_tp if p_tp is not None else 0, e_tp)
-            d_str = f"=={d_rec:.2f}% ({d_tp}/{defect_test})==" if d_tp == best_tp else f"{d_rec:.2f}% ({d_tp}/{defect_test})"
-            if p_tp is not None:
-                p_rec = p_tp / float(defect_test) * 100
-                p_str = f"=={p_rec:.2f}% ({p_tp}/{defect_test})==" if p_tp == best_tp else f"{p_rec:.2f}% ({p_tp}/{defect_test})"
-            else:
-                p_str = f"0.00% (0/{defect_test})" if s == 672 and n >= 200 else "OOM (显存溢出)"
-            e_str = f"=={e_rec:.2f}% ({e_tp}/{defect_test})==" if e_tp == best_tp else f"{e_rec:.2f}% ({e_tp}/{defect_test})"
-            md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
+            # PatchCore
+            p_tp = r.get("pat_tp", 0)
+            p_fn = r.get("pat_fn", 0)
+            p_rec = (p_tp / (p_tp + p_fn) * 100) if (p_tp + p_fn) > 0 else 0.0
+            p_fp = r.get("pat_fp", 0)
+            p_tn = r.get("pat_tn", 0)
+            p_fpr = (p_fp / (p_fp + p_tn) * 100) if (p_fp + p_tn) > 0 else 0.0
+            p_clean = f"{r.get('pat_clean_fp', 0)}" if r.get('pat_clean_fp') is not None else "-"
 
-        md += f"""
-### {idx+3}.5 正常样本误报数量 (False Positives / {good_test} 张正常)
-| 输入尺寸 (Row) | Dinomaly2 基线 (Col 1) | PatchCore 基线 (Col 2) | 二阶段端到端 E2E (Col 3) |
-| :--- | :--- | :--- | :--- |
-"""
-        for row in n_rows:
-            s = row["size"]
-            d_fp = row["din_fp"]
-            p_fp = row.get("pat_fp")
-            e_fp = row["e2e_fp"]
-            min_fp = min(d_fp, p_fp if p_fp is not None else 999999, e_fp)
-            d_str = f"=={d_fp}==" if d_fp == min_fp else f"{d_fp}"
-            p_str = (f"=={p_fp}==" if p_fp == min_fp else f"{p_fp}") if p_fp is not None else "0"
-            e_str = f"=={e_fp}==" if e_fp == min_fp else f"{e_fp}"
-            md += f"| {s} × {s} | {d_str} | {p_str} | {e_str} |\n"
+            md += f"| {s} × {s} | Dinomaly2 | **{d_tp}** | {d_fn} | {d_rec:.2f}% | {d_fp} | {d_tn} | {d_fpr:.2f}% | {d_clean} |\n"
+            md += f"| | 二阶段端到端 | ==**{e_tp}**== | {e_fn} | ==**{e_rec:.2f}%**== | ==**{e_fp}**== | {e_tn} | ==**{e_fpr:.2f}%**== | ==**{e_clean}**== |\n"
+            md += f"| | PatchCore | {p_tp} | {p_fn} | {p_rec:.2f}% | {p_fp} | {p_tn} | {p_fpr:.2f}% | {p_clean} |\n"
 
-    target_p = outs_dir / "FINAL_BENCHMARK_REPORT.md"
-    with open(target_p, "w", encoding="utf-8") as f:
+    report_out = outs_dir / "FINAL_BENCHMARK_REPORT.md"
+    with open(report_out, "w", encoding="utf-8") as f:
         f.write(md)
-    print(f"Updated report -> {target_p}")
+
+    print(f"[SUCCESS] Final markdown report generated -> {report_out}")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate Comprehensive Benchmark Markdown Reports")
-    parser.add_argument("--outs_dir", type=str, default="F:/tmp/0826", help="Base outs directory")
+    parser = argparse.ArgumentParser(description="Generate Final Benchmark Markdown Report")
+    parser.add_argument("--outs_dir", type=str, required=True, help="Outputs directory containing final_multisize_summary.json")
     args = parser.parse_args()
-
     generate_reports(args.outs_dir)

@@ -232,5 +232,7 @@ plan.md
 # Intermediate experiment artifacts
 Dinomaly2/gui_lookup_results/
 charts/
+scratch_charts/
+*.bak
 
 
