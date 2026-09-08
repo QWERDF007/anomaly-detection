@@ -1,0 +1,47 @@
+# Source-only distribution generalization. No target-domain images or online
+# statistics are required, and inference remains the static Dinomaly2 cosine map.
+source_dg:
+  enabled: true
+  encoder_frozen: true
+  adapter:
+    bottleneck_ratio: 0.25
+    alpha_init: 0.0
+    lr: 2.0e-4
+  decoder_lr: 5.0e-5
+  normal_shift:
+    candidates: 4
+    hard_start_ratio: 0.20
+    max_ops_per_view: 3
+    geometry_probability: 0.30
+    photometric_probability: 0.80
+    degradation_probability: 0.40
+    illumination_probability: 0.40
+    translate_fraction: 0.03
+    rotation_degrees: 2.0
+    noise_std: 0.02
+    blur_sigma: 1.2
+  loss:
+    lambda_shift: 1.0
+    lambda_inv: 0.10
+    lambda_id: 0.05
+    lambda_map: 0.05
+    lambda_preserve: 0.05
+    lambda_margin: 0.00
+    lambda_uot: 0.00
+  cross_view_uot:
+    enabled: false
+    window_size: 3
+    stride: 3
+    epsilon: 0.05
+    rho: 1.0
+    position_weight: 0.10
+    iterations: 20
+  pseudo_anomaly:
+    enabled: false
+    start_ratio: 0.60
+    min_area_ratio: 0.0001
+    max_area_ratio: 0.02
+
+# Example:
+# python dinomaly_2D.py --dataset custom --data_path train.txt \
+#   --test_path validation.txt --source-dg --pseudo-anomaly

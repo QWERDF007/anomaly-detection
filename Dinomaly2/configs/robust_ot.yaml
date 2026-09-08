@@ -1,0 +1,13 @@
+# Recommended first-round Local UOT configuration.
+# These keys map directly to dinomaly_2D.py command-line options.
+robust_ot:
+  enabled: true
+  lambda_ot: 0.05
+  warmup_iters: 2000
+  type: unbalanced
+  window_size: 5
+  stride: 5
+  epsilon: 0.05
+  rho: 0.5
+  sinkhorn_iters: 20
+  position_weight: 0.0

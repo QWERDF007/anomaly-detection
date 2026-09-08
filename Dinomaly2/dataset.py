@@ -18,23 +18,90 @@ from natsort import natsorted
 # import imgaug.augmenters as iaa
 # from perlin import rand_perlin_2d_np
 
+import math
+import shlex
+
 torch.multiprocessing.set_sharing_strategy('file_system')
 
 
-def get_data_transforms(size, isize, mean_train=None, std_train=None):
+class CenterSquareCrop:
+    """Crop the largest centered square without changing the image aspect ratio."""
+
+    def __call__(self, image):
+        width, height = F.get_image_size(image)
+        side = min(width, height)
+        return F.center_crop(image, [side, side])
+
+
+def _resize_transforms(size, resize_mode):
+    if resize_mode == 'stretch':
+        return [transforms.Resize((size, size))]
+    if resize_mode == 'center_square':
+        return [CenterSquareCrop(), transforms.Resize((size, size))]
+    raise ValueError(f'unsupported resize_mode: {resize_mode}')
+
+
+def get_data_transforms(
+        size,
+        isize,
+        mean_train=None,
+        std_train=None,
+        resize_mode='stretch'):
     mean_train = [0.485, 0.456, 0.406] if mean_train is None else mean_train
     std_train = [0.229, 0.224, 0.225] if std_train is None else std_train
     data_transforms = transforms.Compose([
-        transforms.Resize((size, size)),
+        *_resize_transforms(size, resize_mode),
         transforms.ToTensor(),
         transforms.CenterCrop(isize),
         transforms.Normalize(mean=mean_train,
                              std=std_train)])
     gt_transforms = transforms.Compose([
-        transforms.Resize((size, size)),
+        *_resize_transforms(size, resize_mode),
         transforms.CenterCrop(isize),
         transforms.ToTensor()])
     return data_transforms, gt_transforms
+
+
+def get_mild_normal_transforms(
+        size,
+        isize,
+        translate_pixels=4,
+        rotation_degrees=2.0,
+        brightness=0.05,
+        contrast=0.05,
+        mean_train=None,
+        std_train=None,
+        resize_mode='stretch'):
+    """Training-only mild normal-shift augmentation.
+
+    Reflection padding prevents geometric transforms from introducing black
+    borders that would be artificial anomaly cues. Evaluation continues to
+    use :func:`get_data_transforms` without randomness.
+    """
+    mean_train = [0.485, 0.456, 0.406] if mean_train is None else mean_train
+    std_train = [0.229, 0.224, 0.225] if std_train is None else std_train
+    translate_pixels = max(0, int(translate_pixels))
+    rotation_degrees = max(0.0, float(rotation_degrees))
+    padding = max(
+        translate_pixels + 2,
+        int(math.ceil(size * math.sin(math.radians(rotation_degrees)))) + 2,
+    )
+    padded_size = size + 2 * padding
+    translate_ratio = translate_pixels / padded_size if padded_size > 0 else 0.0
+
+    return transforms.Compose([
+        *_resize_transforms(size, resize_mode),
+        transforms.Pad(padding, padding_mode='reflect'),
+        transforms.RandomAffine(
+            degrees=rotation_degrees,
+            translate=(translate_ratio, translate_ratio),
+            interpolation=transforms.InterpolationMode.BILINEAR,
+        ),
+        transforms.CenterCrop(isize),
+        transforms.ColorJitter(brightness=brightness, contrast=contrast),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=mean_train, std=std_train),
+    ])
 
 
 class MaskConstraintTrainTransform:
@@ -275,7 +342,7 @@ class CustomDataset(torch.utils.data.Dataset):
             if ',' in line and not os.path.exists(line):
                 parts = [p.strip().strip('\'"') for p in line.split(',') if p.strip()]
             else:
-                parts = [p.strip().strip('\'"') for p in line.split() if p.strip()]
+                parts = [p.strip().strip('\'"') for p in shlex.split(line, posix=False) if p.strip()]
 
             if not parts:
                 continue

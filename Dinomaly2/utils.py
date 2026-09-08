@@ -301,6 +301,64 @@ def evaluation_batch(model, dataloader, device, _class_=None, max_ratio=0, resiz
     ]
 
 
+def collect_image_scores(model, dataloader, device, max_ratio=0, resize_mask=None):
+    """Collect Dinomaly2 image scores without changing the inference path.
+
+    This is intentionally separate from ``evaluation_batch`` so robustness
+    tests can compute Normal FPR at a fixed image-level threshold without
+    changing the standard anomaly metrics.
+    """
+
+    was_training = model.training
+    model.eval()
+    labels = []
+    scores = []
+    mask_area_ratios = []
+    paths = []
+    gaussian_kernel = get_gaussian_kernel(kernel_size=5, sigma=4).to(device)
+
+    with torch.no_grad():
+        for batch in dataloader:
+            if len(batch) != 4:
+                raise ValueError(
+                    "normal-shift scoring expects dataset batches of "
+                    "(image, mask, label, path)"
+                )
+            img, _gt, label, img_path = batch
+            img = img.to(device)
+            en, de = model(img)[:2]
+            anomaly_map, _ = cal_anomaly_maps(en, de, img.shape[-1])
+            if resize_mask is not None:
+                anomaly_map = F.interpolate(
+                    anomaly_map,
+                    size=resize_mask,
+                    mode='bilinear',
+                    align_corners=False,
+                )
+            anomaly_map = gaussian_kernel(anomaly_map)
+            flattened = anomaly_map.flatten(1)
+            if max_ratio == 0:
+                image_score = flattened.max(dim=1)[0]
+            else:
+                top_count = max(1, int(flattened.shape[1] * max_ratio))
+                image_score = torch.topk(flattened, k=top_count, dim=1).values.mean(dim=1)
+
+            labels.append(label.flatten().cpu())
+            scores.append(image_score.cpu())
+            mask_area_ratios.append(
+                (_gt > 0.5).float().flatten(1).mean(dim=1).cpu()
+            )
+            paths.extend(str(path) for path in img_path)
+
+    model.train(was_training)
+    return {
+        'labels': torch.cat(labels).numpy(),
+        'scores': torch.cat(scores).numpy(),
+        'mask_area_ratios': torch.cat(mask_area_ratios).numpy(),
+        'paths': paths,
+    }
+
+
 def evaluation_batch_noseg(model, dataloader, device, _class_=None, max_ratio=0, resize_mask=None,
                            cal_anomaly_maps_func=cal_anomaly_maps):
     model.eval()

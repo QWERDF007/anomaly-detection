@@ -6,6 +6,8 @@ from torch.nn.modules.batchnorm import _BatchNorm
 from torch.nn.init import trunc_normal_
 import math
 
+from .domain_adapter import FeatureGroupAdapters
+
 
 class Dinomaly(nn.Module):
     def __init__(
@@ -20,7 +22,8 @@ class Dinomaly(nn.Module):
             mask_neighbor_size=0,
             remove_class_token=False,
             context_aware_recenter=True,
-            use_get_intermediate=False
+            use_get_intermediate=False,
+            feature_adapters=None,
     ) -> None:
         super(Dinomaly, self).__init__()
         self.encoder = encoder
@@ -33,6 +36,7 @@ class Dinomaly(nn.Module):
         self.remove_class_token = remove_class_token
         self.context_aware_recenter = context_aware_recenter
         self.use_get_intermediate = use_get_intermediate
+        self.feature_adapters = FeatureGroupAdapters(feature_adapters or [])
         if not hasattr(self.encoder, 'num_register_tokens'):
             if hasattr(self.encoder, 'n_storage_tokens'):
                 self.encoder.num_register_tokens = self.encoder.n_storage_tokens
@@ -60,7 +64,7 @@ class Dinomaly(nn.Module):
                 nn.init.constant_(m.bias, 0)
                 nn.init.constant_(m.weight, 1.0)
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
 
         if self.use_get_intermediate:
             with torch.no_grad():
@@ -82,8 +86,28 @@ class Dinomaly(nn.Module):
 
         if self.remove_class_token:
             en_list_bn = [e[:, 1 + self.encoder.num_register_tokens:, :] for e in en_list]
-            x = self.fuse_feature([en_list_bn[idx] for idx in self.fuse_layer_bottleneck]).detach()
+            raw_bottleneck_groups = [
+                self.fuse_feature([en_list_bn[idx] for idx in idxs])
+                for idxs in self.fuse_layer_encoder
+            ]
         else:
+            raw_bottleneck_groups = [
+                self.fuse_feature([en_list[idx] for idx in idxs])
+                for idxs in self.fuse_layer_encoder
+            ]
+
+        if self.feature_adapters:
+            if len(self.feature_adapters) != len(raw_bottleneck_groups):
+                raise RuntimeError(
+                    'feature_adapters must match the number of encoder feature groups'
+                )
+            canonical_bottleneck_groups = [
+                adapter(group)
+                for adapter, group in zip(self.feature_adapters, raw_bottleneck_groups)
+            ]
+            x = self.fuse_feature(canonical_bottleneck_groups)
+        else:
+            canonical_bottleneck_groups = raw_bottleneck_groups
             x = self.fuse_feature([en_list[idx] for idx in self.fuse_layer_bottleneck]).detach()
 
         for i, blk in enumerate(self.bottleneck):
@@ -100,20 +124,34 @@ class Dinomaly(nn.Module):
             de_list.append(x)
         de_list = de_list[::-1]
 
-        en = [self.fuse_feature([en_list[idx] for idx in idxs]) for idxs in self.fuse_layer_encoder]
+        en = canonical_bottleneck_groups
         de = [self.fuse_feature([de_list[idx] for idx in idxs]) for idxs in self.fuse_layer_decoder]
 
         if not self.remove_class_token:  # class tokens have not been removed above
             de = [d[:, 1 + self.encoder.num_register_tokens:, :] for d in de]
 
-        if self.context_aware_recenter:
-            en = [e[:, 1 + self.encoder.num_register_tokens:, :] - e[:, :1, :] for e in en]
-            en = [F.layer_norm(e, normalized_shape=(e.shape[-1],), eps=1e-8) for e in en]
-        else:
-            en = [e[:, 1 + self.encoder.num_register_tokens:, :] for e in en]
+        def postprocess_encoder_features(features):
+            if self.context_aware_recenter and not self.remove_class_token:
+                features = [
+                    e[:, 1 + self.encoder.num_register_tokens:, :] - e[:, :1, :]
+                    for e in features
+                ]
+                features = [
+                    F.layer_norm(e, normalized_shape=(e.shape[-1],), eps=1e-8)
+                    for e in features
+                ]
+            elif not self.remove_class_token:
+                features = [e[:, 1 + self.encoder.num_register_tokens:, :] for e in features]
+            return [
+                e.permute(0, 2, 1).reshape([x.shape[0], -1, side, side]).contiguous()
+                for e in features
+            ]
 
-        en = [e.permute(0, 2, 1).reshape([x.shape[0], -1, side, side]).contiguous() for e in en]
+        raw_en = postprocess_encoder_features(raw_bottleneck_groups)
+        en = postprocess_encoder_features(en)
         de = [d.permute(0, 2, 1).reshape([x.shape[0], -1, side, side]).contiguous() for d in de]
+        if return_features:
+            return en, de, {'raw_en': raw_en, 'canonical_en': en}
         return en, de
 
     def fuse_feature(self, feat_list):
