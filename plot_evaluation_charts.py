@@ -62,7 +62,7 @@ def plot_all_benchmark_charts(
     gpu_name_override: Optional[str] = None,
     gpu_vram_override: Optional[float] = None,
     full_data: bool = False,
-    save_images: bool = False,
+    save_images: bool = True,
 ) -> None:
     """Generate the full benchmark evaluation suite into an interactive vector HTML dashboard.
     Static PNG output is disabled by default per user specification.
@@ -106,6 +106,8 @@ def plot_all_benchmark_charts(
     if not primary_data:
         primary_data = summary_data
 
+    has_bank = any(outs_dir.glob("**/feature_bank.npz")) and any(d.get("e2e_auc") is not None for d in summary_data)
+
     # 1. Standalone AUROC charts (at primary_iter)
     for s in sizes:
         fig, ax = plt.subplots(figsize=(7.5, 5.2))
@@ -123,8 +125,8 @@ def plot_all_benchmark_charts(
         p_valid_v = [v for v in p_auc if v is not None]
 
         if d_valid_v:
-            ax.plot(d_valid_n, d_valid_v, marker="o", lw=2.2, color="#1f77b4", label=f"Dinomaly2 (iter={primary_iter})")
-        if e_valid_v:
+            ax.plot(d_valid_n, d_valid_v, marker="o", lw=2.5, color="#1f77b4", label=f"Dinomaly2 (iter={primary_iter})")
+        if has_bank and e_valid_v:
             ax.plot(e_valid_n, e_valid_v, marker="s", lw=2.5, color="#2ca02c", label="二阶段端到端 (前向+GPU检索)")
         if p_valid_v:
             ax.plot(p_valid_n, p_valid_v, marker="^", lw=2.0, color="#d62728", linestyle="--", label="PatchCore (基线)")
@@ -158,8 +160,8 @@ def plot_all_benchmark_charts(
         p_valid_v = [v for v in p_f1 if v is not None]
 
         if d_valid_v:
-            ax.plot(d_valid_n, d_valid_v, marker="o", lw=2.2, color="#1f77b4", label=f"Dinomaly2 (iter={primary_iter})")
-        if e_valid_v:
+            ax.plot(d_valid_n, d_valid_v, marker="o", lw=2.5, color="#1f77b4", label=f"Dinomaly2 (iter={primary_iter})")
+        if has_bank and e_valid_v:
             ax.plot(e_valid_n, e_valid_v, marker="s", lw=2.5, color="#2ca02c", label="二阶段端到端 (前向+GPU检索)")
         if p_valid_v:
             ax.plot(p_valid_n, p_valid_v, marker="^", lw=2.0, color="#d62728", linestyle="--", label="PatchCore (基线)")
@@ -180,24 +182,31 @@ def plot_all_benchmark_charts(
     for s in sizes:
         fig, ax = plt.subplots(figsize=(8.5, 5.2))
         x_n = np.arange(len(n_samples))
-        w = 0.25
         s_data = {d["n"]: d for d in primary_data if d["size"] == s}
 
         d_tp = [s_data[n].get("din_tp", 0) if n in s_data else 0 for n in n_samples]
-        e_tp = [s_data[n].get("e2e_tp", 0) if n in s_data else 0 for n in n_samples]
         p_tp = [s_data[n].get("pat_tp", 0) if n in s_data else 0 for n in n_samples]
 
         first_row = list(s_data.values())[0] if s_data else {}
         total_defects = first_row.get("din_tp", 0) + first_row.get("din_fn", 0)
 
-        ax.bar(x_n - w, d_tp, width=w, label="Dinomaly2 单阶段", color="#1f77b4", alpha=0.85)
-        ax.bar(x_n, p_tp, width=w, label="PatchCore 基线", color="#d62728", alpha=0.85)
-        ax.bar(x_n + w, e_tp, width=w, label="二阶段端到端 (Two-Stage)", color="#2ca02c", alpha=0.85)
-
-        for i in range(len(n_samples)):
-            ax.text(x_n[i] - w, d_tp[i] + 2, f"{d_tp[i]}", ha="center", va="bottom", fontsize=8.5)
-            ax.text(x_n[i], p_tp[i] + 2, f"{p_tp[i]}", ha="center", va="bottom", fontsize=8.5, color="#d62728")
-            ax.text(x_n[i] + w, e_tp[i] + 2, f"{e_tp[i]}", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+        if has_bank:
+            w = 0.25
+            e_tp = [s_data[n].get("e2e_tp", 0) if n in s_data else 0 for n in n_samples]
+            ax.bar(x_n - w, d_tp, width=w, label="Dinomaly2 单阶段", color="#1f77b4", alpha=0.85)
+            ax.bar(x_n, p_tp, width=w, label="PatchCore 基线", color="#d62728", alpha=0.85)
+            ax.bar(x_n + w, e_tp, width=w, label="二阶段端到端 (Two-Stage)", color="#2ca02c", alpha=0.85)
+            for i in range(len(n_samples)):
+                ax.text(x_n[i] - w, d_tp[i] + 2, f"{d_tp[i]}", ha="center", va="bottom", fontsize=8.5)
+                ax.text(x_n[i], p_tp[i] + 2, f"{p_tp[i]}", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+                ax.text(x_n[i] + w, e_tp[i] + 2, f"{e_tp[i]}", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+        else:
+            w = 0.35
+            ax.bar(x_n - 0.5 * w, d_tp, width=w, label="Dinomaly2", color="#1f77b4", alpha=0.85)
+            ax.bar(x_n + 0.5 * w, p_tp, width=w, label="PatchCore 基线", color="#d62728", alpha=0.85)
+            for i in range(len(n_samples)):
+                ax.text(x_n[i] - 0.5 * w, d_tp[i] + 2, f"{d_tp[i]}", ha="center", va="bottom", fontsize=9.0, color="#1f77b4", fontweight="bold")
+                ax.text(x_n[i] + 0.5 * w, p_tp[i] + 2, f"{p_tp[i]}", ha="center", va="bottom", fontsize=9.0, color="#d62728")
 
         ax.set_title(f"真实缺陷检出数量 (TP) 对比 ({s}×{s}，真实缺陷总量: {total_defects} 张)", fontsize=12, fontweight="bold", pad=12)
         ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
@@ -214,29 +223,83 @@ def plot_all_benchmark_charts(
             fig.savefig(chart_dir / "03_defect_detection_tp.png")
         plt.close(fig)
 
+    # 3b. Defect Misses (FN) Bar Charts
+    for s in sizes:
+        fig, ax = plt.subplots(figsize=(8.5, 5.2))
+        x_n = np.arange(len(n_samples))
+        s_data = {d["n"]: d for d in primary_data if d["size"] == s}
+
+        d_fn = [s_data[n].get("din_fn", 0) if n in s_data else 0 for n in n_samples]
+        p_fn = [s_data[n].get("pat_fn", 0) if n in s_data else 0 for n in n_samples]
+
+        first_row = list(s_data.values())[0] if s_data else {}
+        total_defects = first_row.get("din_tp", 0) + first_row.get("din_fn", 0)
+
+        if has_bank:
+            w = 0.25
+            e_fn = [s_data[n].get("e2e_fn", 0) if n in s_data else 0 for n in n_samples]
+            ax.bar(x_n - w, d_fn, width=w, label="Dinomaly2 单阶段", color="#1f77b4", alpha=0.85)
+            ax.bar(x_n, p_fn, width=w, label="PatchCore 基线", color="#d62728", alpha=0.85)
+            ax.bar(x_n + w, e_fn, width=w, label="二阶段端到端 (Two-Stage)", color="#2ca02c", alpha=0.85)
+            max_fn = max(max(d_fn), max(p_fn), max(e_fn), 1)
+            for i in range(len(n_samples)):
+                ax.text(x_n[i] - w, d_fn[i] + max_fn * 0.015, f"{d_fn[i]}", ha="center", va="bottom", fontsize=8.5)
+                ax.text(x_n[i], p_fn[i] + max_fn * 0.015, f"{p_fn[i]}", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+                ax.text(x_n[i] + w, e_fn[i] + max_fn * 0.015, f"{e_fn[i]}", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+        else:
+            w = 0.35
+            ax.bar(x_n - 0.5 * w, d_fn, width=w, label="Dinomaly2", color="#1f77b4", alpha=0.85)
+            ax.bar(x_n + 0.5 * w, p_fn, width=w, label="PatchCore 基线", color="#d62728", alpha=0.85)
+            max_fn = max(max(d_fn), max(p_fn), 1)
+            for i in range(len(n_samples)):
+                ax.text(x_n[i] - 0.5 * w, d_fn[i] + max_fn * 0.015, f"{d_fn[i]}", ha="center", va="bottom", fontsize=9.0, color="#1f77b4", fontweight="bold")
+                ax.text(x_n[i] + 0.5 * w, p_fn[i] + max_fn * 0.015, f"{p_fn[i]}", ha="center", va="bottom", fontsize=9.0, color="#d62728")
+
+        ax.set_title(f"漏检缺陷数量 (FN - 越低越好) 对比 ({s}×{s}，缺陷总数: {total_defects} 张)", fontsize=12, fontweight="bold", pad=12)
+        ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
+        ax.set_ylabel("漏检缺陷数 (FN / 张)", fontsize=10.5)
+        ax.set_xticks(x_n)
+        ax.set_xticklabels(n_samples)
+        ax.set_ylim([0, max_fn * 1.20])
+        ax.grid(True, linestyle=":", alpha=0.6, axis="y")
+        ax.legend(loc="upper right", fontsize=9.2, frameon=True, facecolor="#f8f9fa")
+        plt.tight_layout()
+        fig.savefig(chart_dir / f"03_defect_miss_fn_s{s}.png")
+        if s == 448:
+            fig.savefig(chart_dir / "03_defect_miss_fn.png")
+        plt.close(fig)
+
     # 4. False Alarms (FP) Bar Charts
     for s in sizes:
         fig, ax = plt.subplots(figsize=(8.5, 5.2))
         x_n = np.arange(len(n_samples))
-        w = 0.25
         s_data = {d["n"]: d for d in primary_data if d["size"] == s}
 
         d_fp = [s_data[n].get("din_fp", 0) if n in s_data else 0 for n in n_samples]
-        e_fp = [s_data[n].get("e2e_fp", 0) if n in s_data else 0 for n in n_samples]
         p_fp = [s_data[n].get("pat_fp", 0) if n in s_data else 0 for n in n_samples]
 
         first_row = list(s_data.values())[0] if s_data else {}
         total_normal = first_row.get("din_fp", 0) + first_row.get("din_tn", 0)
 
-        ax.bar(x_n - w, d_fp, width=w, label="Dinomaly2 单阶段", color="#1f77b4", alpha=0.85)
-        ax.bar(x_n, p_fp, width=w, label="PatchCore 基线", color="#d62728", alpha=0.85)
-        ax.bar(x_n + w, e_fp, width=w, label="二阶段端到端 (Two-Stage)", color="#2ca02c", alpha=0.85)
-
-        max_fp = max(max(d_fp), max(p_fp), max(e_fp), 1)
-        for i in range(len(n_samples)):
-            ax.text(x_n[i] - w, d_fp[i] + max_fp * 0.015, f"{d_fp[i]}", ha="center", va="bottom", fontsize=8.5)
-            ax.text(x_n[i], p_fp[i] + max_fp * 0.015, f"{p_fp[i]}", ha="center", va="bottom", fontsize=8.5, color="#d62728")
-            ax.text(x_n[i] + w, e_fp[i] + max_fp * 0.015, f"{e_fp[i]}", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+        if has_bank:
+            w = 0.25
+            e_fp = [s_data[n].get("e2e_fp", 0) if n in s_data else 0 for n in n_samples]
+            ax.bar(x_n - w, d_fp, width=w, label="Dinomaly2 单阶段", color="#1f77b4", alpha=0.85)
+            ax.bar(x_n, p_fp, width=w, label="PatchCore 基线", color="#d62728", alpha=0.85)
+            ax.bar(x_n + w, e_fp, width=w, label="二阶段端到端 (Two-Stage)", color="#2ca02c", alpha=0.85)
+            max_fp = max(max(d_fp), max(p_fp), max(e_fp), 1)
+            for i in range(len(n_samples)):
+                ax.text(x_n[i] - w, d_fp[i] + max_fp * 0.015, f"{d_fp[i]}", ha="center", va="bottom", fontsize=8.5)
+                ax.text(x_n[i], p_fp[i] + max_fp * 0.015, f"{p_fp[i]}", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+                ax.text(x_n[i] + w, e_fp[i] + max_fp * 0.015, f"{e_fp[i]}", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+        else:
+            w = 0.35
+            ax.bar(x_n - 0.5 * w, d_fp, width=w, label="Dinomaly2", color="#1f77b4", alpha=0.85)
+            ax.bar(x_n + 0.5 * w, p_fp, width=w, label="PatchCore 基线", color="#d62728", alpha=0.85)
+            max_fp = max(max(d_fp), max(p_fp), 1)
+            for i in range(len(n_samples)):
+                ax.text(x_n[i] - 0.5 * w, d_fp[i] + max_fp * 0.015, f"{d_fp[i]}", ha="center", va="bottom", fontsize=9.0, color="#1f77b4", fontweight="bold")
+                ax.text(x_n[i] + 0.5 * w, p_fp[i] + max_fp * 0.015, f"{p_fp[i]}", ha="center", va="bottom", fontsize=9.0, color="#d62728")
 
         ax.set_title(f"良品误报数量 (FP) 对比 ({s}×{s}，良品总数: {total_normal} 张)", fontsize=12, fontweight="bold", pad=12)
         ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
@@ -258,20 +321,26 @@ def plot_all_benchmark_charts(
         for s in sizes:
             fig, ax = plt.subplots(figsize=(8.5, 5.2))
             x_n = np.arange(len(n_samples))
-            w = 0.20
             s_data = {d["n"]: d for d in primary_data if d["size"] == s}
 
             d_clean_fp = [s_data[n].get("din_clean_fp", 0) if n in s_data else 0 for n in n_samples]
             d_test_fp = [s_data[n].get("din_fp", 0) if n in s_data else 0 for n in n_samples]
-            e_clean_fp = [s_data[n].get("e2e_clean_fp", 0) if n in s_data else 0 for n in n_samples]
-            e_test_fp = [s_data[n].get("e2e_fp", 0) if n in s_data else 0 for n in n_samples]
 
-            ax.bar(x_n - 1.5 * w, d_clean_fp, width=w, label="Dinomaly2 训练干净域误报", color="#a6cee3")
-            ax.bar(x_n - 0.5 * w, d_test_fp, width=w, label="Dinomaly2 全量测试误报", color="#1f77b4")
-            ax.bar(x_n + 0.5 * w, e_clean_fp, width=w, label="二阶段 训练干净域误报", color="#b2df8a")
-            ax.bar(x_n + 1.5 * w, e_test_fp, width=w, label="二阶段 全量测试误报", color="#33a02c")
+            if has_bank:
+                w = 0.20
+                e_clean_fp = [s_data[n].get("e2e_clean_fp", 0) if n in s_data else 0 for n in n_samples]
+                e_test_fp = [s_data[n].get("e2e_fp", 0) if n in s_data else 0 for n in n_samples]
+                ax.bar(x_n - 1.5 * w, d_clean_fp, width=w, label="Dinomaly2 训练干净域误报", color="#a6cee3")
+                ax.bar(x_n - 0.5 * w, d_test_fp, width=w, label="Dinomaly2 全量测试误报", color="#1f77b4")
+                ax.bar(x_n + 0.5 * w, e_clean_fp, width=w, label="二阶段 训练干净域误报", color="#b2df8a")
+                ax.bar(x_n + 1.5 * w, e_test_fp, width=w, label="二阶段 全量测试误报", color="#33a02c")
+                max_val = max(max(d_clean_fp), max(d_test_fp), max(e_clean_fp), max(e_test_fp), 1)
+            else:
+                w = 0.35
+                ax.bar(x_n - 0.5 * w, d_clean_fp, width=w, label="Dinomaly2 训练干净域误报", color="#a6cee3")
+                ax.bar(x_n + 0.5 * w, d_test_fp, width=w, label="Dinomaly2 全量测试误报", color="#1f77b4")
+                max_val = max(max(d_clean_fp), max(d_test_fp), 1)
 
-            max_val = max(max(d_clean_fp), max(d_test_fp), max(e_clean_fp), max(e_test_fp), 1)
             ax.set_title(f"训练干净域与测试集良品误报分解对比 ({s}×{s})", fontsize=12, fontweight="bold", pad=12)
             ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
             ax.set_ylabel("误报数量 (FP / 张)", fontsize=10.5)
@@ -290,25 +359,35 @@ def plot_all_benchmark_charts(
     for s in sizes:
         fig, ax = plt.subplots(figsize=(8.5, 5.2))
         x_n = np.arange(len(n_samples))
-        w = 0.25
         s_data = {d["n"]: d for d in primary_data if d["size"] == s}
 
         d_fps = [s_data[n].get("din_fps", 0.0) if n in s_data else 0.0 for n in n_samples]
-        e_fps = [s_data[n].get("e2e_fps", 0.0) if n in s_data else 0.0 for n in n_samples]
         p_fps = [s_data[n].get("pat_fps", 0.0) if n in s_data else 0.0 for n in n_samples]
 
-        ax.bar(x_n - w, d_fps, width=w, label="Dinomaly2 单阶段", color="#1f77b4", alpha=0.85)
-        ax.bar(x_n, p_fps, width=w, label="PatchCore (GPU FAISS)", color="#d62728", alpha=0.85)
-        ax.bar(x_n + w, e_fps, width=w, label="二阶段端到端", color="#2ca02c", alpha=0.85)
-
-        max_fps = max(max(d_fps), max(p_fps), max(e_fps), 1.0)
-        for i in range(len(n_samples)):
-            if d_fps[i] > 0:
-                ax.text(x_n[i] - w, d_fps[i] + max_fps * 0.015, f"{d_fps[i]:.1f}", ha="center", va="bottom", fontsize=8.5)
-            if p_fps[i] > 0:
-                ax.text(x_n[i], p_fps[i] + max_fps * 0.015, f"{p_fps[i]:.1f}", ha="center", va="bottom", fontsize=8.5, color="#d62728")
-            if e_fps[i] > 0:
-                ax.text(x_n[i] + w, e_fps[i] + max_fps * 0.015, f"{e_fps[i]:.1f}", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+        if has_bank:
+            w = 0.25
+            e_fps = [s_data[n].get("e2e_fps", 0.0) if n in s_data else 0.0 for n in n_samples]
+            ax.bar(x_n - w, d_fps, width=w, label="Dinomaly2 单阶段", color="#1f77b4", alpha=0.85)
+            ax.bar(x_n, p_fps, width=w, label="PatchCore (GPU FAISS)", color="#d62728", alpha=0.85)
+            ax.bar(x_n + w, e_fps, width=w, label="二阶段端到端", color="#2ca02c", alpha=0.85)
+            max_fps = max(max(d_fps), max(p_fps), max(e_fps), 1.0)
+            for i in range(len(n_samples)):
+                if d_fps[i] > 0:
+                    ax.text(x_n[i] - w, d_fps[i] + max_fps * 0.015, f"{d_fps[i]:.1f}", ha="center", va="bottom", fontsize=8.5)
+                if p_fps[i] > 0:
+                    ax.text(x_n[i], p_fps[i] + max_fps * 0.015, f"{p_fps[i]:.1f}", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+                if e_fps[i] > 0:
+                    ax.text(x_n[i] + w, e_fps[i] + max_fps * 0.015, f"{e_fps[i]:.1f}", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+        else:
+            w = 0.35
+            ax.bar(x_n - 0.5 * w, d_fps, width=w, label="Dinomaly2", color="#1f77b4", alpha=0.85)
+            ax.bar(x_n + 0.5 * w, p_fps, width=w, label="PatchCore (GPU FAISS)", color="#d62728", alpha=0.85)
+            max_fps = max(max(d_fps), max(p_fps), 1.0)
+            for i in range(len(n_samples)):
+                if d_fps[i] > 0:
+                    ax.text(x_n[i] - 0.5 * w, d_fps[i] + max_fps * 0.015, f"{d_fps[i]:.1f}", ha="center", va="bottom", fontsize=9.0, color="#1f77b4", fontweight="bold")
+                if p_fps[i] > 0:
+                    ax.text(x_n[i] + 0.5 * w, p_fps[i] + max_fps * 0.015, f"{p_fps[i]:.1f}", ha="center", va="bottom", fontsize=9.0, color="#d62728")
 
         ax.set_title(f"实测在线推理吞吐量对比 ({s}×{s}，Batch=1，{gpu_name})", fontsize=12, fontweight="bold", pad=12)
         ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
@@ -328,25 +407,35 @@ def plot_all_benchmark_charts(
     for s in sizes:
         fig, ax = plt.subplots(figsize=(8.5, 5.2))
         x_n = np.arange(len(n_samples))
-        w = 0.25
         s_data = {d["n"]: d for d in primary_data if d["size"] == s}
 
         d_lat = [s_data[n].get("din_lat_ms", 0.0) if n in s_data else 0.0 for n in n_samples]
-        e_lat = [s_data[n].get("e2e_lat_ms", 0.0) if n in s_data else 0.0 for n in n_samples]
         p_lat = [s_data[n].get("pat_lat_ms", 0.0) if n in s_data else 0.0 for n in n_samples]
 
-        ax.bar(x_n - w, d_lat, width=w, label="Dinomaly2 单阶段", color="#1f77b4", alpha=0.85)
-        ax.bar(x_n, p_lat, width=w, label="PatchCore 检索", color="#d62728", alpha=0.85)
-        ax.bar(x_n + w, e_lat, width=w, label="二阶段端到端", color="#2ca02c", alpha=0.85)
-
-        max_lat = max(max(d_lat), max(p_lat), max(e_lat), 1.0)
-        for i in range(len(n_samples)):
-            if d_lat[i] > 0:
-                ax.text(x_n[i] - w, d_lat[i] + max_lat * 0.015, f"{d_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=8.5)
-            if p_lat[i] > 0:
-                ax.text(x_n[i], p_lat[i] + max_lat * 0.015, f"{p_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=8.5, color="#d62728")
-            if e_lat[i] > 0:
-                ax.text(x_n[i] + w, e_lat[i] + max_lat * 0.015, f"{e_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+        if has_bank:
+            w = 0.25
+            e_lat = [s_data[n].get("e2e_lat_ms", 0.0) if n in s_data else 0.0 for n in n_samples]
+            ax.bar(x_n - w, d_lat, width=w, label="Dinomaly2 单阶段", color="#1f77b4", alpha=0.85)
+            ax.bar(x_n, p_lat, width=w, label="PatchCore 检索", color="#d62728", alpha=0.85)
+            ax.bar(x_n + w, e_lat, width=w, label="二阶段端到端", color="#2ca02c", alpha=0.85)
+            max_lat = max(max(d_lat), max(p_lat), max(e_lat), 1.0)
+            for i in range(len(n_samples)):
+                if d_lat[i] > 0:
+                    ax.text(x_n[i] - w, d_lat[i] + max_lat * 0.015, f"{d_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=8.5)
+                if p_lat[i] > 0:
+                    ax.text(x_n[i], p_lat[i] + max_lat * 0.015, f"{p_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+                if e_lat[i] > 0:
+                    ax.text(x_n[i] + w, e_lat[i] + max_lat * 0.015, f"{e_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+        else:
+            w = 0.35
+            ax.bar(x_n - 0.5 * w, d_lat, width=w, label="Dinomaly2", color="#1f77b4", alpha=0.85)
+            ax.bar(x_n + 0.5 * w, p_lat, width=w, label="PatchCore 检索", color="#d62728", alpha=0.85)
+            max_lat = max(max(d_lat), max(p_lat), 1.0)
+            for i in range(len(n_samples)):
+                if d_lat[i] > 0:
+                    ax.text(x_n[i] - 0.5 * w, d_lat[i] + max_lat * 0.015, f"{d_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=9.0, color="#1f77b4", fontweight="bold")
+                if p_lat[i] > 0:
+                    ax.text(x_n[i] + 0.5 * w, p_lat[i] + max_lat * 0.015, f"{p_lat[i]:.1f}ms", ha="center", va="bottom", fontsize=9.0, color="#d62728")
 
         ax.set_title(f"实测单图推理时延对比 ({s}×{s}，Batch=1，{gpu_name})", fontsize=12, fontweight="bold", pad=12)
         ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
@@ -400,25 +489,35 @@ def plot_all_benchmark_charts(
     for s in sizes:
         fig, ax = plt.subplots(figsize=(8.5, 5.2))
         x_n = np.arange(len(n_samples))
-        w = 0.25
         s_data = {d["n"]: d for d in primary_data if d["size"] == s}
 
         d_vram = [s_data[n].get("din_vram_gb", 0.0) if n in s_data else 0.0 for n in n_samples]
-        e_vram = [s_data[n].get("e2e_vram_gb", 0.0) if n in s_data else 0.0 for n in n_samples]
         p_vram = [s_data[n].get("pat_vram_gb", 0.0) if n in s_data else 0.0 for n in n_samples]
 
-        ax.bar(x_n - w, d_vram, width=w, label="Dinomaly2 单阶段推理", color="#1f77b4", alpha=0.85)
-        ax.bar(x_n, p_vram, width=w, label="PatchCore 推理", color="#d62728", alpha=0.85)
-        ax.bar(x_n + w, e_vram, width=w, label="二阶段端到端推理", color="#2ca02c", alpha=0.85)
-
-        max_vram = max(max(d_vram), max(p_vram), max(e_vram), 1.0)
-        for i in range(len(n_samples)):
-            if d_vram[i] > 0:
-                ax.text(x_n[i] - w, d_vram[i] + max_vram * 0.015, f"{d_vram[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
-            if p_vram[i] > 0:
-                ax.text(x_n[i], p_vram[i] + max_vram * 0.015, f"{p_vram[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
-            if e_vram[i] > 0:
-                ax.text(x_n[i] + w, e_vram[i] + max_vram * 0.015, f"{e_vram[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+        if has_bank:
+            w = 0.25
+            e_vram = [s_data[n].get("e2e_vram_gb", 0.0) if n in s_data else 0.0 for n in n_samples]
+            ax.bar(x_n - w, d_vram, width=w, label="Dinomaly2 单阶段推理", color="#1f77b4", alpha=0.85)
+            ax.bar(x_n, p_vram, width=w, label="PatchCore 推理", color="#d62728", alpha=0.85)
+            ax.bar(x_n + w, e_vram, width=w, label="二阶段端到端推理", color="#2ca02c", alpha=0.85)
+            max_vram = max(max(d_vram), max(p_vram), max(e_vram), 1.0)
+            for i in range(len(n_samples)):
+                if d_vram[i] > 0:
+                    ax.text(x_n[i] - w, d_vram[i] + max_vram * 0.015, f"{d_vram[i]:.2f}G", ha="center", va="bottom", fontsize=8.5)
+                if p_vram[i] > 0:
+                    ax.text(x_n[i], p_vram[i] + max_vram * 0.015, f"{p_vram[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#d62728")
+                if e_vram[i] > 0:
+                    ax.text(x_n[i] + w, e_vram[i] + max_vram * 0.015, f"{e_vram[i]:.2f}G", ha="center", va="bottom", fontsize=8.5, color="#2ca02c", fontweight="bold")
+        else:
+            w = 0.35
+            ax.bar(x_n - 0.5 * w, d_vram, width=w, label="Dinomaly2 推理", color="#1f77b4", alpha=0.85)
+            ax.bar(x_n + 0.5 * w, p_vram, width=w, label="PatchCore 推理", color="#d62728", alpha=0.85)
+            max_vram = max(max(d_vram), max(p_vram), 1.0)
+            for i in range(len(n_samples)):
+                if d_vram[i] > 0:
+                    ax.text(x_n[i] - 0.5 * w, d_vram[i] + max_vram * 0.015, f"{d_vram[i]:.2f}G", ha="center", va="bottom", fontsize=9.0, color="#1f77b4", fontweight="bold")
+                if p_vram[i] > 0:
+                    ax.text(x_n[i] + 0.5 * w, p_vram[i] + max_vram * 0.015, f"{p_vram[i]:.2f}G", ha="center", va="bottom", fontsize=9.0, color="#d62728")
 
         ax.set_title(f"实测在线推理 GPU 显存峰值对比 ({s}×{s}，{gpu_name} {gpu_total_gb}GB)", fontsize=12, fontweight="bold", pad=12)
         ax.set_xlabel("正常训练样本量 (N)", fontsize=10.5)
@@ -548,8 +647,9 @@ if __name__ == "__main__":
     parser.add_argument("--full_benchmark", action="store_true", help="Generate full multisize comparison suite")
     parser.add_argument("--full_data", action="store_true", help="Plot full dataset evaluation charts")
     parser.add_argument("--gpu_name", type=str, default=None, help="Override GPU name (e.g. RTX 4090)")
-    parser.add_argument("--gpu_vram_gb", type=float, default=None, help="Override total GPU VRAM in GB (e.g. 48.0)")
-    parser.add_argument("--save_images", action="store_true", default=False, help="Save static PNG images (default: False, interactive HTML dashboard is preferred)")
+    parser.add_argument("--gpu_vram_gb", type=float, default=None, help="Override GPU VRAM in GB")
+    parser.add_argument("--save_images", action="store_true", default=True, help="Save static PNG images")
+    parser.add_argument("--no_save_images", dest="save_images", action="store_false", help="Disable static PNG images")
     args = parser.parse_args()
 
     if args.results:

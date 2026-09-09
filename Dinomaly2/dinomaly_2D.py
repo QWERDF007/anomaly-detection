@@ -1123,7 +1123,7 @@ def train(item_list, args):
                 dg_loss_lists = {name: [] for name in dg_loss_lists}
                 hard_shift_families = []
 
-        if args.eval_interval > 0 and epoch % args.eval_interval == 0:
+        if not args.skip_eval and args.eval_interval > 0 and epoch % args.eval_interval == 0:
             try:
                 evaluate_model(
                     model,
@@ -1144,22 +1144,23 @@ def train(item_list, args):
     print(f'Peak GPU Memory: {peak_gpu_mem_mb:.1f} MB', flush=True)
 
     metrics_dict = {"peak_gpu_mem_mb": round(peak_gpu_mem_mb, 2)}
-    try:
-        mean_metrics = evaluate_model(
-            model,
-            test_data_list,
-            item_list,
-            device,
-            batch_size,
-            total_epochs,
-            writer,
-        )
-        if mean_metrics is not None:
-            metric_names = ['I-AUROC', 'I-AP', 'I-F1', 'P-AUROC', 'P-AP', 'P-F1', 'P-AUPRO']
-            for name, val in zip(metric_names, mean_metrics):
-                metrics_dict[name] = round(float(val), 6)
-    except Exception as e:
-        print(f"[eval] final evaluation failed: {e} (跳过，不影响模型保存)", flush=True)
+    if not args.skip_eval:
+        try:
+            mean_metrics = evaluate_model(
+                model,
+                test_data_list,
+                item_list,
+                device,
+                batch_size,
+                total_epochs,
+                writer,
+            )
+            if mean_metrics is not None:
+                metric_names = ['I-AUROC', 'I-AP', 'I-F1', 'P-AUROC', 'P-AP', 'P-F1', 'P-AUPRO']
+                for name, val in zip(metric_names, mean_metrics):
+                    metrics_dict[name] = round(float(val), 6)
+        except Exception as e:
+            print(f"[eval] final evaluation failed: {e} (跳过，不影响模型保存)", flush=True)
 
     if args.normal_shift_path:
         try:
@@ -1384,6 +1385,12 @@ if __name__ == '__main__':
     parser.add_argument('--cuda', type=int, default=0)
     parser.add_argument('--test_path', type=str, default=None,
                         help='可选：显式指定 test 列表/目录（txt 或目录）；未指定时若 --data_path 为 train_*.txt 则自动找同目录 test_*.txt（4060 单卡适配，Path 自动处理中文/空格）')
+    parser.add_argument(
+        '--skip-eval', '--skip_eval',
+        action='store_true',
+        dest='skip_eval',
+        help='Skip evaluation during and after training.',
+    )
     parser.add_argument(
         '--eval-only', '--eval_only',
         action='store_true',

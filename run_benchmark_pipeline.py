@@ -241,6 +241,7 @@ def main():
     parser.add_argument("--pseudo-anomaly", "--pseudo_anomaly", action="store_true", dest="pseudo_anomaly", help="Enable pseudo-anomaly preservation training for Source-DG")
     parser.add_argument("--gpus", type=str, default="auto", help="GPU device IDs (e.g. '0', '0,1', '0,1,2,3', or 'auto')")
     parser.add_argument("--seed", type=int, default=2024, help="Random seed")
+    parser.add_argument("--splits_dir", type=str, default="", help="Path to custom data splits folder (containing train_n*.txt and test_full.txt)")
     parser.add_argument("--dry-run", "--dry_run", action="store_true", dest="dry_run", help="Print planned tasks without executing")
     args = parser.parse_args()
 
@@ -259,7 +260,10 @@ def main():
         outs_dir = Path(args.outs_dir).expanduser().resolve()
 
     outs_dir.mkdir(parents=True, exist_ok=True)
-    splits_dir = outs_dir / "data_splits"
+    if args.splits_dir:
+        splits_dir = Path(args.splits_dir).expanduser().resolve()
+    else:
+        splits_dir = outs_dir / "data_splits"
     splits_dir.mkdir(parents=True, exist_ok=True)
 
     # Automatic Tee logger to outs_dir/pipeline_execution.log
@@ -302,39 +306,58 @@ def main():
     print("=" * 80, flush=True)
 
     # 1. Data Split Generation
-    good_imgs, bad_imgs = discover_dataset_images(dataset_root)
-    print(f"Discovered {len(good_imgs)} normal images and {len(bad_imgs)} anomalous images.")
+    pre_train_exist = all((splits_dir / f"train_n{n}.txt").exists() for n in args.train_sizes)
+    pre_test_exist = (splits_dir / "test_full.txt").exists()
 
-    random.seed(args.seed)
-    shuffled_good = list(good_imgs)
-    random.shuffle(shuffled_good)
+    if pre_train_exist and pre_test_exist:
+        valid_n_samples = [n for n in args.train_sizes if (splits_dir / f"train_n{n}.txt").exists()]
+        test_full_p = splits_dir / "test_full.txt"
+        clean_indomain_p = splits_dir / "test_clean_in_domain.txt"
+        if not clean_indomain_p.exists():
+            max_train_n = max(valid_n_samples)
+            clean_train_imgs = (splits_dir / f"train_n{max_train_n}.txt").read_text(encoding="utf-8").splitlines()
+            with open(clean_indomain_p, "w", encoding="utf-8") as f:
+                for p in clean_train_imgs:
+                    if p.strip():
+                        f.write(f"{p.strip().split()[0]}\t0\n")
+        print(f"[DATA] Reusing pre-existing valid data splits from: {splits_dir}")
+        print(f"       Train Sample Sizes N: {valid_n_samples}")
+        print(f"       Test Set: {test_full_p} ({len(test_full_p.read_text(encoding='utf-8').splitlines())} images)")
+        print(f"       Clean In-Domain Set: {clean_indomain_p}")
+    else:
+        good_imgs, bad_imgs = discover_dataset_images(dataset_root)
+        print(f"Discovered {len(good_imgs)} normal images and {len(bad_imgs)} anomalous images.")
 
-    valid_n_samples = [n for n in args.train_sizes if n <= len(shuffled_good)]
-    if not valid_n_samples:
-        raise ValueError(f"Not enough normal images ({len(good_imgs)}) for requested sample sizes {args.train_sizes}")
+        random.seed(args.seed)
+        shuffled_good = list(good_imgs)
+        random.shuffle(shuffled_good)
 
-    for n in valid_n_samples:
-        train_p = splits_dir / f"train_n{n}.txt"
-        with open(train_p, "w", encoding="utf-8") as f:
-            for p in shuffled_good[:n]:
-                f.write(f"{p}\n")
+        valid_n_samples = [n for n in args.train_sizes if n <= len(shuffled_good)]
+        if not valid_n_samples:
+            raise ValueError(f"Not enough normal images ({len(good_imgs)}) for requested sample sizes {args.train_sizes}")
 
-    # Unified Full Test Set (all good + all bad)
-    test_full_p = splits_dir / "test_full.txt"
-    test_imgs = [(p, 0) for p in good_imgs] + [(p, 1) for p in bad_imgs]
-    with open(test_full_p, "w", encoding="utf-8") as f:
-        for p, lbl in test_imgs:
-            f.write(f"{p}\t{lbl}\n")
-    print(f"Created unified test split: {len(test_imgs)} total images -> {test_full_p}")
+        for n in valid_n_samples:
+            train_p = splits_dir / f"train_n{n}.txt"
+            with open(train_p, "w", encoding="utf-8") as f:
+                for p in shuffled_good[:n]:
+                    f.write(f"{p}\n")
 
-    # Clean In-Domain Test Set (Normal images used in training, for verifying clean domain false positive rate)
-    max_train_n = max(valid_n_samples)
-    clean_train_imgs = shuffled_good[:max_train_n]
-    clean_indomain_p = splits_dir / "test_clean_in_domain.txt"
-    with open(clean_indomain_p, "w", encoding="utf-8") as f:
-        for p in clean_train_imgs:
-            f.write(f"{p}\t0\n")
-    print(f"Created clean in-domain split: {len(clean_train_imgs)} normal training images -> {clean_indomain_p}")
+        # Unified Full Test Set (all good + all bad)
+        test_full_p = splits_dir / "test_full.txt"
+        test_imgs = [(p, 0) for p in good_imgs] + [(p, 1) for p in bad_imgs]
+        with open(test_full_p, "w", encoding="utf-8") as f:
+            for p, lbl in test_imgs:
+                f.write(f"{p}\t{lbl}\n")
+        print(f"Created unified test split: {len(test_imgs)} total images -> {test_full_p}")
+
+        # Clean In-Domain Test Set (Normal images used in training, for verifying clean domain false positive rate)
+        max_train_n = max(valid_n_samples)
+        clean_train_imgs = shuffled_good[:max_train_n]
+        clean_indomain_p = splits_dir / "test_clean_in_domain.txt"
+        with open(clean_indomain_p, "w", encoding="utf-8") as f:
+            for p in clean_train_imgs:
+                f.write(f"{p}\t0\n")
+        print(f"Created clean in-domain split: {len(clean_train_imgs)} normal training images -> {clean_indomain_p}")
 
     # Step 1: PatchCore Training Tasks (Fast: ~2 mins across 8 GPUs)
     patch_tasks = []
@@ -390,6 +413,7 @@ def main():
                         "--max_iters", str(iters),
                         "--save_dir", str(task_out),
                         "--eval_interval", "-1",
+                        "--skip_eval",
                         "--cuda", "0",
                     ]
                     if args.source_dg:
@@ -507,10 +531,21 @@ def main():
     ]
     subprocess.run(report_cmd, check=True)
 
+    # Step 7: Generate Standalone Interactive HTML Benchmark Dashboard
+    print("\n" + "=" * 80)
+    print("=== Step 7: Generating Standalone Interactive HTML Dashboard ===")
+    print("=" * 80)
+    html_cmd = [
+        str(PYTHON), str(ROOT / "generate_interactive_chart_html.py"),
+        "--outs_dir", str(outs_dir)
+    ]
+    subprocess.run(html_cmd, check=False)
+
     print("\n" + "=" * 80)
     print("=== Benchmark Pipeline Completed Successfully! ===")
-    print(f"Report: {outs_dir / 'FINAL_BENCHMARK_REPORT.md'}")
-    print(f"Charts: {outs_dir / 'charts'}")
+    print(f"Report:    {outs_dir / 'FINAL_BENCHMARK_REPORT.md'}")
+    print(f"Charts:    {outs_dir / 'charts'}")
+    print(f"Dashboard: {outs_dir / 'charts' / 'benchmark_dashboard.html'}")
     print("=" * 80 + "\n")
 
 

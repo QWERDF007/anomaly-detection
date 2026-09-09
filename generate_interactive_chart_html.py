@@ -11,10 +11,40 @@ from typing import Dict, Any, List, Optional
 
 def build_interactive_html(
     dataset_name: str,
-    dataset_data: List[Dict[str, Any]]
+    dataset_data: List[Dict[str, Any]],
+    has_bank: bool = False
 ) -> str:
     """Generates strictly ONE self-contained interactive benchmark dashboard HTML for a single dataset."""
     json_data = json.dumps(dataset_data, ensure_ascii=False)
+    has_bank_js = "true" if has_bank else "false"
+
+    if has_bank:
+        model_checkboxes = """        <label class="checkbox-item">
+          <input type="checkbox" id="chkE2E" checked data-model="Two-Stage E2E">
+          <span class="color-dot dot-e2e"></span>
+          <span>二阶段端到端 (Two-Stage E2E)</span>
+        </label>
+        <label class="checkbox-item">
+          <input type="checkbox" id="chkDino" checked data-model="Dinomaly2">
+          <span class="color-dot dot-dino"></span>
+          <span>Dinomaly2 (单阶段)</span>
+        </label>
+        <label class="checkbox-item">
+          <input type="checkbox" id="chkPatch" checked data-model="PatchCore">
+          <span class="color-dot dot-patch"></span>
+          <span>PatchCore (特征检索基线)</span>
+        </label>"""
+    else:
+        model_checkboxes = """        <label class="checkbox-item">
+          <input type="checkbox" id="chkDino" checked data-model="Dinomaly2">
+          <span class="color-dot dot-dino"></span>
+          <span>Dinomaly2</span>
+        </label>
+        <label class="checkbox-item">
+          <input type="checkbox" id="chkPatch" checked data-model="PatchCore">
+          <span class="color-dot dot-patch"></span>
+          <span>PatchCore (基线)</span>
+        </label>"""
 
     html_template = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -520,21 +550,7 @@ def build_interactive_html(
         </div>
       </h3>
       <div class="checkbox-list">
-        <label class="checkbox-item">
-          <input type="checkbox" id="chkE2E" checked data-model="Two-Stage E2E">
-          <span class="color-dot dot-e2e"></span>
-          <span>二阶段端到端 (Two-Stage E2E)</span>
-        </label>
-        <label class="checkbox-item">
-          <input type="checkbox" id="chkDino" checked data-model="Dinomaly2">
-          <span class="color-dot dot-dino"></span>
-          <span>Dinomaly2 (单阶段)</span>
-        </label>
-        <label class="checkbox-item">
-          <input type="checkbox" id="chkPatch" checked data-model="PatchCore">
-          <span class="color-dot dot-patch"></span>
-          <span>PatchCore (特征检索基线)</span>
-        </label>
+{model_checkboxes}
       </div>
     </div>
 
@@ -715,6 +731,7 @@ def build_interactive_html(
 // Raw Benchmark Data for {dataset_name}
 const DATASET_NAME = "{dataset_name}";
 const DATASET_DATA = {json_data};
+const HAS_BANK = {has_bank_js};
 
 // Color scheme
 const COLOR_E2E = "#059669";
@@ -765,18 +782,51 @@ const METRIC_CONFIG = {{
   }},
   tp: {{
     label: "Defect Detections (真实缺陷检出数 TP)",
-    title: "真实缺陷检出数量 (True Positives / TP)",
+    title: "真实缺陷检出数量 (True Positives / TP, 越高越好)",
     unit: " 张",
     digits: 0,
-    yLabel: "真实缺陷检出数 (TP / 张)",
+    yLabel: "缺陷检出数 (TP / 张)",
     field: "tp",
     higherIsBetter: true,
     defaultYRange: null,
     isRate: false
   }},
+  fn: {{
+    label: "False Negatives (漏检缺陷数 FN)",
+    title: "漏检缺陷数量 (False Negatives / FN, 越低越好)",
+    unit: " 张",
+    digits: 0,
+    yLabel: "漏检缺陷数 (FN / 张)",
+    field: "fn",
+    higherIsBetter: false,
+    defaultYRange: null,
+    isRate: false
+  }},
+  fnr: {{
+    label: "Miss Rate (缺陷漏检率 FNR %)",
+    title: "缺陷漏检率 (False Negative Rate = FN / 缺陷总数, 越低越好)",
+    unit: "%",
+    digits: 2,
+    yLabel: "缺陷漏检率 (%)",
+    field: "fnr",
+    higherIsBetter: false,
+    defaultYRange: [0, 50],
+    isRate: false
+  }},
+  recall: {{
+    label: "Defect Recall (缺陷检出召回率 %)",
+    title: "缺陷检出召回率 (Recall = TP / 缺陷总数, 越高越好)",
+    unit: "%",
+    digits: 2,
+    yLabel: "缺陷检出率 (%)",
+    field: "recall",
+    higherIsBetter: true,
+    defaultYRange: [70, 100],
+    isRate: false
+  }},
   fp: {{
     label: "False Positives (良品误报数 FP)",
-    title: "良品误报数量 (False Positives / FP)",
+    title: "良品误报数量 (False Positives / FP, 越低越好)",
     unit: " 张",
     digits: 0,
     yLabel: "良品误报数 (FP / 张)",
@@ -898,7 +948,10 @@ function initMetricSelector() {{
       <option value="f1">Optimal F1-Score (最优 F1 分数)</option>
       <option value="ap">Average Precision (平均精度 AP)</option>
       <option value="tp">Defect Detections (真实缺陷检出数 TP)</option>
-      <option value="fp">False Positives (良品误报数 FP)</option>
+      <option value="fn">False Negatives (漏检缺陷数 FN - 越低越好)</option>
+      <option value="fnr">Miss Rate / FNR (缺陷漏检率 % - 越低越好)</option>
+      <option value="recall">Defect Recall (缺陷检出召回率 %)</option>
+      <option value="fp">False Positives (良品误报数 FP - 越低越好)</option>
       <option value="clean_fpr">Clean In-Domain FPR (良品误报率)</option>
       <option value="train_time_m">Training Time (实测训练建库耗时 min)</option>
     </optgroup>
@@ -962,9 +1015,12 @@ function updateYBounds() {{
   const vals = [];
 
   const selectedModels = new Set();
-  if (document.getElementById("chkE2E").checked) selectedModels.add("Two-Stage E2E");
-  if (document.getElementById("chkDino").checked) selectedModels.add("Dinomaly2");
-  if (document.getElementById("chkPatch").checked) selectedModels.add("PatchCore");
+  const chkE2E = document.getElementById("chkE2E");
+  if (chkE2E && chkE2E.checked) selectedModels.add("Two-Stage E2E");
+  const chkDino = document.getElementById("chkDino");
+  if (chkDino && chkDino.checked) selectedModels.add("Dinomaly2");
+  const chkPatch = document.getElementById("chkPatch");
+  if (chkPatch && chkPatch.checked) selectedModels.add("PatchCore");
 
   const selectedSizes = new Set();
   document.querySelectorAll("[data-size]").forEach(cb => {{
@@ -1036,6 +1092,18 @@ function updateYBounds() {{
           baseAutoYMax = 1.05;
         }}
       }}
+    }} else if (currentMetric === "recall") {{
+      if (mode === "adaptive") {{
+        const floorVal = Math.max(0.0, Math.floor((minVal - 4) / 5) * 5);
+        baseAutoYMin = floorVal;
+        baseAutoYMax = 102.0;
+      }} else {{
+        baseAutoYMin = 0.0;
+        baseAutoYMax = 105.0;
+      }}
+    }} else if (currentMetric === "fnr") {{
+      baseAutoYMin = 0.0;
+      baseAutoYMax = Math.max(5.0, maxVal * 1.25);
     }} else {{
       baseAutoYMin = 0.0;
       baseAutoYMax = maxVal > 0 ? maxVal * 1.22 : 10.0;
@@ -1069,6 +1137,27 @@ function getPointMetricValue(r, model, metric) {{
     if (model === "Dinomaly2") return parseInt(r.din_tp || 0);
     if (model === "Two-Stage E2E") return parseInt(r.e2e_tp || 0);
     if (model === "PatchCore") return parseInt(r.pat_tp || 0);
+  }}
+  if (metric === "fn") {{
+    if (model === "Dinomaly2") return parseInt(r.din_fn || 0);
+    if (model === "Two-Stage E2E") return parseInt(r.e2e_fn || 0);
+    if (model === "PatchCore") return parseInt(r.pat_fn || 0);
+  }}
+  if (metric === "fnr") {{
+    let tp = 0, fn = 0;
+    if (model === "Dinomaly2") {{ tp = parseInt(r.din_tp || 0); fn = parseInt(r.din_fn || 0); }}
+    if (model === "Two-Stage E2E") {{ tp = parseInt(r.e2e_tp || 0); fn = parseInt(r.e2e_fn || 0); }}
+    if (model === "PatchCore") {{ tp = parseInt(r.pat_tp || 0); fn = parseInt(r.pat_fn || 0); }}
+    const total = tp + fn;
+    return total > 0 ? parseFloat((fn / total * 100).toFixed(2)) : 0;
+  }}
+  if (metric === "recall") {{
+    let tp = 0, fn = 0;
+    if (model === "Dinomaly2") {{ tp = parseInt(r.din_tp || 0); fn = parseInt(r.din_fn || 0); }}
+    if (model === "Two-Stage E2E") {{ tp = parseInt(r.e2e_tp || 0); fn = parseInt(r.e2e_fn || 0); }}
+    if (model === "PatchCore") {{ tp = parseInt(r.pat_tp || 0); fn = parseInt(r.pat_fn || 0); }}
+    const total = tp + fn;
+    return total > 0 ? parseFloat((tp / total * 100).toFixed(2)) : 0;
   }}
   if (metric === "fp") {{
     if (model === "Dinomaly2") return parseInt(r.din_fp || 0);
@@ -1105,12 +1194,23 @@ function getPointMetricValue(r, model, metric) {{
 
 function extractItemMetrics(r, model) {{
   if (model === "Two-Stage E2E") {{
+    const tp = parseInt(r.e2e_tp || 0);
+    const fn = parseInt(r.e2e_fn || 0);
+    const fp = parseInt(r.e2e_fp || 0);
+    const tn = parseInt(r.e2e_tn || 0);
+    const totalDefects = tp + fn;
+    const recall = totalDefects > 0 ? (tp / totalDefects * 100) : 0;
+    const fnr = totalDefects > 0 ? (fn / totalDefects * 100) : 0;
     return {{
       auc: parseFloat(r.e2e_auc || 0),
       f1: parseFloat(r.e2e_f1 || 0),
       ap: parseFloat(r.e2e_ap || 0),
-      tp: parseInt(r.e2e_tp || 0),
-      fp: parseInt(r.e2e_fp || 0),
+      tp: tp,
+      fn: fn,
+      fp: fp,
+      tn: tn,
+      recall: recall,
+      fnr: fnr,
       clean_fpr: parseFloat(r.e2e_clean_fpr || 0),
       lat_ms: parseFloat(r.e2e_lat_ms || 0),
       fps: parseFloat(r.e2e_fps || r.fps || 0),
@@ -1118,12 +1218,23 @@ function extractItemMetrics(r, model) {{
       vram_gb: parseFloat(r.e2e_vram_gb || 0)
     }};
   }} else if (model === "PatchCore") {{
+    const tp = parseInt(r.pat_tp || 0);
+    const fn = parseInt(r.pat_fn || 0);
+    const fp = parseInt(r.pat_fp || 0);
+    const tn = parseInt(r.pat_tn || 0);
+    const totalDefects = tp + fn;
+    const recall = totalDefects > 0 ? (tp / totalDefects * 100) : 0;
+    const fnr = totalDefects > 0 ? (fn / totalDefects * 100) : 0;
     return {{
       auc: parseFloat(r.pat_auc || 0),
       f1: parseFloat(r.pat_f1 || 0),
       ap: parseFloat(r.pat_ap || 0),
-      tp: parseInt(r.pat_tp || 0),
-      fp: parseInt(r.pat_fp || 0),
+      tp: tp,
+      fn: fn,
+      fp: fp,
+      tn: tn,
+      recall: recall,
+      fnr: fnr,
       clean_fpr: parseFloat(r.pat_clean_fpr || 0),
       lat_ms: parseFloat(r.pat_lat_ms || 0),
       fps: parseFloat(r.pat_fps || 0),
@@ -1131,12 +1242,23 @@ function extractItemMetrics(r, model) {{
       vram_gb: parseFloat(r.pat_vram_gb || 0)
     }};
   }} else {{
+    const tp = parseInt(r.din_tp || 0);
+    const fn = parseInt(r.din_fn || 0);
+    const fp = parseInt(r.din_fp || 0);
+    const tn = parseInt(r.din_tn || 0);
+    const totalDefects = tp + fn;
+    const recall = totalDefects > 0 ? (tp / totalDefects * 100) : 0;
+    const fnr = totalDefects > 0 ? (fn / totalDefects * 100) : 0;
     return {{
       auc: parseFloat(r.din_auc || 0),
       f1: parseFloat(r.din_f1 || 0),
       ap: parseFloat(r.din_ap || 0),
-      tp: parseInt(r.din_tp || 0),
-      fp: parseInt(r.din_fp || 0),
+      tp: tp,
+      fn: fn,
+      fp: fp,
+      tn: tn,
+      recall: recall,
+      fnr: fnr,
       clean_fpr: parseFloat(r.din_clean_fpr || 0),
       lat_ms: parseFloat(r.din_lat_ms || 0),
       fps: parseFloat(r.din_fps || 0),
@@ -1175,9 +1297,12 @@ function render() {{
   clipRect.setAttribute("height", PLOT_HEIGHT);
 
   const selectedModels = new Set();
-  if (document.getElementById("chkE2E").checked) selectedModels.add("Two-Stage E2E");
-  if (document.getElementById("chkDino").checked) selectedModels.add("Dinomaly2");
-  if (document.getElementById("chkPatch").checked) selectedModels.add("PatchCore");
+  const chkE2E = document.getElementById("chkE2E");
+  if (chkE2E && chkE2E.checked) selectedModels.add("Two-Stage E2E");
+  const chkDino = document.getElementById("chkDino");
+  if (chkDino && chkDino.checked) selectedModels.add("Dinomaly2");
+  const chkPatch = document.getElementById("chkPatch");
+  if (chkPatch && chkPatch.checked) selectedModels.add("PatchCore");
 
   const selectedSizes = new Set();
   document.querySelectorAll("[data-size]").forEach(cb => {{
@@ -1598,11 +1723,14 @@ function formatTickVal(val, key) {{
 }}
 
 function renderTopHeaderLegend(group) {{
-  const models = [
-    {{ id: "chkE2E", name: "二阶段端到端 (Two-Stage E2E)", color: COLOR_E2E }},
-    {{ id: "chkDino", name: "Dinomaly2 (单阶段)", color: COLOR_DINO }},
-    {{ id: "chkPatch", name: "PatchCore (基线)", color: COLOR_PATCH }}
-  ];
+  const models = [];
+  if (HAS_BANK) {{
+    models.push({{ id: "chkE2E", name: "二阶段端到端 (Two-Stage E2E)", color: COLOR_E2E }});
+    models.push({{ id: "chkDino", name: "Dinomaly2 (单阶段)", color: COLOR_DINO }});
+  }} else {{
+    models.push({{ id: "chkDino", name: "Dinomaly2", color: COLOR_DINO }});
+  }}
+  models.push({{ id: "chkPatch", name: "PatchCore (基线)", color: COLOR_PATCH }});
 
   let curX = MARGIN.left;
   models.forEach(m => {{
@@ -1723,9 +1851,11 @@ function showTooltip(e, p) {{
     <div class="tt-row"><span>I-AUROC:</span> <span class="tt-val">${{p.auc.toFixed(4)}}</span></div>
     <div class="tt-row"><span>最优 F1 分数:</span> <span class="tt-val">${{p.f1 ? p.f1.toFixed(4) : "N/A"}}</span></div>
     <div class="tt-row"><span>平均精度 (AP):</span> <span class="tt-val">${{p.ap ? p.ap.toFixed(4) : "N/A"}}</span></div>
-    <div class="tt-row"><span>缺陷检出 (TP):</span> <span class="tt-val" style="color:#4ade80;">${{p.tp}} 张</span></div>
+    <div class="tt-row"><span>缺陷检出 (TP):</span> <span class="tt-val" style="color:#4ade80; font-weight:600;">${{p.tp}} 张 (${{p.recall.toFixed(1)}}%)</span></div>
+    <div class="tt-row"><span>漏检缺陷 (FN):</span> <span class="tt-val" style="color:#f43f5e; font-weight:700;">${{p.fn}} 张 (漏检率: ${{p.fnr.toFixed(1)}}%)</span></div>
     <div class="tt-row"><span>良品误报 (FP):</span> <span class="tt-val" style="color:#f87171;">${{p.fp}} 张</span></div>
-    <div class="tt-row"><span>良品误报率 (FPR):</span> <span class="tt-val">${{(p.clean_fpr * 100).toFixed(2)}}%</span></div>
+    <div class="tt-row"><span>良品放行 (TN):</span> <span class="tt-val" style="color:#94a3b8;">${{p.tn}} 张</span></div>
+    <div class="tt-row"><span>训练干净域误报 (FPR):</span> <span class="tt-val">${{(p.clean_fpr * 100).toFixed(2)}}%</span></div>
     <div class="tt-row"><span>正常训练样本量:</span> <span class="tt-val" style="color:#fbbf24; font-weight:700;">N = ${{p.n}}</span></div>
     ${{NON_ITERATION_METRICS.includes(currentMetric) ? "" : `<div class="tt-row"><span>迭代轮次:</span> <span class="tt-val">${{p.iters.toLocaleString()}} 轮</span></div>`}}
     <div class="tt-row"><span>输入分辨率:</span> <span class="tt-val">${{sizeDesc}}</span></div>
@@ -1758,7 +1888,7 @@ function showDetailCard(p) {{
   const panel = document.getElementById("detailPanel");
   const sizeDesc = p.size === 672 ? "672 × 672 (斜线)" : (p.size === 448 ? "448 × 448 (横线)" : "224 × 224 (圆点)");
   panel.innerHTML = `
-    <span><strong>选中实验:</strong> <span style="color: ${{p.color}}; font-weight: 700;">${{p.model}}</span> | <strong>${{activeCfg.label}}:</strong> <span style="color: #2563eb; font-weight: 700;">${{formatMetricVal(p.y_val, currentMetric)}}</span> | <strong>AUROC:</strong> ${{p.auc.toFixed(4)}} | <strong>F1:</strong> ${{p.f1 ? p.f1.toFixed(4) : 'N/A'}} | <strong>TP/FP:</strong> ${{p.tp}}/${{p.fp}} | <strong>N:</strong> ${{p.n}} ${{NON_ITERATION_METRICS.includes(currentMetric) ? "" : `| <strong>迭代:</strong> ${{p.iters.toLocaleString()}}`}} | <strong>尺寸:</strong> ${{sizeDesc}} | <strong>延迟:</strong> ${{p.lat_ms.toFixed(1)}}ms | <strong>耗时:</strong> ${{p.train_time_m.toFixed(1)}}min</span>
+    <span><strong>选中实验:</strong> <span style="color: ${{p.color}}; font-weight: 700;">${{p.model}}</span> | <strong>${{activeCfg.label}}:</strong> <span style="color: #2563eb; font-weight: 700;">${{formatMetricVal(p.y_val, currentMetric)}}</span> | <strong>AUROC:</strong> ${{p.auc.toFixed(4)}} | <strong>F1:</strong> ${{p.f1 ? p.f1.toFixed(4) : 'N/A'}} | <strong>检出(TP)/漏检(FN)/误报(FP):</strong> <span style="color:#16a34a; font-weight:600;">${{p.tp}}</span> / <span style="color:#dc2626; font-weight:700;">${{p.fn}}</span> / <span style="color:#ea580c; font-weight:600;">${{p.fp}}</span> | <strong>N:</strong> ${{p.n}} ${{NON_ITERATION_METRICS.includes(currentMetric) ? "" : `| <strong>迭代:</strong> ${{p.iters.toLocaleString()}}`}} | <strong>尺寸:</strong> ${{sizeDesc}} | <strong>延迟:</strong> ${{p.lat_ms.toFixed(1)}}ms | <strong>耗时:</strong> ${{p.train_time_m.toFixed(1)}}min</span>
   `;
 }}
 
@@ -1820,11 +1950,15 @@ function setupEventListeners() {{
     resetView();
   }});
 
-  ["chkE2E", "chkDino", "chkPatch", "chkSize224", "chkSize448", "chkSize672"].forEach(id => {{
-    document.getElementById(id).addEventListener("change", () => {{
-      updateYBounds();
-      render();
-    }});
+  const modelControlIds = HAS_BANK ? ["chkE2E", "chkDino", "chkPatch"] : ["chkDino", "chkPatch"];
+  [...modelControlIds, "chkSize224", "chkSize448", "chkSize672"].forEach(id => {{
+    const el = document.getElementById(id);
+    if (el) {{
+      el.addEventListener("change", () => {{
+        updateYBounds();
+        render();
+      }});
+    }}
   }});
 
   document.getElementById("yAxisRangeMode").addEventListener("change", () => {{
@@ -1833,12 +1967,18 @@ function setupEventListeners() {{
   }});
 
   document.getElementById("btnSelectAllModels").addEventListener("click", () => {{
-    ["chkE2E", "chkDino", "chkPatch"].forEach(id => document.getElementById(id).checked = true);
+    modelControlIds.forEach(id => {{
+      const el = document.getElementById(id);
+      if (el) el.checked = true;
+    }});
     updateYBounds();
     render();
   }});
   document.getElementById("btnUnselectAllModels").addEventListener("click", () => {{
-    ["chkE2E", "chkDino", "chkPatch"].forEach(id => document.getElementById(id).checked = false);
+    modelControlIds.forEach(id => {{
+      const el = document.getElementById(id);
+      if (el) el.checked = false;
+    }});
     updateYBounds();
     render();
   }});
@@ -1937,7 +2077,8 @@ def generate_dataset_html(outs_dir: Path, output_html: Optional[Path] = None) ->
     charts_dir = outs_dir / "charts"
     charts_dir.mkdir(parents=True, exist_ok=True)
 
-    html_content = build_interactive_html(dataset_name, dataset_data)
+    has_bank = any(outs_dir.glob("**/feature_bank.npz")) and any("e2e_auc" in d and d["e2e_auc"] is not None for d in dataset_data)
+    html_content = build_interactive_html(dataset_name, dataset_data, has_bank=has_bank)
 
     target_html = Path(output_html) if output_html else (charts_dir / "benchmark_dashboard.html")
     target_html.write_text(html_content, encoding="utf-8")

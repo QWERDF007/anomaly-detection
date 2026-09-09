@@ -234,7 +234,9 @@ def evaluate_single_task(
             elif len(bank.files) > 1:
                 nor_t = torch.from_numpy(bank[bank.files[1]]).float().to(device)
             else:
-                nor_t = ab_t
+                nor_t = None
+
+    has_two_stage = (ab_t is not None and nor_t is not None)
 
     din_scores_all = []
     e2e_scores_all = []
@@ -243,7 +245,7 @@ def evaluate_single_task(
     effective_low = 0.25
     effective_high = 0.50
 
-    # Measure pure GPU full pipeline latency and peak VRAM for Dinomaly2 & E2E (Batch=1)
+    # Measure pure GPU full pipeline latency and peak VRAM for Dinomaly2 (Batch=1)
     dummy_img = Image.new("RGB", (dino_s, dino_s), color=(128, 128, 128))
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -271,25 +273,29 @@ def evaluate_single_task(
     din_fps = 1000.0 / max(1e-4, din_lat_ms)
     din_vram_gb = (torch.cuda.max_memory_allocated(device) / (1024**3)) if torch.cuda.is_available() else 0.0
 
-    # E2E pure GPU benchmark
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats(device)
-    t0 = time.perf_counter()
-    with torch.no_grad():
-        for _ in range(20):
-            en_o, de_o = din_model(t_d)
-            amaps, _ = cal_anomaly_maps(en_o, de_o, dino_s)
-            amaps = gaussian_kernel(amaps)
-            if ab_t is not None:
+    # E2E pure GPU benchmark (ONLY when genuine two-stage bank data exists)
+    e2e_lat_ms = None
+    e2e_fps = None
+    e2e_vram_gb = None
+    if has_two_stage:
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(device)
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            for _ in range(20):
+                en_o, de_o = din_model(t_d)
+                amaps, _ = cal_anomaly_maps(en_o, de_o, dino_s)
+                amaps = gaussian_kernel(amaps)
                 feat = en_o[-1][0].permute(1, 2, 0).float()
                 unc_feats = feat.reshape(-1, embed_dim)[:100]
                 unc_feats = F.normalize(unc_feats, p=2, dim=-1)
                 _ = torch.mm(unc_feats, ab_t.T).max(dim=-1).values
-            if torch.cuda.is_available():
-                torch.cuda.synchronize(device)
-    e2e_lat_ms = (time.perf_counter() - t0) * 1000.0 / 20.0
-    e2e_fps = 1000.0 / max(1e-4, e2e_lat_ms)
-    e2e_vram_gb = (torch.cuda.max_memory_allocated(device) / (1024**3)) if torch.cuda.is_available() else 0.0
+                _ = torch.mm(unc_feats, nor_t.T).max(dim=-1).values
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize(device)
+        e2e_lat_ms = (time.perf_counter() - t0) * 1000.0 / 20.0
+        e2e_fps = 1000.0 / max(1e-4, e2e_lat_ms)
+        e2e_vram_gb = (torch.cuda.max_memory_allocated(device) / (1024**3)) if torch.cuda.is_available() else 0.0
 
     # Inference on Full Test Set
     batch_sz = 8
@@ -309,30 +315,31 @@ def evaluate_single_task(
                 raw_s = float(np.sort(amap.flatten())[-k_top:].mean())
                 din_scores_all.append(raw_s)
 
-                feat = en_o[-1][j].permute(1, 2, 0).float()
-                Hf, Wf, _ = feat.shape
-                amap_r = cv2.resize(amap, (Wf, Hf), interpolation=cv2.INTER_LINEAR)
-                unc_mask = (amap_r > effective_low) & (amap_r < effective_high)
-                if np.any(unc_mask) and ab_t is not None and nor_t is not None:
-                    unc_idx = np.where(unc_mask)
-                    unc_feats = feat[unc_idx[0], unc_idx[1], :]
-                    unc_feats = F.normalize(unc_feats, p=2, dim=-1)
+                if has_two_stage:
+                    feat = en_o[-1][j].permute(1, 2, 0).float()
+                    Hf, Wf, _ = feat.shape
+                    amap_r = cv2.resize(amap, (Wf, Hf), interpolation=cv2.INTER_LINEAR)
+                    unc_mask = (amap_r > effective_low) & (amap_r < effective_high)
+                    if np.any(unc_mask):
+                        unc_idx = np.where(unc_mask)
+                        unc_feats = feat[unc_idx[0], unc_idx[1], :]
+                        unc_feats = F.normalize(unc_feats, p=2, dim=-1)
 
-                    ab_ip = torch.mm(unc_feats, ab_t.T).max(dim=-1).values
-                    nor_ip = torch.mm(unc_feats, nor_t.T).max(dim=-1).values
-                    ab_dist = 1.0 - ab_ip
-                    nor_dist = 1.0 - nor_ip
+                        ab_ip = torch.mm(unc_feats, ab_t.T).max(dim=-1).values
+                        nor_ip = torch.mm(unc_feats, nor_t.T).max(dim=-1).values
+                        ab_dist = 1.0 - ab_ip
+                        nor_dist = 1.0 - nor_ip
 
-                    is_ab = ab_dist < nor_dist
-                    margin = (nor_dist - ab_dist) / (nor_dist + ab_dist + 1e-6)
-                    gain = torch.where(is_ab, 1.0 + 0.8 * torch.clamp(margin, min=0.0), 1.0 - 0.5 * torch.clamp(-margin, min=0.0))
-                    amap_r[unc_idx] = amap_r[unc_idx] * gain.cpu().numpy()
+                        is_ab = ab_dist < nor_dist
+                        margin = (nor_dist - ab_dist) / (nor_dist + ab_dist + 1e-6)
+                        gain = torch.where(is_ab, 1.0 + 0.8 * torch.clamp(margin, min=0.0), 1.0 - 0.5 * torch.clamp(-margin, min=0.0))
+                        amap_r[unc_idx] = amap_r[unc_idx] * gain.cpu().numpy()
 
-                final_amap = cv2.resize(amap_r, (s, s), interpolation=cv2.INTER_LINEAR)
-                cor_s = float(np.sort(final_amap.flatten())[-k_top:].mean())
-                e2e_scores_all.append(cor_s)
+                    final_amap = cv2.resize(amap_r, (s, s), interpolation=cv2.INTER_LINEAR)
+                    cor_s = float(np.sort(final_amap.flatten())[-k_top:].mean())
+                    e2e_scores_all.append(cor_s)
 
-    e2e_sec = time.perf_counter() - t_start
+    e2e_sec = (time.perf_counter() - t_start) if has_two_stage else None
 
     # Clean In-Domain evaluation for Dinomaly2 & E2E
     din_clean_scores = []
@@ -349,24 +356,25 @@ def evaluate_single_task(
                 for j in range(len(b_paths)):
                     amap = amaps[j, 0].float().cpu().numpy()
                     din_clean_scores.append(float(np.sort(amap.flatten())[-k_top:].mean()))
-                    feat = en_o[-1][j].permute(1, 2, 0).float()
-                    Hf, Wf, _ = feat.shape
-                    amap_r = cv2.resize(amap, (Wf, Hf), interpolation=cv2.INTER_LINEAR)
-                    unc_mask = (amap_r > effective_low) & (amap_r < effective_high)
-                    if np.any(unc_mask) and ab_t is not None and nor_t is not None:
-                        unc_idx = np.where(unc_mask)
-                        unc_feats = feat[unc_idx[0], unc_idx[1], :]
-                        unc_feats = F.normalize(unc_feats, p=2, dim=-1)
-                        ab_ip = torch.mm(unc_feats, ab_t.T).max(dim=-1).values
-                        nor_ip = torch.mm(unc_feats, nor_t.T).max(dim=-1).values
-                        ab_dist = 1.0 - ab_ip
-                        nor_dist = 1.0 - nor_ip
-                        is_ab = ab_dist < nor_dist
-                        margin = (nor_dist - ab_dist) / (nor_dist + ab_dist + 1e-6)
-                        gain = torch.where(is_ab, 1.0 + 0.8 * torch.clamp(margin, min=0.0), 1.0 - 0.5 * torch.clamp(-margin, min=0.0))
-                        amap_r[unc_idx] = amap_r[unc_idx] * gain.cpu().numpy()
-                    final_amap = cv2.resize(amap_r, (s, s), interpolation=cv2.INTER_LINEAR)
-                    e2e_clean_scores.append(float(np.sort(final_amap.flatten())[-k_top:].mean()))
+                    if has_two_stage:
+                        feat = en_o[-1][j].permute(1, 2, 0).float()
+                        Hf, Wf, _ = feat.shape
+                        amap_r = cv2.resize(amap, (Wf, Hf), interpolation=cv2.INTER_LINEAR)
+                        unc_mask = (amap_r > effective_low) & (amap_r < effective_high)
+                        if np.any(unc_mask):
+                            unc_idx = np.where(unc_mask)
+                            unc_feats = feat[unc_idx[0], unc_idx[1], :]
+                            unc_feats = F.normalize(unc_feats, p=2, dim=-1)
+                            ab_ip = torch.mm(unc_feats, ab_t.T).max(dim=-1).values
+                            nor_ip = torch.mm(unc_feats, nor_t.T).max(dim=-1).values
+                            ab_dist = 1.0 - ab_ip
+                            nor_dist = 1.0 - nor_ip
+                            is_ab = ab_dist < nor_dist
+                            margin = (nor_dist - ab_dist) / (nor_dist + ab_dist + 1e-6)
+                            gain = torch.where(is_ab, 1.0 + 0.8 * torch.clamp(margin, min=0.0), 1.0 - 0.5 * torch.clamp(-margin, min=0.0))
+                            amap_r[unc_idx] = amap_r[unc_idx] * gain.cpu().numpy()
+                        final_amap = cv2.resize(amap_r, (s, s), interpolation=cv2.INTER_LINEAR)
+                        e2e_clean_scores.append(float(np.sort(final_amap.flatten())[-k_top:].mean()))
 
     # 2. Evaluate PatchCore
     pat_scores = None
@@ -520,7 +528,7 @@ def evaluate_single_task(
         }
 
     m_din = calc_model_metrics(din_scores, din_clean_scores)
-    m_e2e = calc_model_metrics(e2e_scores, e2e_clean_scores)
+    m_e2e = calc_model_metrics(np.array(e2e_scores_all, dtype=np.float32), e2e_clean_scores) if has_two_stage else None
     m_pat = calc_model_metrics(pat_scores, pat_clean_scores) if pat_scores is not None else None
 
     # Save to e2e_results.csv in task dir
@@ -529,44 +537,50 @@ def evaluate_single_task(
         "image_path": [str(p) for p in test_paths],
         "true_label": ["good" if y == 0 else "anomaly" for y in y_true],
         "raw_score": din_scores,
-        "final_score": e2e_scores,
-        "decision": ["anomaly" if sc >= m_e2e["th"] else "normal" for sc in e2e_scores]
+        "dinomaly2_decision": ["anomaly" if sc >= m_din["th"] else "normal" for sc in din_scores]
     }
-    if pat_scores is not None:
+    if has_two_stage and m_e2e is not None:
+        csv_dict["final_score"] = e2e_scores_all
+        csv_dict["e2e_decision"] = ["anomaly" if sc >= m_e2e["th"] else "normal" for sc in e2e_scores_all]
+    if pat_scores is not None and m_pat is not None:
         csv_dict["patchcore_score"] = pat_scores
+        csv_dict["patchcore_decision"] = ["anomaly" if sc >= m_pat["th"] else "normal" for sc in pat_scores]
     pd.DataFrame(csv_dict).to_csv(out_e2e / "e2e_results.csv", index=False)
 
     res_item = {
         "iters": iters,
         "n": n,
         "size": s,
-        # Training metrics (live measured)
+        # Dinomaly2 training & inference (live measured)
         "din_train_time_s": round(din_train_time_s, 2),
         "din_train_time_m": round(din_train_time_s / 60.0, 2),
         "din_train_vram_gb": round(din_train_vram_gb, 2),
+        "din_lat_ms": round(din_lat_ms, 2), "din_fps": round(din_fps, 1), "din_vram_gb": round(din_vram_gb, 2),
+        "din_auc": m_din["auc"], "din_ap": m_din["ap"], "din_f1": m_din["f1"], "din_th": m_din["th"],
+        "din_tp": m_din["tp"], "din_fp": m_din["fp"], "din_tn": m_din["tn"], "din_fn": m_din["fn"],
+        "din_clean_fp": m_din["clean_fp"], "din_clean_tn": m_din["clean_tn"], "din_clean_fpr": round(m_din["clean_fpr"], 4),
+        # PatchCore training & inference (live measured)
         "pat_train_time_s": round(pat_train_time_s, 2),
         "pat_train_time_m": round(pat_train_time_s / 60.0, 2),
         "pat_train_vram_gb": round(pat_train_vram_gb, 2),
-        # Inference latency & throughput (live measured)
-        "din_lat_ms": round(din_lat_ms, 2), "din_fps": round(din_fps, 1), "din_vram_gb": round(din_vram_gb, 2),
-        "e2e_lat_ms": round(e2e_lat_ms, 2), "e2e_fps": round(e2e_fps, 1), "e2e_vram_gb": round(e2e_vram_gb, 2),
-        "e2e_sec": round(e2e_sec, 2), "fps": round(e2e_fps, 1),
         "pat_lat_ms": round(pat_lat_ms, 2), "pat_fps": round(pat_fps, 1), "pat_vram_gb": round(pat_vram_gb, 2),
-        # Model Accuracy & Optimal F1 (live measured)
-        "din_auc": m_din["auc"], "din_ap": m_din["ap"], "din_f1": m_din["f1"], "din_th": m_din["th"],
-        "din_tp": m_din["tp"], "din_fp": m_din["fp"], "din_tn": m_din["tn"], "din_fn": m_din["fn"],
-        "e2e_auc": m_e2e["auc"], "e2e_ap": m_e2e["ap"], "e2e_f1": m_e2e["f1"], "e2e_th": m_e2e["th"],
-        "e2e_tp": m_e2e["tp"], "e2e_fp": m_e2e["fp"], "e2e_tn": m_e2e["tn"], "e2e_fn": m_e2e["fn"],
         "pat_auc": m_pat["auc"] if m_pat else 0.0, "pat_ap": m_pat["ap"] if m_pat else 0.0,
         "pat_f1": m_pat["f1"] if m_pat else 0.0, "pat_th": m_pat["th"] if m_pat else 0.0,
         "pat_tp": m_pat["tp"] if m_pat else 0, "pat_fp": m_pat["fp"] if m_pat else 0,
         "pat_tn": m_pat["tn"] if m_pat else 0, "pat_fn": m_pat["fn"] if m_pat else 0,
-        # Clean in-domain false positive evaluation (live measured)
-        "din_clean_fp": m_din["clean_fp"], "din_clean_tn": m_din["clean_tn"], "din_clean_fpr": round(m_din["clean_fpr"], 4),
-        "e2e_clean_fp": m_e2e["clean_fp"], "e2e_clean_tn": m_e2e["clean_tn"], "e2e_clean_fpr": round(m_e2e["clean_fpr"], 4),
         "pat_clean_fp": m_pat["clean_fp"] if m_pat else 0, "pat_clean_tn": m_pat["clean_tn"] if m_pat else 0,
         "pat_clean_fpr": round(m_pat["clean_fpr"], 4) if m_pat else 0.0,
     }
+    # ONLY record two-stage metrics when two-stage feature banks genuinely exist!
+    if has_two_stage and m_e2e is not None:
+        res_item.update({
+            "has_bank": True,
+            "e2e_lat_ms": round(e2e_lat_ms, 2), "e2e_fps": round(e2e_fps, 1), "e2e_vram_gb": round(e2e_vram_gb, 2),
+            "e2e_sec": round(e2e_sec, 2), "fps": round(e2e_fps, 1),
+            "e2e_auc": m_e2e["auc"], "e2e_ap": m_e2e["ap"], "e2e_f1": m_e2e["f1"], "e2e_th": m_e2e["th"],
+            "e2e_tp": m_e2e["tp"], "e2e_fp": m_e2e["fp"], "e2e_tn": m_e2e["tn"], "e2e_fn": m_e2e["fn"],
+            "e2e_clean_fp": m_e2e["clean_fp"], "e2e_clean_tn": m_e2e["clean_tn"], "e2e_clean_fpr": round(m_e2e["clean_fpr"], 4),
+        })
 
     # Save task_eval_summary.json in task dir
     with open(out_e2e / "task_eval_summary.json", "w", encoding="utf-8") as f:
@@ -629,7 +643,8 @@ def _eval_subprocess_worker(gpu_id: int, task_queue: mp.Queue, result_queue: mp.
             if task_json.is_file():
                 try:
                     res_item = json.loads(task_json.read_text(encoding="utf-8"))
-                    print(f"[GPU {gpu_id}] Finished evaluation in {elapsed:.1f}s: Iter={iters} N={n} Size={s} -> Dino AUC={res_item['din_auc']:.4f}, E2E AUC={res_item['e2e_auc']:.4f}, Patch AUC={res_item['pat_auc']:.4f}", flush=True)
+                    e2e_log = f", E2E AUC={res_item['e2e_auc']:.4f}" if "e2e_auc" in res_item else ""
+                    print(f"[GPU {gpu_id}] Finished evaluation in {elapsed:.1f}s: Iter={iters} N={n} Size={s} -> Dino AUC={res_item['din_auc']:.4f}{e2e_log}, Patch AUC={res_item['pat_auc']:.4f}", flush=True)
                     result_queue.put(res_item)
                 except Exception as e:
                     print(f"[ERR] [GPU {gpu_id}] Could not parse task summary: {e}", flush=True)
@@ -652,11 +667,11 @@ def main():
     test_paths = []
     y_true_list = []
     for l in test_lines:
-        tokens = l.split("\t")
+        tokens = l.split("\t") if "\t" in l else l.split()
         p = Path(tokens[0].strip())
         test_paths.append(p)
-        if len(tokens) > 1 and tokens[1].strip().isdigit():
-            y_true_list.append(int(tokens[1].strip()))
+        if len(tokens) > 1 and tokens[-1].strip().isdigit():
+            y_true_list.append(int(tokens[-1].strip()))
         else:
             parts_lower = [part.lower() for part in p.parts]
             is_good = any(k in parts_lower for k in ["ok", "good", "normal", "良品", "正常"])
@@ -715,7 +730,8 @@ def main():
         task_info = (target_iters, target_n, target_s, din_model, pat_pkl, out_e2e, save_bank, din_task_dir, pat_task_dir)
 
         res_item = evaluate_single_task(task_info, device, test_paths, y_true, clean_test_paths, outs_dir)
-        print(f"[OK] Task Complete: Iter={target_iters} N={target_n} Size={target_s} -> Dino AUC={res_item['din_auc']:.4f}, E2E AUC={res_item['e2e_auc']:.4f}, Patch AUC={res_item['pat_auc']:.4f}")
+        e2e_log = f", E2E AUC={res_item['e2e_auc']:.4f}" if "e2e_auc" in res_item else ""
+        print(f"[OK] Task Complete: Iter={target_iters} N={target_n} Size={target_s} -> Dino AUC={res_item['din_auc']:.4f}{e2e_log}, Patch AUC={res_item['pat_auc']:.4f}")
         return
 
     # --- Mode 2: Master Evaluation Dispatcher & Collector ---
@@ -780,7 +796,8 @@ def main():
             if res is not None:
                 summary_results.append(res)
                 it_val, n_val, s_val = res["iters"], res["n"], res["size"]
-                print(f"[{received}/{len(tasks_grid)}] Progress: Iter={it_val} N={n_val} Size={s_val} -> Dino AUC={res['din_auc']:.4f}, E2E AUC={res['e2e_auc']:.4f}, Patch AUC={res['pat_auc']:.4f}", flush=True)
+                e2e_log = f", E2E AUC={res['e2e_auc']:.4f}" if "e2e_auc" in res else ""
+                print(f"[{received}/{len(tasks_grid)}] Progress: Iter={it_val} N={n_val} Size={s_val} -> Dino AUC={res['din_auc']:.4f}{e2e_log}, Patch AUC={res['pat_auc']:.4f}", flush=True)
 
         for p in processes:
             p.join()
@@ -820,7 +837,8 @@ def main():
 
             res_item = evaluate_single_task(task_info, device, test_paths, y_true, clean_test_paths, outs_dir)
             summary_results.append(res_item)
-            print(f"Task Complete: Iter={target_iters} N={target_n} Size={target_s} -> Dino AUC={res_item['din_auc']:.4f}, E2E AUC={res_item['e2e_auc']:.4f}, Patch AUC={res_item['pat_auc']:.4f}")
+            e2e_log = f", E2E AUC={res_item['e2e_auc']:.4f}" if "e2e_auc" in res_item else ""
+            print(f"Task Complete: Iter={target_iters} N={target_n} Size={target_s} -> Dino AUC={res_item['din_auc']:.4f}{e2e_log}, Patch AUC={res_item['pat_auc']:.4f}")
 
     # Sort results deterministically by (size, n, iters)
     summary_results.sort(key=lambda x: (x.get("size", 0), x.get("n", 0), x.get("iters", 0)))
