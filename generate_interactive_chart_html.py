@@ -806,23 +806,23 @@ const METRIC_CONFIG = {{
     label: "Miss Rate (缺陷漏检率 FNR %)",
     title: "缺陷漏检率 (False Negative Rate = FN / 缺陷总数, 越低越好)",
     unit: "%",
-    digits: 2,
+    digits: 1,
     yLabel: "缺陷漏检率 (%)",
     field: "fnr",
     higherIsBetter: false,
     defaultYRange: [0, 50],
-    isRate: false
+    isRate: true
   }},
   recall: {{
     label: "Defect Recall (缺陷检出召回率 %)",
     title: "缺陷检出召回率 (Recall = TP / 缺陷总数, 越高越好)",
     unit: "%",
-    digits: 2,
-    yLabel: "缺陷检出率 (%)",
+    digits: 1,
+    yLabel: "缺陷检出召回率 (%)",
     field: "recall",
     higherIsBetter: true,
     defaultYRange: [70, 100],
-    isRate: false
+    isRate: true
   }},
   fp: {{
     label: "False Positives (良品误报数 FP)",
@@ -835,15 +835,26 @@ const METRIC_CONFIG = {{
     defaultYRange: null,
     isRate: false
   }},
+  fpr: {{
+    label: "False Positive Rate (测试集良品误报率 FPR %)",
+    title: "测试集良品误报率 (FPR = FP / 良品总数, 越低越好)",
+    unit: "%",
+    digits: 1,
+    yLabel: "测试集误报率 (%)",
+    field: "fpr",
+    higherIsBetter: false,
+    defaultYRange: [0, 50],
+    isRate: true
+  }},
   clean_fpr: {{
-    label: "Clean In-Domain FPR (良品误报率)",
-    title: "训练干净域良品误报率 (Clean In-Domain FPR)",
-    unit: "",
-    digits: 3,
-    yLabel: "良品误报率 (FPR)",
+    label: "Clean In-Domain FPR (训练干净域误报率 %)",
+    title: "训练干净域良品误报率 (Clean In-Domain FPR, 越低越好)",
+    unit: "%",
+    digits: 1,
+    yLabel: "干净域误报率 (%)",
     field: "clean_fpr",
     higherIsBetter: false,
-    defaultYRange: [0, 0.05],
+    defaultYRange: [0, 10],
     isRate: true
   }},
   lat_ms: {{
@@ -948,11 +959,12 @@ function initMetricSelector() {{
       <option value="f1">Optimal F1-Score (最优 F1 分数)</option>
       <option value="ap">Average Precision (平均精度 AP)</option>
       <option value="tp">Defect Detections (真实缺陷检出数 TP)</option>
+      <option value="recall">Defect Recall (缺陷检出召回率 %)</option>
       <option value="fn">False Negatives (漏检缺陷数 FN - 越低越好)</option>
       <option value="fnr">Miss Rate / FNR (缺陷漏检率 % - 越低越好)</option>
-      <option value="recall">Defect Recall (缺陷检出召回率 %)</option>
       <option value="fp">False Positives (良品误报数 FP - 越低越好)</option>
-      <option value="clean_fpr">Clean In-Domain FPR (良品误报率)</option>
+      <option value="fpr">False Positive Rate (测试集良品误报率 %)</option>
+      <option value="clean_fpr">Clean In-Domain FPR (训练干净域误报率 %)</option>
       <option value="train_time_m">Training Time (实测训练建库耗时 min)</option>
     </optgroup>
     <optgroup label="硬件与推理效能 (不随迭代增加，按样本量 / 尺寸 / 模型)">
@@ -1077,33 +1089,29 @@ function updateYBounds() {{
     const minVal = Math.min(...vals);
     const maxVal = Math.max(...vals);
 
-    if (cfg.isRate) {{
-      if (currentMetric === "clean_fpr") {{
-        baseAutoYMin = 0.0;
-        baseAutoYMax = Math.max(0.05, maxVal * 1.25);
-      }} else {{
-        if (mode === "adaptive") {{
-          // Distinguish high values near 1.0 (e.g. 0.85 ~ 1.0)
-          const floorVal = Math.max(0.0, Math.floor((minVal - 0.04) * 10) / 10);
-          baseAutoYMin = floorVal;
-          baseAutoYMax = 1.05;
-        }} else {{
-          baseAutoYMin = 0.0;
-          baseAutoYMax = 1.05;
-        }}
-      }}
-    }} else if (currentMetric === "recall") {{
+    if (currentMetric === "recall") {{
       if (mode === "adaptive") {{
         const floorVal = Math.max(0.0, Math.floor((minVal - 4) / 5) * 5);
         baseAutoYMin = floorVal;
-        baseAutoYMax = 102.0;
+        baseAutoYMax = Math.min(100.0, Math.ceil(maxVal + 1));
+        if (baseAutoYMax <= baseAutoYMin) baseAutoYMax = 100.0;
       }} else {{
         baseAutoYMin = 0.0;
         baseAutoYMax = 105.0;
       }}
-    }} else if (currentMetric === "fnr") {{
+    }} else if (currentMetric === "fnr" || currentMetric === "fpr" || currentMetric === "clean_fpr") {{
       baseAutoYMin = 0.0;
-      baseAutoYMax = Math.max(5.0, maxVal * 1.25);
+      baseAutoYMax = Math.min(100.0, Math.max(5.0, Math.ceil(maxVal * 1.25)));
+    }} else if (["auc", "f1", "ap"].includes(currentMetric)) {{
+      if (mode === "adaptive") {{
+        // Distinguish high values near 1.0 (e.g. 0.85 ~ 1.0)
+        const floorVal = Math.max(0.0, Math.floor((minVal - 0.04) * 10) / 10);
+        baseAutoYMin = floorVal;
+        baseAutoYMax = 1.02;
+      }} else {{
+        baseAutoYMin = 0.0;
+        baseAutoYMax = 1.05;
+      }}
     }} else {{
       baseAutoYMin = 0.0;
       baseAutoYMax = maxVal > 0 ? maxVal * 1.22 : 10.0;
@@ -1164,10 +1172,18 @@ function getPointMetricValue(r, model, metric) {{
     if (model === "Two-Stage E2E") return parseInt(r.e2e_fp || 0);
     if (model === "PatchCore") return parseInt(r.pat_fp || 0);
   }}
+  if (metric === "fpr") {{
+    let fp = 0, tn = 0;
+    if (model === "Dinomaly2") {{ fp = parseInt(r.din_fp || 0); tn = parseInt(r.din_tn || 0); }}
+    if (model === "Two-Stage E2E") {{ fp = parseInt(r.e2e_fp || 0); tn = parseInt(r.e2e_tn || 0); }}
+    if (model === "PatchCore") {{ fp = parseInt(r.pat_fp || 0); tn = parseInt(r.pat_tn || 0); }}
+    const total = fp + tn;
+    return total > 0 ? parseFloat((fp / total * 100).toFixed(2)) : 0;
+  }}
   if (metric === "clean_fpr") {{
-    if (model === "Dinomaly2") return parseFloat(r.din_clean_fpr || 0);
-    if (model === "Two-Stage E2E") return parseFloat(r.e2e_clean_fpr || 0);
-    if (model === "PatchCore") return parseFloat(r.pat_clean_fpr || 0);
+    if (model === "Dinomaly2") return parseFloat(r.din_clean_fpr || 0) * 100;
+    if (model === "Two-Stage E2E") return parseFloat(r.e2e_clean_fpr || 0) * 100;
+    if (model === "PatchCore") return parseFloat(r.pat_clean_fpr || 0) * 100;
   }}
   if (metric === "lat_ms") {{
     if (model === "Dinomaly2") return parseFloat(r.din_lat_ms || 0);
@@ -1182,7 +1198,7 @@ function getPointMetricValue(r, model, metric) {{
   if (metric === "train_time_m") {{
     if (model === "Dinomaly2") return parseFloat(r.din_train_time_m || 0);
     if (model === "Two-Stage E2E") return parseFloat(r.e2e_sec ? (r.e2e_sec / 60) : (r.din_train_time_m || 0));
-    if (model === "PatchCore") return parseFloat(r.pat_train_time_m || 0);
+    if (model === "PatchCore") return parseFloat(r.pat_train_time_m || (r.pat_train_time_s ? r.pat_train_time_s / 60 : 0));
   }}
   if (metric === "vram_gb") {{
     if (model === "Dinomaly2") return parseFloat(r.din_vram_gb || 0);
@@ -1199,8 +1215,10 @@ function extractItemMetrics(r, model) {{
     const fp = parseInt(r.e2e_fp || 0);
     const tn = parseInt(r.e2e_tn || 0);
     const totalDefects = tp + fn;
+    const totalNormals = fp + tn;
     const recall = totalDefects > 0 ? (tp / totalDefects * 100) : 0;
     const fnr = totalDefects > 0 ? (fn / totalDefects * 100) : 0;
+    const fpr = totalNormals > 0 ? (fp / totalNormals * 100) : 0;
     return {{
       auc: parseFloat(r.e2e_auc || 0),
       f1: parseFloat(r.e2e_f1 || 0),
@@ -1211,7 +1229,8 @@ function extractItemMetrics(r, model) {{
       tn: tn,
       recall: recall,
       fnr: fnr,
-      clean_fpr: parseFloat(r.e2e_clean_fpr || 0),
+      fpr: fpr,
+      clean_fpr: parseFloat(r.e2e_clean_fpr || 0) * 100,
       lat_ms: parseFloat(r.e2e_lat_ms || 0),
       fps: parseFloat(r.e2e_fps || r.fps || 0),
       train_time_m: parseFloat(r.e2e_sec ? (r.e2e_sec / 60) : (r.din_train_time_m || 0)),
@@ -1223,8 +1242,10 @@ function extractItemMetrics(r, model) {{
     const fp = parseInt(r.pat_fp || 0);
     const tn = parseInt(r.pat_tn || 0);
     const totalDefects = tp + fn;
+    const totalNormals = fp + tn;
     const recall = totalDefects > 0 ? (tp / totalDefects * 100) : 0;
     const fnr = totalDefects > 0 ? (fn / totalDefects * 100) : 0;
+    const fpr = totalNormals > 0 ? (fp / totalNormals * 100) : 0;
     return {{
       auc: parseFloat(r.pat_auc || 0),
       f1: parseFloat(r.pat_f1 || 0),
@@ -1235,7 +1256,8 @@ function extractItemMetrics(r, model) {{
       tn: tn,
       recall: recall,
       fnr: fnr,
-      clean_fpr: parseFloat(r.pat_clean_fpr || 0),
+      fpr: fpr,
+      clean_fpr: parseFloat(r.pat_clean_fpr || 0) * 100,
       lat_ms: parseFloat(r.pat_lat_ms || 0),
       fps: parseFloat(r.pat_fps || 0),
       train_time_m: parseFloat(r.pat_train_time_m || (r.pat_train_time_s ? r.pat_train_time_s / 60 : 0)),
@@ -1247,8 +1269,10 @@ function extractItemMetrics(r, model) {{
     const fp = parseInt(r.din_fp || 0);
     const tn = parseInt(r.din_tn || 0);
     const totalDefects = tp + fn;
+    const totalNormals = fp + tn;
     const recall = totalDefects > 0 ? (tp / totalDefects * 100) : 0;
     const fnr = totalDefects > 0 ? (fn / totalDefects * 100) : 0;
+    const fpr = totalNormals > 0 ? (fp / totalNormals * 100) : 0;
     return {{
       auc: parseFloat(r.din_auc || 0),
       f1: parseFloat(r.din_f1 || 0),
@@ -1259,7 +1283,8 @@ function extractItemMetrics(r, model) {{
       tn: tn,
       recall: recall,
       fnr: fnr,
-      clean_fpr: parseFloat(r.din_clean_fpr || 0),
+      fpr: fpr,
+      clean_fpr: parseFloat(r.din_clean_fpr || 0) * 100,
       lat_ms: parseFloat(r.din_lat_ms || 0),
       fps: parseFloat(r.din_fps || 0),
       train_time_m: parseFloat(r.din_train_time_m || 0),
@@ -1285,8 +1310,9 @@ function valToY(val) {{
 function formatMetricVal(val, key) {{
   const cfg = METRIC_CONFIG[key];
   if (val === null || val === undefined || isNaN(val)) return "N/A";
-  if (cfg.digits === 0) return Math.round(val) + cfg.unit;
-  return val.toFixed(cfg.digits) + cfg.unit;
+  if (cfg.unit === "%") return val.toFixed(cfg.digits !== undefined ? cfg.digits : 1) + "%";
+  if (cfg.digits === 0) return Math.round(val) + (cfg.unit || "");
+  return val.toFixed(cfg.digits) + (cfg.unit || "");
 }}
 
 function render() {{
@@ -1519,15 +1545,15 @@ function renderBarChart(selectedModels, selectedSizes, selectedNs, selectedIters
         const cfg = METRIC_CONFIG[currentMetric];
         if (["auc", "f1", "ap"].includes(currentMetric)) {{
           valLabel = item.y_val.toFixed(3);
-        }} else if (currentMetric === "clean_fpr") {{
-          valLabel = (item.y_val * 100).toFixed(1) + "%";
+        }} else if (cfg.unit === "%" || ["recall", "fnr", "fpr", "clean_fpr"].includes(currentMetric)) {{
+          valLabel = item.y_val.toFixed(cfg.digits !== undefined ? cfg.digits : 1) + "%";
         }} else if (currentMetric === "train_time_m") {{
           valLabel = item.y_val < 1 ? item.y_val.toFixed(2) + "m" : item.y_val.toFixed(1) + "m";
         }} else if (currentMetric === "vram_gb") {{
           valLabel = item.y_val.toFixed(2) + "G";
         }} else if (currentMetric === "lat_ms") {{
           valLabel = item.y_val.toFixed(1) + "ms";
-        }} else if (["fps", "tp", "fp"].includes(currentMetric) || cfg.digits === 0) {{
+        }} else if (["fps", "tp", "fp", "fn", "tn"].includes(currentMetric) || cfg.digits === 0) {{
           valLabel = Math.round(item.y_val).toString();
         }} else {{
           valLabel = item.y_val.toFixed(cfg.digits);
@@ -1718,6 +1744,9 @@ function generateYTicks(min, max, count = 6) {{
 
 function formatTickVal(val, key) {{
   const cfg = METRIC_CONFIG[key];
+  if (cfg.unit === "%") {{
+    return (Number.isInteger(val) ? val.toString() : val.toFixed(1)) + "%";
+  }}
   if (cfg.digits === 0) return Math.round(val).toString();
   return val.toFixed(cfg.digits);
 }}
@@ -1851,11 +1880,11 @@ function showTooltip(e, p) {{
     <div class="tt-row"><span>I-AUROC:</span> <span class="tt-val">${{p.auc.toFixed(4)}}</span></div>
     <div class="tt-row"><span>最优 F1 分数:</span> <span class="tt-val">${{p.f1 ? p.f1.toFixed(4) : "N/A"}}</span></div>
     <div class="tt-row"><span>平均精度 (AP):</span> <span class="tt-val">${{p.ap ? p.ap.toFixed(4) : "N/A"}}</span></div>
-    <div class="tt-row"><span>缺陷检出 (TP):</span> <span class="tt-val" style="color:#4ade80; font-weight:600;">${{p.tp}} 张 (${{p.recall.toFixed(1)}}%)</span></div>
+    <div class="tt-row"><span>缺陷检出 (TP):</span> <span class="tt-val" style="color:#4ade80; font-weight:600;">${{p.tp}} 张 (检出率: ${{p.recall.toFixed(1)}}%)</span></div>
     <div class="tt-row"><span>漏检缺陷 (FN):</span> <span class="tt-val" style="color:#f43f5e; font-weight:700;">${{p.fn}} 张 (漏检率: ${{p.fnr.toFixed(1)}}%)</span></div>
-    <div class="tt-row"><span>良品误报 (FP):</span> <span class="tt-val" style="color:#f87171;">${{p.fp}} 张</span></div>
+    <div class="tt-row"><span>良品误报 (FP):</span> <span class="tt-val" style="color:#f87171;">${{p.fp}} 张 (误报率: ${{p.fpr.toFixed(1)}}%)</span></div>
     <div class="tt-row"><span>良品放行 (TN):</span> <span class="tt-val" style="color:#94a3b8;">${{p.tn}} 张</span></div>
-    <div class="tt-row"><span>训练干净域误报 (FPR):</span> <span class="tt-val">${{(p.clean_fpr * 100).toFixed(2)}}%</span></div>
+    <div class="tt-row"><span>训练干净域误报 (FPR):</span> <span class="tt-val">${{p.clean_fpr.toFixed(1)}}%</span></div>
     <div class="tt-row"><span>正常训练样本量:</span> <span class="tt-val" style="color:#fbbf24; font-weight:700;">N = ${{p.n}}</span></div>
     ${{NON_ITERATION_METRICS.includes(currentMetric) ? "" : `<div class="tt-row"><span>迭代轮次:</span> <span class="tt-val">${{p.iters.toLocaleString()}} 轮</span></div>`}}
     <div class="tt-row"><span>输入分辨率:</span> <span class="tt-val">${{sizeDesc}}</span></div>
@@ -1888,7 +1917,7 @@ function showDetailCard(p) {{
   const panel = document.getElementById("detailPanel");
   const sizeDesc = p.size === 672 ? "672 × 672 (斜线)" : (p.size === 448 ? "448 × 448 (横线)" : "224 × 224 (圆点)");
   panel.innerHTML = `
-    <span><strong>选中实验:</strong> <span style="color: ${{p.color}}; font-weight: 700;">${{p.model}}</span> | <strong>${{activeCfg.label}}:</strong> <span style="color: #2563eb; font-weight: 700;">${{formatMetricVal(p.y_val, currentMetric)}}</span> | <strong>AUROC:</strong> ${{p.auc.toFixed(4)}} | <strong>F1:</strong> ${{p.f1 ? p.f1.toFixed(4) : 'N/A'}} | <strong>检出(TP)/漏检(FN)/误报(FP):</strong> <span style="color:#16a34a; font-weight:600;">${{p.tp}}</span> / <span style="color:#dc2626; font-weight:700;">${{p.fn}}</span> / <span style="color:#ea580c; font-weight:600;">${{p.fp}}</span> | <strong>N:</strong> ${{p.n}} ${{NON_ITERATION_METRICS.includes(currentMetric) ? "" : `| <strong>迭代:</strong> ${{p.iters.toLocaleString()}}`}} | <strong>尺寸:</strong> ${{sizeDesc}} | <strong>延迟:</strong> ${{p.lat_ms.toFixed(1)}}ms | <strong>耗时:</strong> ${{p.train_time_m.toFixed(1)}}min</span>
+    <span><strong>选中实验:</strong> <span style="color: ${{p.color}}; font-weight: 700;">${{p.model}}</span> | <strong>${{activeCfg.label}}:</strong> <span style="color: #2563eb; font-weight: 700;">${{formatMetricVal(p.y_val, currentMetric)}}</span> | <strong>AUROC:</strong> ${{p.auc.toFixed(4)}} | <strong>F1:</strong> ${{p.f1 ? p.f1.toFixed(4) : 'N/A'}} | <strong>检出(TP)/漏检(FN)/误报(FP):</strong> <span style="color:#16a34a; font-weight:600;">${{p.tp}}</span> (${{p.recall.toFixed(1)}}%) / <span style="color:#dc2626; font-weight:700;">${{p.fn}}</span> (漏检: ${{p.fnr.toFixed(1)}}%) / <span style="color:#ea580c; font-weight:600;">${{p.fp}}</span> (误报: ${{p.fpr.toFixed(1)}}%) | <strong>干净域误报:</strong> ${{p.clean_fpr.toFixed(1)}}% | <strong>N:</strong> ${{p.n}} ${{NON_ITERATION_METRICS.includes(currentMetric) ? "" : `| <strong>迭代:</strong> ${{p.iters.toLocaleString()}}`}} | <strong>尺寸:</strong> ${{sizeDesc}} | <strong>延迟:</strong> ${{p.lat_ms.toFixed(1)}}ms | <strong>耗时:</strong> ${{p.train_time_m.toFixed(1)}}min</span>
   `;
 }}
 
