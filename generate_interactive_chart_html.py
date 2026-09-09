@@ -388,7 +388,7 @@ def build_interactive_html(
     font-size: 0.82rem;
     box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.35);
     z-index: 100;
-    max-width: 330px;
+    max-width: 350px;
     border: 1px solid rgba(255, 255, 255, 0.15);
     transition: opacity 0.15s ease;
   }}
@@ -747,119 +747,135 @@ const PLOT_HEIGHT = SVG_HEIGHT - MARGIN.top - MARGIN.bottom;
 
 // Metric Configuration Meta
 const METRIC_CONFIG = {{
+  // --- 1. 测试集评测指标 (Test Set Evaluation) ---
   auc: {{
-    label: "I-AUROC (图像级 AUC)",
-    title: "图像级受试者工作特征曲线面积 (I-AUROC)",
+    label: "I-AUROC (测试集图像级 AUC)",
+    title: "测试集图像级受试者工作特征曲线面积 (I-AUROC, 综合区分力, 越高越好)",
     unit: "",
     digits: 3,
-    yLabel: "Image AUROC",
+    yLabel: "Image AUROC (测试集)",
     field: "auc",
     higherIsBetter: true,
     defaultYRange: [0.70, 1.00],
     isRate: true
   }},
   f1: {{
-    label: "Optimal F1-Score (最优 F1 分数)",
-    title: "图像级最优 F1-Score 分数",
+    label: "Optimal F1-Score (测试集最优 F1)",
+    title: "测试集图像级最优平衡得分 (Optimal F1-Score, 兼顾检出与误报, 越高越好)",
     unit: "",
     digits: 3,
-    yLabel: "Optimal F1-Score",
+    yLabel: "Optimal F1 (测试集)",
     field: "f1",
     higherIsBetter: true,
     defaultYRange: [0.00, 1.00],
     isRate: true
   }},
   ap: {{
-    label: "Average Precision (平均精度 AP)",
-    title: "平均精度 (Average Precision / PR-AUC)",
+    label: "Average Precision (测试集平均精度 AP)",
+    title: "测试集精确率-召回率曲线面积 (Average Precision / PR-AUC, 越高越好)",
     unit: "",
     digits: 3,
-    yLabel: "Average Precision (AP)",
+    yLabel: "Average Precision (测试集)",
     field: "ap",
     higherIsBetter: true,
     defaultYRange: [0.00, 1.00],
     isRate: true
   }},
-  tp: {{
-    label: "Defect Detections (真实缺陷检出数 TP)",
-    title: "真实缺陷检出数量 (True Positives / TP, 越高越好)",
-    unit: " 张",
-    digits: 0,
-    yLabel: "缺陷检出数 (TP / 张)",
-    field: "tp",
-    higherIsBetter: true,
-    defaultYRange: null,
-    isRate: false
-  }},
-  fn: {{
-    label: "False Negatives (漏检缺陷数 FN)",
-    title: "漏检缺陷数量 (False Negatives / FN, 越低越好)",
-    unit: " 张",
-    digits: 0,
-    yLabel: "漏检缺陷数 (FN / 张)",
-    field: "fn",
-    higherIsBetter: false,
-    defaultYRange: null,
-    isRate: false
-  }},
-  fnr: {{
-    label: "Miss Rate (缺陷漏检率 FNR %)",
-    title: "缺陷漏检率 (False Negative Rate = FN / 缺陷总数, 越低越好)",
-    unit: "%",
-    digits: 1,
-    yLabel: "缺陷漏检率 (%)",
-    field: "fnr",
-    higherIsBetter: false,
-    defaultYRange: [0, 50],
-    isRate: true
-  }},
   recall: {{
-    label: "Defect Recall (缺陷检出召回率 %)",
-    title: "缺陷检出召回率 (Recall = TP / 缺陷总数, 越高越好)",
+    label: "Defect Recall (测试集缺陷检出召回率 %)",
+    title: "测试集缺陷检出召回率 (Recall = TP / 缺陷总数, 越高越好)",
     unit: "%",
     digits: 1,
-    yLabel: "缺陷检出召回率 (%)",
+    yLabel: "测试集缺陷检出率 (%)",
     field: "recall",
     higherIsBetter: true,
     defaultYRange: [70, 100],
     isRate: true
   }},
-  fp: {{
-    label: "False Positives (良品误报数 FP)",
-    title: "良品误报数量 (False Positives / FP, 越低越好)",
+  tp: {{
+    label: "Defect Detections (测试集缺陷检出数 TP)",
+    title: "测试集真实缺陷检出数量 (True Positives / TP, 越高越好)",
     unit: " 张",
     digits: 0,
-    yLabel: "良品误报数 (FP / 张)",
-    field: "fp",
+    yLabel: "测试集检出缺陷数 (TP / 张)",
+    field: "tp",
+    higherIsBetter: true,
+    defaultYRange: null,
+    isRate: false
+  }},
+  fnr: {{
+    label: "Miss Rate / FNR (测试集缺陷漏检率 %)",
+    title: "测试集缺陷漏检率 (False Negative Rate = FN / 缺陷总数, 越低越好)",
+    unit: "%",
+    digits: 1,
+    yLabel: "测试集缺陷漏检率 (%)",
+    field: "fnr",
+    higherIsBetter: false,
+    defaultYRange: [0, 50],
+    isRate: true
+  }},
+  fn: {{
+    label: "False Negatives (测试集缺陷漏检数 FN)",
+    title: "测试集缺陷漏检数量 (False Negatives / FN, 越低越好)",
+    unit: " 张",
+    digits: 0,
+    yLabel: "测试集漏检缺陷数 (FN / 张)",
+    field: "fn",
     higherIsBetter: false,
     defaultYRange: null,
     isRate: false
   }},
   fpr: {{
     label: "False Positive Rate (测试集良品误报率 FPR %)",
-    title: "测试集良品误报率 (FPR = FP / 良品总数, 越低越好)",
+    title: "测试集未见良品误报率 (FPR = FP / 良品总数, 越低越好)",
     unit: "%",
     digits: 1,
-    yLabel: "测试集误报率 (%)",
+    yLabel: "测试集良品误报率 (%)",
     field: "fpr",
     higherIsBetter: false,
     defaultYRange: [0, 50],
     isRate: true
   }},
+  fp: {{
+    label: "False Positives (测试集良品误报数 FP)",
+    title: "测试集未见良品误报数量 (False Positives / FP, 越低越好)",
+    unit: " 张",
+    digits: 0,
+    yLabel: "测试集良品误报数 (FP / 张)",
+    field: "fp",
+    higherIsBetter: false,
+    defaultYRange: null,
+    isRate: false
+  }},
+
+  // --- 2. 训练集自检与建库指标 (Training & In-Domain Validation) ---
   clean_fpr: {{
-    label: "Clean In-Domain FPR (训练干净域误报率 %)",
-    title: "训练干净域良品误报率 (Clean In-Domain FPR, 越低越好)",
+    label: "Clean In-Domain FPR (训练集良品自误报率 %)",
+    title: "训练集干净良品自检误报率 (Clean In-Domain FPR, 检验模型自一致性与过拟合, 越低越好)",
     unit: "%",
     digits: 1,
-    yLabel: "干净域误报率 (%)",
+    yLabel: "训练集良品自误报率 (%)",
     field: "clean_fpr",
     higherIsBetter: false,
     defaultYRange: [0, 10],
     isRate: true
   }},
+  train_time_m: {{
+    label: "Training Time (训练/建库总耗时 min)",
+    title: "模型训练迭代 / 特征提取建库总耗时 (Training / Bank Build Time, 越低越好)",
+    unit: " min",
+    digits: 1,
+    yLabel: "训练建库耗时 (min)",
+    field: "train_time_m",
+    higherIsBetter: false,
+    defaultYRange: null,
+    isRate: false
+  }},
+
+  // --- 3. 硬件与推理效能 (Hardware & Throughput) ---
   lat_ms: {{
-    label: "Inference Latency (单图推理耗时 ms)",
-    title: "GPU 端到端单图推理时延 (Latency)",
+    label: "Inference Latency (单图端到端推理时延 ms)",
+    title: "GPU 单张图片端到端推理时延 (Latency, 越低越好)",
     unit: " ms",
     digits: 1,
     yLabel: "单图推理时延 (ms)",
@@ -869,8 +885,8 @@ const METRIC_CONFIG = {{
     isRate: false
   }},
   fps: {{
-    label: "Inference FPS (实测推理吞吐量)",
-    title: "实测推理吞吐量 (Throughput FPS)",
+    label: "Inference FPS (实际推理吞吐量 FPS)",
+    title: "实际推理吞吐量 (Throughput FPS, 越高越好)",
     unit: " FPS",
     digits: 0,
     yLabel: "推理吞吐量 (FPS)",
@@ -879,20 +895,9 @@ const METRIC_CONFIG = {{
     defaultYRange: null,
     isRate: false
   }},
-  train_time_m: {{
-    label: "Training Time (实测训练建库耗时 min)",
-    title: "模型训练与建库耗时 (Training Time)",
-    unit: " min",
-    digits: 1,
-    yLabel: "耗时 (分钟 min)",
-    field: "train_time_m",
-    higherIsBetter: false,
-    defaultYRange: null,
-    isRate: false
-  }},
   vram_gb: {{
-    label: "GPU VRAM (显存占用 GB)",
-    title: "GPU 推理显存峰值 (Inference VRAM)",
+    label: "GPU VRAM (推理显存占用 GB)",
+    title: "GPU 推理显存峰值 (Inference Peak VRAM, 越低越好)",
     unit: " GB",
     digits: 2,
     yLabel: "显存占用 (GB)",
@@ -954,23 +959,25 @@ function updateXAxisSelectorOptions() {{
 function initMetricSelector() {{
   const sel = document.getElementById("metricSelector");
   sel.innerHTML = `
-    <optgroup label="核心精度与检出指标 (支持迭代轮次 / 样本量)">
-      <option value="auc">I-AUROC (图像级 AUC)</option>
-      <option value="f1">Optimal F1-Score (最优 F1 分数)</option>
-      <option value="ap">Average Precision (平均精度 AP)</option>
-      <option value="tp">Defect Detections (真实缺陷检出数 TP)</option>
-      <option value="recall">Defect Recall (缺陷检出召回率 %)</option>
-      <option value="fn">False Negatives (漏检缺陷数 FN - 越低越好)</option>
-      <option value="fnr">Miss Rate / FNR (缺陷漏检率 % - 越低越好)</option>
-      <option value="fp">False Positives (良品误报数 FP - 越低越好)</option>
-      <option value="fpr">False Positive Rate (测试集良品误报率 %)</option>
-      <option value="clean_fpr">Clean In-Domain FPR (训练干净域误报率 %)</option>
-      <option value="train_time_m">Training Time (实测训练建库耗时 min)</option>
+    <optgroup label="① 测试集评测指标 (泛化表现 / 缺陷检出与漏报误报)">
+      <option value="auc">I-AUROC (测试集图像级 AUC - 区分能力)</option>
+      <option value="f1">Optimal F1-Score (测试集最优 F1 - 综合平衡)</option>
+      <option value="ap">Average Precision (测试集平均精度 AP)</option>
+      <option value="recall">Defect Recall (测试集缺陷检出召回率 % - 越高越好)</option>
+      <option value="tp">Defect Detections (测试集缺陷检出数 TP - 越高越好)</option>
+      <option value="fnr">Miss Rate / FNR (测试集缺陷漏检率 % - 越低越好)</option>
+      <option value="fn">False Negatives (测试集缺陷漏检数 FN - 越低越好)</option>
+      <option value="fpr">False Positive Rate (测试集良品误报率 FPR % - 越低越好)</option>
+      <option value="fp">False Positives (测试集良品误报数 FP - 越低越好)</option>
     </optgroup>
-    <optgroup label="硬件与推理效能 (不随迭代增加，按样本量 / 尺寸 / 模型)">
-      <option value="lat_ms">Inference Latency (单图推理耗时 ms)</option>
-      <option value="fps">Inference FPS (实测推理吞吐量)</option>
-      <option value="vram_gb">GPU VRAM (显存占用 GB)</option>
+    <optgroup label="② 训练集自检与耗时 (良品自检误报 / 建库开销)">
+      <option value="clean_fpr">Clean In-Domain FPR (训练集良品自误报率 % - 越低越好)</option>
+      <option value="train_time_m">Training Time (模型训练/建库总耗时 min - 越低越好)</option>
+    </optgroup>
+    <optgroup label="③ 硬件与推理效能 (按样本量 / 尺寸 / 模型观察)">
+      <option value="lat_ms">Inference Latency (单图端到端推理时延 ms - 越低越好)</option>
+      <option value="fps">Inference FPS (实际推理吞吐量 FPS - 越高越好)</option>
+      <option value="vram_gb">GPU VRAM (推理显存占用峰值 GB - 越低越好)</option>
     </optgroup>
   `;
   sel.value = currentMetric;
@@ -1877,16 +1884,19 @@ function showTooltip(e, p) {{
       <span class="tt-val tt-highlight">${{activeValStr}}</span>
     </div>
     <div class="divider" style="margin: 6px 0; opacity: 0.3;"></div>
-    <div class="tt-row"><span>I-AUROC:</span> <span class="tt-val">${{p.auc.toFixed(4)}}</span></div>
-    <div class="tt-row"><span>最优 F1 分数:</span> <span class="tt-val">${{p.f1 ? p.f1.toFixed(4) : "N/A"}}</span></div>
-    <div class="tt-row"><span>平均精度 (AP):</span> <span class="tt-val">${{p.ap ? p.ap.toFixed(4) : "N/A"}}</span></div>
+    <div class="tt-row"><span style="color:#93c5fd; font-weight:700;">【测试集真实评测】</span></div>
+    <div class="tt-row"><span>测试集 I-AUROC:</span> <span class="tt-val">${{p.auc.toFixed(4)}}</span></div>
+    <div class="tt-row"><span>测试集最优 F1:</span> <span class="tt-val">${{p.f1 ? p.f1.toFixed(4) : "N/A"}}</span></div>
+    <div class="tt-row"><span>测试集平均精度 (AP):</span> <span class="tt-val">${{p.ap ? p.ap.toFixed(4) : "N/A"}}</span></div>
     <div class="tt-row"><span>缺陷检出 (TP):</span> <span class="tt-val" style="color:#4ade80; font-weight:600;">${{p.tp}} 张 (检出率: ${{p.recall.toFixed(1)}}%)</span></div>
-    <div class="tt-row"><span>漏检缺陷 (FN):</span> <span class="tt-val" style="color:#f43f5e; font-weight:700;">${{p.fn}} 张 (漏检率: ${{p.fnr.toFixed(1)}}%)</span></div>
-    <div class="tt-row"><span>良品误报 (FP):</span> <span class="tt-val" style="color:#f87171;">${{p.fp}} 张 (误报率: ${{p.fpr.toFixed(1)}}%)</span></div>
-    <div class="tt-row"><span>良品放行 (TN):</span> <span class="tt-val" style="color:#94a3b8;">${{p.tn}} 张</span></div>
-    <div class="tt-row"><span>训练干净域误报 (FPR):</span> <span class="tt-val">${{p.clean_fpr.toFixed(1)}}%</span></div>
+    <div class="tt-row"><span>缺陷漏检 (FN):</span> <span class="tt-val" style="color:#f43f5e; font-weight:700;">${{p.fn}} 张 (漏检率: ${{p.fnr.toFixed(1)}}%)</span></div>
+    <div class="tt-row"><span>测试集良品误报 (FP):</span> <span class="tt-val" style="color:#f87171;">${{p.fp}} 张 (误报率: ${{p.fpr.toFixed(1)}}%)</span></div>
+    <div class="tt-row"><span>测试集良品放行 (TN):</span> <span class="tt-val" style="color:#94a3b8;">${{p.tn}} 张</span></div>
+    <div class="divider" style="margin: 6px 0; opacity: 0.3;"></div>
+    <div class="tt-row"><span style="color:#93c5fd; font-weight:700;">【训练集自检与效能】</span></div>
+    <div class="tt-row"><span>训练集良品自误报 (Clean FPR):</span> <span class="tt-val" style="color:${{p.clean_fpr > 1 ? '#f87171' : '#4ade80'}}; font-weight:600;">${{p.clean_fpr.toFixed(1)}}%</span></div>
     <div class="tt-row"><span>正常训练样本量:</span> <span class="tt-val" style="color:#fbbf24; font-weight:700;">N = ${{p.n}}</span></div>
-    ${{NON_ITERATION_METRICS.includes(currentMetric) ? "" : `<div class="tt-row"><span>迭代轮次:</span> <span class="tt-val">${{p.iters.toLocaleString()}} 轮</span></div>`}}
+    ${{NON_ITERATION_METRICS.includes(currentMetric) ? "" : `<div class="tt-row"><span>训练迭代轮次:</span> <span class="tt-val">${{p.iters.toLocaleString()}} 轮</span></div>`}}
     <div class="tt-row"><span>输入分辨率:</span> <span class="tt-val">${{sizeDesc}}</span></div>
     <div class="tt-row"><span>推理耗时 / FPS:</span> <span class="tt-val">${{p.lat_ms.toFixed(1)}} ms (${{Math.round(p.fps)}} FPS)</span></div>
     <div class="tt-row"><span>训练耗时 / 显存:</span> <span class="tt-val">${{p.train_time_m.toFixed(1)}} min | ${{p.vram_gb.toFixed(2)}} GB</span></div>
@@ -1901,8 +1911,8 @@ function updateTooltipPos(e) {{
   let left = e.clientX - rect.left + 15;
   let top = e.clientY - rect.top + 15;
 
-  if (left + 310 > rect.width) left -= 325;
-  if (top + 280 > rect.height) top -= 290;
+  if (left + 350 > rect.width) left -= 365;
+  if (top + 340 > rect.height) top -= 345;
 
   tooltip.style.left = `${{left}}px`;
   tooltip.style.top = `${{top}}px`;
@@ -1917,7 +1927,7 @@ function showDetailCard(p) {{
   const panel = document.getElementById("detailPanel");
   const sizeDesc = p.size === 672 ? "672 × 672 (斜线)" : (p.size === 448 ? "448 × 448 (横线)" : "224 × 224 (圆点)");
   panel.innerHTML = `
-    <span><strong>选中实验:</strong> <span style="color: ${{p.color}}; font-weight: 700;">${{p.model}}</span> | <strong>${{activeCfg.label}}:</strong> <span style="color: #2563eb; font-weight: 700;">${{formatMetricVal(p.y_val, currentMetric)}}</span> | <strong>AUROC:</strong> ${{p.auc.toFixed(4)}} | <strong>F1:</strong> ${{p.f1 ? p.f1.toFixed(4) : 'N/A'}} | <strong>检出(TP)/漏检(FN)/误报(FP):</strong> <span style="color:#16a34a; font-weight:600;">${{p.tp}}</span> (${{p.recall.toFixed(1)}}%) / <span style="color:#dc2626; font-weight:700;">${{p.fn}}</span> (漏检: ${{p.fnr.toFixed(1)}}%) / <span style="color:#ea580c; font-weight:600;">${{p.fp}}</span> (误报: ${{p.fpr.toFixed(1)}}%) | <strong>干净域误报:</strong> ${{p.clean_fpr.toFixed(1)}}% | <strong>N:</strong> ${{p.n}} ${{NON_ITERATION_METRICS.includes(currentMetric) ? "" : `| <strong>迭代:</strong> ${{p.iters.toLocaleString()}}`}} | <strong>尺寸:</strong> ${{sizeDesc}} | <strong>延迟:</strong> ${{p.lat_ms.toFixed(1)}}ms | <strong>耗时:</strong> ${{p.train_time_m.toFixed(1)}}min</span>
+    <span><strong>选中实验:</strong> <span style="color: ${{p.color}}; font-weight: 700;">${{p.model}}</span> | <strong>${{activeCfg.label}}:</strong> <span style="color: #2563eb; font-weight: 700;">${{formatMetricVal(p.y_val, currentMetric)}}</span> | <strong>测试集AUROC:</strong> ${{p.auc.toFixed(4)}} | <strong>最优F1:</strong> ${{p.f1 ? p.f1.toFixed(4) : 'N/A'}} | <strong>测试集检出(TP)/漏检(FN)/误报(FP):</strong> <span style="color:#16a34a; font-weight:600;">${{p.tp}}</span> (${{p.recall.toFixed(1)}}%) / <span style="color:#dc2626; font-weight:700;">${{p.fn}}</span> (漏检: ${{p.fnr.toFixed(1)}}%) / <span style="color:#ea580c; font-weight:600;">${{p.fp}}</span> (误报: ${{p.fpr.toFixed(1)}}%) | <strong>训练集良品自误报:</strong> ${{p.clean_fpr.toFixed(1)}}% | <strong>N:</strong> ${{p.n}} ${{NON_ITERATION_METRICS.includes(currentMetric) ? "" : `| <strong>迭代:</strong> ${{p.iters.toLocaleString()}}`}} | <strong>尺寸:</strong> ${{sizeDesc}} | <strong>延迟:</strong> ${{p.lat_ms.toFixed(1)}}ms | <strong>耗时:</strong> ${{p.train_time_m.toFixed(1)}}min</span>
   `;
 }}
 
