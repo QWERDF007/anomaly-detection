@@ -959,16 +959,13 @@ function updateXAxisSelectorOptions() {{
 function initMetricSelector() {{
   const sel = document.getElementById("metricSelector");
   sel.innerHTML = `
-    <optgroup label="① 测试集评测指标 (泛化表现 / 缺陷检出与漏报误报)">
+    <optgroup label="① 测试集评测指标 (泛化表现 / 缺陷检出率与漏报误报率)">
       <option value="auc">I-AUROC (测试集图像级 AUC - 区分能力)</option>
       <option value="f1">Optimal F1-Score (测试集最优 F1 - 综合平衡)</option>
       <option value="ap">Average Precision (测试集平均精度 AP)</option>
       <option value="recall">Defect Recall (测试集缺陷检出召回率 % - 越高越好)</option>
-      <option value="tp">Defect Detections (测试集缺陷检出数 TP - 越高越好)</option>
       <option value="fnr">Miss Rate / FNR (测试集缺陷漏检率 % - 越低越好)</option>
-      <option value="fn">False Negatives (测试集缺陷漏检数 FN - 越低越好)</option>
       <option value="fpr">False Positive Rate (测试集良品误报率 FPR % - 越低越好)</option>
-      <option value="fp">False Positives (测试集良品误报数 FP - 越低越好)</option>
     </optgroup>
     <optgroup label="② 训练集自检与耗时 (良品自检误报 / 建库开销)">
       <option value="clean_fpr">Clean In-Domain FPR (训练集良品自误报率 % - 越低越好)</option>
