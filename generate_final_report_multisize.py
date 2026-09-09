@@ -256,7 +256,7 @@ def generate_reports(outs_dir_str: str) -> None:
 
             md += f"""
 ### {section_num + idx}.2 混淆矩阵与误报统计 (TP / FP / TN / FN)
-| 输入尺寸 | 算法模型 | 检出缺陷 (TP) | 漏报缺陷 (FN) | 检出率 (Recall) | 良品误报 (FP) | 正确放行 (TN) | 误报率 (FPR) | 干净域误报 (Clean FP) |
+| 输入尺寸 | 算法模型 | 检出缺陷 (TP) | 漏报缺陷 (FN) | 检出率 (Recall) | 测试集良品误报 (FP) | 正确放行 (TN) | 测试集误报率 (FPR) | 训练集良品自误报 (Clean FP) |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 """
             for r in n_rows:
@@ -310,7 +310,7 @@ def generate_reports(outs_dir_str: str) -> None:
 
             md += f"""
 ### {section_num + idx}.2 混淆矩阵与误报统计 (TP / FP / TN / FN)
-| 输入尺寸 | 算法模型 | 检出缺陷 (TP) | 漏报缺陷 (FN) | 检出率 (Recall) | 良品误报 (FP) | 正确放行 (TN) | 误报率 (FPR) | 干净域误报 (Clean FP) |
+| 输入尺寸 | 算法模型 | 检出缺陷 (TP) | 漏报缺陷 (FN) | 检出率 (Recall) | 测试集良品误报 (FP) | 正确放行 (TN) | 测试集误报率 (FPR) | 训练集良品自误报 (Clean FP) |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 """
             for r in n_rows:
