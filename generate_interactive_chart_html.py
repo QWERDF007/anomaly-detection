@@ -12,11 +12,13 @@ from typing import Dict, Any, List, Optional
 def build_interactive_html(
     dataset_name: str,
     dataset_data: List[Dict[str, Any]],
-    has_bank: bool = False
+    has_bank: bool = False,
+    all_datasets_stats: Optional[Dict[str, Any]] = None
 ) -> str:
     """Generates strictly ONE self-contained interactive benchmark dashboard HTML for a single dataset."""
     json_data = json.dumps(dataset_data, ensure_ascii=False)
     has_bank_js = "true" if has_bank else "false"
+    all_datasets_json = json.dumps(all_datasets_stats or {}, ensure_ascii=False)
 
     if has_bank:
         model_checkboxes = """        <label class="checkbox-item">
@@ -193,6 +195,79 @@ def build_interactive_html(
     width: 100%;
     box-sizing: border-box;
     overflow: hidden;
+  }}
+
+  /* Header Tabs */
+  .header-tabs {{
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: #f1f5f9;
+    padding: 3px;
+    border-radius: 8px;
+    border: 1px solid #e2e8f0;
+    margin-left: 10px;
+  }}
+  .header-tabs .tab-btn {{
+    padding: 5px 12px;
+    border-radius: 6px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: #475569;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }}
+  .header-tabs .tab-btn:hover {{
+    color: #0f172a;
+    background: rgba(255, 255, 255, 0.7);
+  }}
+  .header-tabs .tab-btn.active {{
+    background: #ffffff;
+    color: #2563eb;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  }}
+  .tab-badge {{
+    background: #ef4444;
+    color: white;
+    font-size: 0.65rem;
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-weight: 700;
+  }}
+  .preset-btn {{
+    width: 100%;
+    text-align: center;
+    justify-content: center;
+    font-size: 0.76rem;
+    padding: 5px 8px;
+    border-radius: 5px;
+    border: 1px solid #cbd5e1;
+    background: #f8fafc;
+    color: #334155;
+    cursor: pointer;
+    transition: all 0.15s;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }}
+  .preset-btn:hover {{
+    background: #e2e8f0;
+    color: #0f172a;
+  }}
+  .preset-btn-accent {{
+    background: #eff6ff;
+    border-color: #bfdbfe;
+    color: #1d4ed8;
+    font-weight: 600;
+  }}
+  .preset-btn-accent:hover {{
+    background: #dbeafe;
+    color: #1e40af;
   }}
 
   /* Sidebar Controls */
@@ -514,9 +589,20 @@ def build_interactive_html(
     <h1>
       <span>{dataset_name}</span>
     </h1>
+    <div class="header-tabs">
+      <button class="tab-btn active" id="tabBtnBenchmark" title="查看模型指标评测">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M18 9l-5 5-4-4-6 6"/></svg>
+        <span>算法模型基准评测</span>
+      </button>
+      <button class="tab-btn" id="tabBtnDataset" title="查看训练集与测试集数量规模分布">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>
+        <span>训练集与测试集数量分布</span>
+        <span class="tab-badge">图表</span>
+      </button>
+    </div>
   </div>
 
-  <div class="header-selectors">
+  <div class="header-selectors" id="benchmarkSelectors">
     <div class="selector-wrapper">
       <label for="metricSelector">核心评测指标:</label>
       <select id="metricSelector" class="custom-select custom-select-metric"></select>
@@ -525,6 +611,17 @@ def build_interactive_html(
     <div class="selector-wrapper">
       <label for="xAxisSelector">横坐标 (X 轴):</label>
       <select id="xAxisSelector" class="custom-select"></select>
+    </div>
+  </div>
+
+  <div class="header-selectors" id="datasetSelectors" style="display: none;">
+    <div class="selector-wrapper">
+      <label for="dsViewMode">展示模式:</label>
+      <select id="dsViewMode" class="custom-select" style="min-width: 260px;">
+        <option value="detailed" selected>全量明细 (训练良品各N / 测试良品 / 测试缺陷 / 测试总量)</option>
+        <option value="totals">总量对比 (训练集最大样本量 vs 测试集总样本量)</option>
+        <option value="stacked">测试集构成比例 (良品 vs 缺陷 100% 堆叠)</option>
+      </select>
     </div>
   </div>
 
@@ -539,6 +636,9 @@ def build_interactive_html(
 <div class="main-layout">
   <!-- Control Panel -->
   <aside class="control-panel">
+    <!-- 1. Controls for Benchmark Tab -->
+    <div id="benchmarkControls" style="display: flex; flex-direction: column; gap: 8px;">
+
     <!-- Model Selection -->
     <div class="control-group">
       <h3>
@@ -655,10 +755,74 @@ def build_interactive_html(
         </select>
       </div>
     </div>
+  
+    </div>
+
+    <!-- 2. Controls for Dataset Splits Tab -->
+    <div id="datasetControls" style="display: none; flex-direction: column; gap: 8px;">
+      <div class="control-group">
+        <h3>
+          <span>对比数据集 (Datasets)</span>
+          <div class="quick-links-group">
+            <span class="quick-link" id="btnSelectAllDs">全选</span>
+            <span class="quick-link-sep">/</span>
+            <span class="quick-link" id="btnUnselectAllDs">全不选</span>
+          </div>
+        </h3>
+        <div class="checkbox-list" id="dsListContainer">
+        </div>
+        <div style="margin-top: 8px; display: flex; flex-direction: column; gap: 5px;" id="dsQuickButtonsContainer">
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="control-group">
+        <h3>
+          <span>包含统计类别 (Series)</span>
+        </h3>
+        <div class="checkbox-list">
+          <label class="checkbox-item">
+            <input type="checkbox" id="chkDsTrain" checked>
+            <span class="color-dot" style="background: #2563eb;"></span>
+            <span>训练集良品样本量 (Train N)</span>
+          </label>
+          <label class="checkbox-item">
+            <input type="checkbox" id="chkDsTestNormal" checked>
+            <span class="color-dot" style="background: #10b981;"></span>
+            <span>测试集良品数量 (Test OK)</span>
+          </label>
+          <label class="checkbox-item">
+            <input type="checkbox" id="chkDsTestDefect" checked>
+            <span class="color-dot" style="background: #f43f5e;"></span>
+            <span>测试集缺陷数量 (Test NG)</span>
+          </label>
+          <label class="checkbox-item">
+            <input type="checkbox" id="chkDsTestTotal" checked>
+            <span class="color-dot" style="background: #64748b;"></span>
+            <span>测试集总样本量 (Test Total)</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="control-group">
+        <h3><span>说明与规范</span></h3>
+        <div style="font-size: 0.77rem; color: #64748b; line-height: 1.45;">
+          • <strong>训练集</strong>: 单分类异常检测仅采集纯良品图像。<br>
+          • <strong>测试集</strong>: 包含未知良品与真实缺陷图像。<br>
+          • <strong>同屏对比</strong>: 支持多个数据集在此图表中横向并列对比。
+        </div>
+      </div>
+    </div>
   </aside>
 
   <!-- Chart Container -->
   <main class="chart-container">
+    <!-- 1. Benchmark Chart Area -->
+    <div id="benchmarkChartArea" style="display: flex; flex-direction: column; width: 100%; height: 100%; min-height: 0;">
+
     <div class="chart-header">
       <div class="title-area">
         <div class="chart-title" id="chartTitle">指标加载中...</div>
@@ -715,15 +879,80 @@ def build_interactive_html(
 
         <!-- Dynamic Header Legends inside SVG -->
         <g id="legend-group"></g>
+
+        <!-- Mouse Guideline (Horizontal Crosshair Dashed Line & Y-Value Badge) -->
+        <g id="cursor-group" pointer-events="none" style="display: none;">
+          <line id="cursorHLine" x1="0" y1="0" x2="0" y2="0" stroke="#334155" stroke-width="1.3" stroke-dasharray="5 4" style="filter: drop-shadow(0 0 1.5px rgba(255,255,255,0.95));" />
+          <g id="cursorBadge">
+            <rect id="cursorBadgeRect" x="0" y="0" width="56" height="20" rx="3" fill="#0f172a" stroke="#3b82f6" stroke-width="1" />
+            <text id="cursorBadgeText" x="0" y="0" fill="#f8fafc" font-size="10.5" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif" font-weight="600" text-anchor="middle" dominant-baseline="central"></text>
+          </g>
+        </g>
       </svg>
 
       <!-- Tooltip -->
-      <div id="tooltip"></div>
+      
     </div>
 
     <div class="detail-panel" id="detailPanel">
-      <span>💡 <strong>交互指引:</strong> 顶部下拉列表可自由切换各项评测指标与观察维度。柱状图上方直观标示精确数值，鼠标悬停可查看完整多指标详情，支持滚轮缩放与鼠标拖拽平移。</span>
+      <span>💡 <strong>交互指引:</strong> 顶部下拉列表可自由切换各项评测指标与观察维度。鼠标移动处提供<strong>水平辅助虚线与实时数值标尺</strong>，柱状图上方直观标示精确数值，悬停查看完整指标卡片，支持滚轮缩放与拖拽平移。</span>
     </div>
+  
+    </div>
+
+    <!-- 2. Dataset Splits Distribution Chart Area -->
+    <div id="datasetChartArea" style="display: none; flex-direction: column; width: 100%; height: 100%; min-height: 0;">
+      <div class="chart-header">
+        <div class="title-area">
+          <div class="chart-title" id="dsChartTitle">📦 数据集样本量分布看板 (训练集良品规模 vs 测试集良品/缺陷数量)</div>
+          <div class="chart-stats" id="dsChartStats">展示选中数据集的样本规模对比</div>
+        </div>
+        <div class="chart-actions">
+          <button class="btn" id="btnDsResetView" title="重置初始视图">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+            重置
+          </button>
+        </div>
+      </div>
+
+      <div class="chart-body" id="dsChartBody">
+        <svg id="dataset-chart" viewBox="0 0 1300 660" preserveAspectRatio="xMidYMid meet">
+          <defs>
+            <clipPath id="ds-chart-clip">
+              <rect id="dsClipRect" x="85" y="65" width="1165" height="530" />
+            </clipPath>
+          </defs>
+
+          <!-- Grid & Axes -->
+          <g id="ds-grid-group"></g>
+          <g id="ds-axes-group"></g>
+
+          <!-- Data Bars -->
+          <g id="ds-data-group" clip-path="url(#ds-chart-clip)">
+            <g id="ds-bars-group"></g>
+          </g>
+
+          <!-- Legends -->
+          <g id="ds-legend-group"></g>
+
+          <!-- Mouse Guideline -->
+          <g id="ds-cursor-group" pointer-events="none" style="display: none;">
+            <line id="dsCursorHLine" x1="0" y1="0" x2="0" y2="0" stroke="#334155" stroke-width="1.3" stroke-dasharray="5 4" style="filter: drop-shadow(0 0 1.5px rgba(255,255,255,0.95));" />
+            <g id="dsCursorBadge">
+              <rect id="dsCursorBadgeRect" x="0" y="0" width="60" height="20" rx="3" fill="#0f172a" stroke="#3b82f6" stroke-width="1" />
+              <text id="dsCursorBadgeText" x="0" y="0" fill="#f8fafc" font-size="10.5" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif" font-weight="600" text-anchor="middle" dominant-baseline="central"></text>
+            </g>
+          </g>
+        </svg>
+      </div>
+
+      <div class="detail-panel" id="dsDetailPanel">
+        <span>💡 <strong>样本量统计指引:</strong> 左侧可自由勾选需要对比的数据集（默认已将同批次数据集全部加入对比），点击「仅看两个台达散热片数据集」可在同一图表中横向并列对比。鼠标悬停柱子查看详细数量与占比，光标提供水平辅助虚线与实时数量标尺。</span>
+      </div>
+    </div>
+
+    <!-- Global Shared Tooltip -->
+    <div id="tooltip"></div>
   </main>
 </div>
 
@@ -732,6 +961,9 @@ def build_interactive_html(
 const DATASET_NAME = "{dataset_name}";
 const DATASET_DATA = {json_data};
 const HAS_BANK = {has_bank_js};
+const ALL_DATASETS_STATS = {all_datasets_json};
+let currentActiveTab = "benchmark";
+let currentDsYMax = 1000;
 
 // Color scheme
 const COLOR_E2E = "#059669";
@@ -980,6 +1212,656 @@ function initMetricSelector() {{
   sel.value = currentMetric;
 }}
 
+function initTabs() {{
+  const btnB = document.getElementById("tabBtnBenchmark");
+  const btnD = document.getElementById("tabBtnDataset");
+  const bSel = document.getElementById("benchmarkSelectors");
+  const dSel = document.getElementById("datasetSelectors");
+  const bCtl = document.getElementById("benchmarkControls");
+  const dCtl = document.getElementById("datasetControls");
+  const bArea = document.getElementById("benchmarkChartArea");
+  const dArea = document.getElementById("datasetChartArea");
+
+  btnB.addEventListener("click", () => {{
+    currentActiveTab = "benchmark";
+    btnB.classList.add("active");
+    btnD.classList.remove("active");
+    bSel.style.display = "flex";
+    dSel.style.display = "none";
+    bCtl.style.display = "flex";
+    dCtl.style.display = "none";
+    bArea.style.display = "flex";
+    dArea.style.display = "none";
+    hideTooltip();
+    hideCursorGuideline();
+    hideDsCursorGuideline();
+    render();
+  }});
+
+  btnD.addEventListener("click", () => {{
+    currentActiveTab = "dataset";
+    btnD.classList.add("active");
+    btnB.classList.remove("active");
+    dSel.style.display = "flex";
+    bSel.style.display = "none";
+    dCtl.style.display = "flex";
+    bCtl.style.display = "none";
+    dArea.style.display = "flex";
+    bArea.style.display = "none";
+    hideTooltip();
+    hideCursorGuideline();
+    hideDsCursorGuideline();
+    renderDatasetChart();
+  }});
+}}
+
+function initDatasetControls() {{
+  const container = document.getElementById("dsListContainer");
+  const quickContainer = document.getElementById("dsQuickButtonsContainer");
+  if (!container || !ALL_DATASETS_STATS) return;
+
+  container.innerHTML = "";
+  const dsNames = Object.keys(ALL_DATASETS_STATS);
+
+  dsNames.forEach(name => {{
+    const ds = ALL_DATASETS_STATS[name];
+    const label = document.createElement("label");
+    label.className = "checkbox-item";
+    label.innerHTML = `
+      <input type="checkbox" checked data-ds-name="${{name}}">
+      <span class="color-dot" style="background: ${{ds.is_current ? '#2563eb' : '#64748b'}};"></span>
+      <span>${{name}} ${{ds.is_current ? '<strong>(当前)</strong>' : ''}}</span>
+    `;
+    label.querySelector("input").addEventListener("change", renderDatasetChart);
+    container.appendChild(label);
+  }});
+
+  quickContainer.innerHTML = "";
+
+  const hasDeltaBoth = dsNames.includes("台达散热片栅格") && dsNames.includes("台达散热片正反面");
+  if (hasDeltaBoth) {{
+    const btnDelta = document.createElement("button");
+    btnDelta.className = "preset-btn preset-btn-accent";
+    btnDelta.innerHTML = "⚡ 仅看两个台达散热片数据集 (栅格 + 正反面)";
+    btnDelta.addEventListener("click", () => {{
+      document.querySelectorAll("[data-ds-name]").forEach(cb => {{
+        const n = cb.getAttribute("data-ds-name");
+        cb.checked = (n === "台达散热片栅格" || n === "台达散热片正反面");
+      }});
+      renderDatasetChart();
+    }});
+    quickContainer.appendChild(btnDelta);
+  }}
+
+  const btnOnlyCur = document.createElement("button");
+  btnOnlyCur.className = "preset-btn";
+  btnOnlyCur.innerHTML = `🎯 仅看当前数据集 (${{DATASET_NAME}})`;
+  btnOnlyCur.addEventListener("click", () => {{
+    document.querySelectorAll("[data-ds-name]").forEach(cb => {{
+      cb.checked = (cb.getAttribute("data-ds-name") === DATASET_NAME);
+    }});
+    renderDatasetChart();
+  }});
+  quickContainer.appendChild(btnOnlyCur);
+
+  document.getElementById("btnSelectAllDs").addEventListener("click", () => {{
+    document.querySelectorAll("[data-ds-name]").forEach(cb => cb.checked = true);
+    renderDatasetChart();
+  }});
+  document.getElementById("btnUnselectAllDs").addEventListener("click", () => {{
+    document.querySelectorAll("[data-ds-name]").forEach(cb => cb.checked = false);
+    renderDatasetChart();
+  }});
+
+  ["chkDsTrain", "chkDsTestNormal", "chkDsTestDefect", "chkDsTestTotal"].forEach(id => {{
+    document.getElementById(id).addEventListener("change", renderDatasetChart);
+  }});
+  document.getElementById("dsViewMode").addEventListener("change", renderDatasetChart);
+
+  const dsChartBody = document.getElementById("dsChartBody");
+  dsChartBody.addEventListener("mousemove", (e) => updateDsCursorGuideline(e));
+  dsChartBody.addEventListener("mouseleave", () => hideDsCursorGuideline());
+  document.getElementById("btnDsResetView").addEventListener("click", renderDatasetChart);
+}}
+
+function renderDatasetChart() {{
+  const barsGroup = document.getElementById("ds-bars-group");
+  const gridGroup = document.getElementById("ds-grid-group");
+  const axesGroup = document.getElementById("ds-axes-group");
+  const legendGroup = document.getElementById("ds-legend-group");
+  if (!barsGroup || !gridGroup || !axesGroup || !legendGroup) return;
+
+  barsGroup.innerHTML = "";
+  gridGroup.innerHTML = "";
+  axesGroup.innerHTML = "";
+  legendGroup.innerHTML = "";
+
+  const selectedDsNames = [];
+  document.querySelectorAll("[data-ds-name]").forEach(cb => {{
+    if (cb.checked) selectedDsNames.push(cb.getAttribute("data-ds-name"));
+  }});
+
+  const titleEl = document.getElementById("dsChartTitle");
+  const statsEl = document.getElementById("dsChartStats");
+
+  if (selectedDsNames.length === 0) {{
+    if (titleEl) titleEl.textContent = "请在左侧勾选至少一个数据集";
+    if (statsEl) statsEl.textContent = "当前未选择数据集";
+    return;
+  }}
+
+  const viewMode = document.getElementById("dsViewMode").value;
+  const incTrain = document.getElementById("chkDsTrain").checked;
+  const incNormal = document.getElementById("chkDsTestNormal").checked;
+  const incDefect = document.getElementById("chkDsTestDefect").checked;
+  const incTotal = document.getElementById("chkDsTestTotal").checked;
+
+  const datasetItems = [];
+  let globalMaxCount = 0;
+
+  selectedDsNames.forEach(name => {{
+    const ds = ALL_DATASETS_STATS[name];
+    if (!ds) return;
+
+    const series = [];
+    if (viewMode === "detailed") {{
+      if (incTrain && ds.train_ns) {{
+        ds.train_ns.forEach(n => {{
+          const c = n === 100 ? "#93c5fd" : (n === 200 ? "#3b82f6" : "#1d4ed8");
+          series.push({{
+            type: "train",
+            category: `训练集良品 (N=${{n}})`,
+            shortLabel: `训练 N=${{n}}`,
+            val: n,
+            color: c,
+            dsName: name
+          }});
+        }});
+      }}
+      if (incNormal) {{
+        series.push({{
+          type: "test_normal",
+          category: "测试集良品 (OK)",
+          shortLabel: "测试良品",
+          val: ds.test_normal,
+          color: "#10b981",
+          dsName: name
+        }});
+      }}
+      if (incDefect) {{
+        series.push({{
+          type: "test_defect",
+          category: "测试集缺陷 (NG)",
+          shortLabel: "测试缺陷",
+          val: ds.test_defect,
+          color: "#f43f5e",
+          dsName: name
+        }});
+      }}
+      if (incTotal) {{
+        series.push({{
+          type: "test_total",
+          category: "测试集总样本量 (Total)",
+          shortLabel: "测试总量",
+          val: ds.test_total,
+          color: "#64748b",
+          dsName: name
+        }});
+      }}
+    }} else if (viewMode === "totals") {{
+      const maxN = ds.train_ns && ds.train_ns.length > 0 ? Math.max(...ds.train_ns) : 400;
+      series.push({{
+        type: "train_max",
+        category: `训练集最大样本量 (N=${{maxN}})`,
+        shortLabel: `训练 (N=${{maxN}})`,
+        val: maxN,
+        color: "#2563eb",
+        dsName: name
+      }});
+      series.push({{
+        type: "test_total",
+        category: "测试集总样本量",
+        shortLabel: "测试总量",
+        val: ds.test_total,
+        color: "#7c3aed",
+        dsName: name
+      }});
+    }} else if (viewMode === "stacked") {{
+      series.push({{
+        type: "stacked",
+        category: "测试集良品/缺陷构成",
+        shortLabel: "测试集构成",
+        normalVal: ds.test_normal,
+        defectVal: ds.test_defect,
+        totalVal: ds.test_total,
+        normalPct: (ds.test_normal / ds.test_total) * 100,
+        defectPct: (ds.test_defect / ds.test_total) * 100,
+        dsName: name
+      }});
+    }}
+
+    series.forEach(s => {{
+      if (s.val !== undefined && s.val > globalMaxCount) globalMaxCount = s.val;
+      if (s.totalVal !== undefined && s.totalVal > globalMaxCount) globalMaxCount = s.totalVal;
+    }});
+
+    datasetItems.push({{
+      name: name,
+      meta: ds,
+      series: series
+    }});
+  }});
+
+  const isStacked = (viewMode === "stacked");
+  const yMax = isStacked ? 100 : (globalMaxCount > 0 ? Math.ceil(globalMaxCount * 1.18) : 1000);
+  currentDsYMax = yMax;
+  const yMin = 0;
+  const valSpan = yMax - yMin;
+
+  function dsValToY(val) {{
+    if (valSpan <= 0) return MARGIN.top + PLOT_HEIGHT;
+    const ratio = Math.max(0, Math.min(1, (val - yMin) / valSpan));
+    return MARGIN.top + (1.0 - ratio) * PLOT_HEIGHT;
+  }}
+
+  if (titleEl) {{
+    titleEl.textContent = isStacked 
+      ? "📦 数据集样本量分布看板 (测试集良品 vs 缺陷 100% 堆叠占比)" 
+      : "📦 数据集样本量分布看板 (训练集良品规模 vs 测试集样本量)";
+  }}
+  if (statsEl) {{
+    statsEl.textContent = `展示 ${{selectedDsNames.length}} 个数据集样本规模对比 | Y 轴区间: 0 ~ ${{yMax.toLocaleString()}} ${{isStacked ? "%" : "张"}}`;
+  }}
+
+  // 1. Grid & Y Axis
+  const tickCount = 6;
+  const step = yMax / tickCount;
+  for (let i = 0; i <= tickCount; i++) {{
+    const yVal = Math.round(i * step);
+    const py = dsValToY(yVal);
+    if (py < MARGIN.top - 2 || py > MARGIN.top + PLOT_HEIGHT + 2) continue;
+
+    const gridLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    gridLine.setAttribute("x1", MARGIN.left);
+    gridLine.setAttribute("y1", py);
+    gridLine.setAttribute("x2", MARGIN.left + PLOT_WIDTH);
+    gridLine.setAttribute("y2", py);
+    gridLine.setAttribute("class", "grid-line");
+    gridGroup.appendChild(gridLine);
+
+    const tick = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    tick.setAttribute("x1", MARGIN.left - 5);
+    tick.setAttribute("y1", py);
+    tick.setAttribute("x2", MARGIN.left);
+    tick.setAttribute("y2", py);
+    tick.setAttribute("class", "axis-tick");
+    axesGroup.appendChild(tick);
+
+    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    text.setAttribute("x", MARGIN.left - 10);
+    text.setAttribute("y", py + 4);
+    text.setAttribute("text-anchor", "end");
+    text.setAttribute("class", "axis-text");
+    text.textContent = yVal.toLocaleString() + (isStacked ? "%" : "");
+    axesGroup.appendChild(text);
+  }}
+
+  const ySpine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+  ySpine.setAttribute("x1", MARGIN.left);
+  ySpine.setAttribute("y1", MARGIN.top);
+  ySpine.setAttribute("x2", MARGIN.left);
+  ySpine.setAttribute("y2", MARGIN.top + PLOT_HEIGHT);
+  ySpine.setAttribute("class", "axis-line");
+  axesGroup.appendChild(ySpine);
+
+  const yTitle = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  yTitle.setAttribute("transform", "rotate(-90)");
+  yTitle.setAttribute("x", -(MARGIN.top + PLOT_HEIGHT / 2));
+  yTitle.setAttribute("y", MARGIN.left - 54);
+  yTitle.setAttribute("text-anchor", "middle");
+  yTitle.setAttribute("class", "axis-title");
+  yTitle.textContent = isStacked ? "测试集样本构成占比 (%)" : "样本图像数量 (张)";
+  axesGroup.appendChild(yTitle);
+
+  const xSpine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+  xSpine.setAttribute("x1", MARGIN.left);
+  xSpine.setAttribute("y1", MARGIN.top + PLOT_HEIGHT);
+  xSpine.setAttribute("x2", MARGIN.left + PLOT_WIDTH);
+  xSpine.setAttribute("y2", MARGIN.top + PLOT_HEIGHT);
+  xSpine.setAttribute("class", "axis-line");
+  axesGroup.appendChild(xSpine);
+
+  // 2. Draw Dataset Slots along X Axis
+  const numSlots = datasetItems.length;
+  const slotW = PLOT_WIDTH / numSlots;
+
+  datasetItems.forEach((dsItem, slotIdx) => {{
+    const slotLeft = MARGIN.left + slotIdx * slotW;
+    const slotCenterX = slotLeft + slotW / 2;
+
+    if (slotIdx > 0) {{
+      const divLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      divLine.setAttribute("x1", slotLeft);
+      divLine.setAttribute("y1", MARGIN.top);
+      divLine.setAttribute("x2", slotLeft);
+      divLine.setAttribute("y2", MARGIN.top + PLOT_HEIGHT);
+      divLine.setAttribute("stroke", "#cbd5e1");
+      divLine.setAttribute("stroke-width", "1.2");
+      divLine.setAttribute("stroke-dasharray", "4 3");
+      axesGroup.appendChild(divLine);
+    }}
+
+    const dsNameText = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    dsNameText.setAttribute("x", slotCenterX);
+    dsNameText.setAttribute("y", MARGIN.top + PLOT_HEIGHT + 22);
+    dsNameText.setAttribute("text-anchor", "middle");
+    dsNameText.setAttribute("font-size", "13");
+    dsNameText.setAttribute("font-weight", "700");
+    dsNameText.setAttribute("fill", dsItem.meta.is_current ? "#1d4ed8" : "#0f172a");
+    dsNameText.textContent = dsItem.name + (dsItem.meta.is_current ? " (当前看板)" : "");
+    axesGroup.appendChild(dsNameText);
+
+    const dsSubText = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    dsSubText.setAttribute("x", slotCenterX);
+    dsSubText.setAttribute("y", MARGIN.top + PLOT_HEIGHT + 39);
+    dsSubText.setAttribute("text-anchor", "middle");
+    dsSubText.setAttribute("font-size", "10.5");
+    dsSubText.setAttribute("fill", "#64748b");
+    const okPct = (dsItem.meta.test_normal / dsItem.meta.test_total * 100).toFixed(1);
+    const ngPct = (dsItem.meta.test_defect / dsItem.meta.test_total * 100).toFixed(1);
+    dsSubText.textContent = `测试集总量 ${{dsItem.meta.test_total.toLocaleString()}} 张 (${{okPct}}% 良品 / ${{ngPct}}% 缺陷)`;
+    axesGroup.appendChild(dsSubText);
+
+    const seriesList = dsItem.series;
+    if (seriesList.length === 0) return;
+
+    if (isStacked) {{
+      const barW = Math.min(130, slotW * 0.46);
+      const bx = slotCenterX - barW / 2;
+      const s = seriesList[0];
+      const normH = (s.normalPct / 100) * PLOT_HEIGHT;
+      const defH = (s.defectPct / 100) * PLOT_HEIGHT;
+      const normY = MARGIN.top + PLOT_HEIGHT - normH;
+      const defY = normY - defH;
+
+      const rNorm = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rNorm.setAttribute("x", bx);
+      rNorm.setAttribute("y", normY);
+      rNorm.setAttribute("width", barW);
+      rNorm.setAttribute("height", normH);
+      rNorm.setAttribute("fill", "#10b981");
+      rNorm.setAttribute("rx", "2");
+      rNorm.setAttribute("class", "bar-base");
+      rNorm.addEventListener("mouseenter", (e) => showDsTooltip(e, dsItem, "测试集良品", s.normalVal, s.normalPct));
+      rNorm.addEventListener("mousemove", (e) => {{ updateTooltipPos(e); updateDsCursorGuideline(e); }});
+      rNorm.addEventListener("mouseleave", hideTooltip);
+      barsGroup.appendChild(rNorm);
+
+      const rDef = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rDef.setAttribute("x", bx);
+      rDef.setAttribute("y", defY);
+      rDef.setAttribute("width", barW);
+      rDef.setAttribute("height", defH);
+      rDef.setAttribute("fill", "#f43f5e");
+      rDef.setAttribute("rx", "2");
+      rDef.setAttribute("class", "bar-base");
+      rDef.addEventListener("mouseenter", (e) => showDsTooltip(e, dsItem, "测试集缺陷", s.defectVal, s.defectPct));
+      rDef.addEventListener("mousemove", (e) => {{ updateTooltipPos(e); updateDsCursorGuideline(e); }});
+      rDef.addEventListener("mouseleave", hideTooltip);
+      barsGroup.appendChild(rDef);
+
+      if (normH > 22) {{
+        const tNorm = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        tNorm.setAttribute("x", slotCenterX);
+        tNorm.setAttribute("y", normY + normH / 2 + 4);
+        tNorm.setAttribute("text-anchor", "middle");
+        tNorm.setAttribute("fill", "#ffffff");
+        tNorm.setAttribute("font-size", "11");
+        tNorm.setAttribute("font-weight", "700");
+        tNorm.textContent = `${{s.normalVal.toLocaleString()}} 张 (${{s.normalPct.toFixed(1)}}%)`;
+        barsGroup.appendChild(tNorm);
+      }}
+      if (defH > 22) {{
+        const tDef = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        tDef.setAttribute("x", slotCenterX);
+        tDef.setAttribute("y", defY + defH / 2 + 4);
+        tDef.setAttribute("text-anchor", "middle");
+        tDef.setAttribute("fill", "#ffffff");
+        tDef.setAttribute("font-size", "11");
+        tDef.setAttribute("font-weight", "700");
+        tDef.textContent = `${{s.defectVal.toLocaleString()}} 张 (${{s.defectPct.toFixed(1)}}%)`;
+        barsGroup.appendChild(tDef);
+      }}
+    }} else {{
+      const numBars = seriesList.length;
+      const usableW = slotW * 0.82;
+      const barW = Math.max(16, Math.min(65, (usableW / numBars) - 6));
+      const totalBarsW = numBars * barW + (numBars - 1) * 6;
+      const startX = slotCenterX - totalBarsW / 2;
+
+      seriesList.forEach((s, barIdx) => {{
+        const bx = startX + barIdx * (barW + 6);
+        const bHeight = Math.max(2, (s.val / yMax) * PLOT_HEIGHT);
+        const by = MARGIN.top + PLOT_HEIGHT - bHeight;
+
+        const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+        rect.setAttribute("x", bx);
+        rect.setAttribute("y", by);
+        rect.setAttribute("width", barW);
+        rect.setAttribute("height", bHeight);
+        rect.setAttribute("fill", s.color);
+        rect.setAttribute("rx", "3");
+        rect.setAttribute("ry", "3");
+        rect.setAttribute("class", "bar-base");
+
+        rect.addEventListener("mouseenter", (e) => showDsTooltip(e, dsItem, s.category, s.val, null));
+        rect.addEventListener("mousemove", (e) => {{ updateTooltipPos(e); updateDsCursorGuideline(e); }});
+        rect.addEventListener("mouseleave", hideTooltip);
+        rect.addEventListener("click", () => showDsDetailCard(dsItem, s));
+
+        barsGroup.appendChild(rect);
+
+        const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        text.setAttribute("x", bx + barW / 2);
+        text.setAttribute("y", Math.max(MARGIN.top + 12, by - 6));
+        text.setAttribute("text-anchor", "middle");
+        text.setAttribute("font-size", barW < 26 ? "9.5" : "11");
+        text.setAttribute("font-weight", "700");
+        text.setAttribute("fill", s.color);
+        text.textContent = s.val.toLocaleString();
+        barsGroup.appendChild(text);
+
+        if (barW >= 22) {{
+          const sub = document.createElementNS("http://www.w3.org/2000/svg", "text");
+          sub.setAttribute("x", bx + barW / 2);
+          sub.setAttribute("y", MARGIN.top + PLOT_HEIGHT + 10);
+          sub.setAttribute("text-anchor", "middle");
+          sub.setAttribute("font-size", "8.5");
+          sub.setAttribute("fill", "#64748b");
+          sub.textContent = s.shortLabel.replace("训练 N=", "N=").replace("测试良品", "良品").replace("测试缺陷", "缺陷").replace("测试总量", "总数");
+          barsGroup.appendChild(sub);
+        }}
+      }});
+    }}
+  }});
+
+  renderDsLegends(legendGroup, viewMode, incTrain, incNormal, incDefect, incTotal);
+  updateDsCursorGuideline();
+}}
+
+function renderDsLegends(group, viewMode, incTrain, incNormal, incDefect, incTotal) {{
+  group.innerHTML = "";
+  const legendItems = [];
+
+  if (viewMode === "stacked") {{
+    legendItems.push({{ label: "测试集良品 (OK)", color: "#10b981" }});
+    legendItems.push({{ label: "测试集缺陷 (NG)", color: "#f43f5e" }});
+  }} else if (viewMode === "totals") {{
+    legendItems.push({{ label: "训练集最大样本量 (Train Max N)", color: "#2563eb" }});
+    legendItems.push({{ label: "测试集总样本量 (Test Total)", color: "#7c3aed" }});
+  }} else {{
+    if (incTrain) {{
+      legendItems.push({{ label: "训练良品 (N=100/200/400)", color: "#2563eb" }});
+    }}
+    if (incNormal) {{
+      legendItems.push({{ label: "测试集良品 (OK)", color: "#10b981" }});
+    }}
+    if (incDefect) {{
+      legendItems.push({{ label: "测试集缺陷 (NG)", color: "#f43f5e" }});
+    }}
+    if (incTotal) {{
+      legendItems.push({{ label: "测试集总数 (Total)", color: "#64748b" }});
+    }}
+  }}
+
+  let curX = MARGIN.left;
+  legendItems.forEach(item => {{
+    const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    rect.setAttribute("x", curX);
+    rect.setAttribute("y", MARGIN.top - 26);
+    rect.setAttribute("width", 14);
+    rect.setAttribute("height", 14);
+    rect.setAttribute("rx", "3");
+    rect.setAttribute("fill", item.color);
+    g.appendChild(rect);
+
+    const txt = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    txt.setAttribute("x", curX + 18);
+    txt.setAttribute("y", MARGIN.top - 15);
+    txt.setAttribute("font-size", "11.5");
+    txt.setAttribute("font-weight", "600");
+    txt.setAttribute("fill", "#334155");
+    txt.textContent = item.label;
+    g.appendChild(txt);
+
+    curX += item.label.length * 11 + 38;
+    group.appendChild(g);
+  }});
+}}
+
+function showDsTooltip(e, dsItem, categoryName, countVal, pctVal) {{
+  const ds = dsItem.meta;
+  const okPct = (ds.test_normal / ds.test_total * 100).toFixed(1);
+  const ngPct = (ds.test_defect / ds.test_total * 100).toFixed(1);
+
+  tooltip.innerHTML = `
+    <div class="tt-title">
+      <span style="display:inline-block; width: 10px; height: 10px; border-radius: 50%; background: #2563eb;"></span>
+      <span>${{dsItem.name}} 样本规模画像</span>
+    </div>
+    <div class="tt-row tt-active-row">
+      <span style="font-weight:700; color:#e0f2fe;">当前悬停项:</span>
+      <span class="tt-val tt-highlight">${{categoryName}}: ${{countVal.toLocaleString()}} 张 ${{pctVal !== null ? `(${{pctVal.toFixed(1)}}%)` : ''}}</span>
+    </div>
+    <div class="divider" style="margin: 6px 0; opacity: 0.3;"></div>
+    <div class="tt-row"><span style="color:#93c5fd; font-weight:700;">【训练集样本量 (Train Normal)】</span></div>
+    <div class="tt-row"><span>训练正常样本梯度:</span> <span class="tt-val" style="color:#60a5fa; font-weight:700;">N = [${{ds.train_ns.join(", ")}}]</span></div>
+    <div class="divider" style="margin: 6px 0; opacity: 0.3;"></div>
+    <div class="tt-row"><span style="color:#93c5fd; font-weight:700;">【测试集样本量 (Test Full)】</span></div>
+    <div class="tt-row"><span>测试集良品 (OK):</span> <span class="tt-val" style="color:#4ade80; font-weight:600;">${{ds.test_normal.toLocaleString()}} 张 (${{okPct}}%)</span></div>
+    <div class="tt-row"><span>测试集缺陷 (NG):</span> <span class="tt-val" style="color:#f43f5e; font-weight:700;">${{ds.test_defect.toLocaleString()}} 张 (${{ngPct}}%)</span></div>
+    <div class="tt-row"><span>测试集全量总数:</span> <span class="tt-val" style="color:#ffffff; font-weight:700;">${{ds.test_total.toLocaleString()}} 张</span></div>
+  `;
+  tooltip.style.display = "block";
+  updateTooltipPos(e);
+}}
+
+function showDsDetailCard(dsItem, s) {{
+  const ds = dsItem.meta;
+  const panel = document.getElementById("dsDetailPanel");
+  if (!panel) return;
+  const okPct = (ds.test_normal / ds.test_total * 100).toFixed(1);
+  const ngPct = (ds.test_defect / ds.test_total * 100).toFixed(1);
+  panel.innerHTML = `
+    <span><strong>选中数据集:</strong> <span style="color: #2563eb; font-weight: 700;">${{dsItem.name}}</span> | <strong>${{s.category}}:</strong> <span style="color: ${{s.color}}; font-weight: 700;">${{s.val.toLocaleString()}} 张</span> | <strong>训练集梯度:</strong> N=[${{ds.train_ns.join(", ")}}] | <strong>测试集全量:</strong> ${{ds.test_total.toLocaleString()}} 张 (良品: ${{ds.test_normal.toLocaleString()}} / ${{okPct}}% , 缺陷: ${{ds.test_defect.toLocaleString()}} / ${{ngPct}}%)</span>
+  `;
+}}
+
+let lastDsMousePos = null;
+
+function getDsSvgCoords(e) {{
+  const svg = document.getElementById("dataset-chart");
+  if (!svg) return null;
+  if (svg.createSVGPoint && svg.getScreenCTM) {{
+    const pt = svg.createSVGPoint();
+    pt.x = e.clientX;
+    pt.y = e.clientY;
+    const ctm = svg.getScreenCTM();
+    if (ctm) {{
+      const p = pt.matrixTransform(ctm.inverse());
+      return {{ x: p.x, y: p.y }};
+    }}
+  }}
+  const rect = svg.getBoundingClientRect();
+  return {{
+    x: ((e.clientX - rect.left) / rect.width) * SVG_WIDTH,
+    y: ((e.clientY - rect.top) / rect.height) * SVG_HEIGHT
+  }};
+}}
+
+function updateDsCursorGuideline(e) {{
+  if (currentActiveTab !== "dataset") return;
+  if (e && e.clientX !== undefined) {{
+    lastDsMousePos = {{ clientX: e.clientX, clientY: e.clientY }};
+  }}
+  if (!lastDsMousePos) {{
+    hideDsCursorGuideline();
+    return;
+  }}
+
+  const cursorGroup = document.getElementById("ds-cursor-group");
+  const cursorHLine = document.getElementById("dsCursorHLine");
+  const cursorBadge = document.getElementById("dsCursorBadge");
+  const cursorBadgeRect = document.getElementById("dsCursorBadgeRect");
+  const cursorBadgeText = document.getElementById("dsCursorBadgeText");
+  if (!cursorGroup || !cursorHLine) return;
+
+  const p = getDsSvgCoords(lastDsMousePos);
+  if (!p) return;
+
+  const inPlotY = p.y >= MARGIN.top && p.y <= MARGIN.top + PLOT_HEIGHT;
+  const inPlotX = p.x >= MARGIN.left - 45 && p.x <= MARGIN.left + PLOT_WIDTH + 30;
+
+  if (inPlotY && inPlotX) {{
+    cursorGroup.style.display = "block";
+    cursorHLine.setAttribute("x1", MARGIN.left - 4);
+    cursorHLine.setAttribute("y1", p.y);
+    cursorHLine.setAttribute("x2", MARGIN.left + PLOT_WIDTH);
+    cursorHLine.setAttribute("y2", p.y);
+
+    const viewMode = document.getElementById("dsViewMode").value;
+    const isStacked = (viewMode === "stacked");
+    const ratio = 1.0 - (p.y - MARGIN.top) / PLOT_HEIGHT;
+    const curVal = ratio * currentDsYMax;
+    const valStr = Math.round(curVal).toLocaleString() + (isStacked ? "%" : " 张");
+
+    if (cursorBadge && cursorBadgeText && cursorBadgeRect) {{
+      cursorBadge.style.display = "block";
+      cursorBadgeText.textContent = valStr;
+
+      const badgeW = Math.max(56, valStr.length * 7.5 + 14);
+      const badgeH = 19;
+      const badgeX = Math.max(2, MARGIN.left - badgeW - 5);
+
+      cursorBadgeRect.setAttribute("width", badgeW);
+      cursorBadgeRect.setAttribute("height", badgeH);
+      cursorBadgeRect.setAttribute("x", badgeX);
+      cursorBadgeRect.setAttribute("y", p.y - badgeH / 2);
+
+      cursorBadgeText.setAttribute("x", badgeX + badgeW / 2);
+      cursorBadgeText.setAttribute("y", p.y + 0.5);
+    }}
+  }} else {{
+    cursorGroup.style.display = "none";
+  }}
+}}
+
+function hideDsCursorGuideline() {{
+  const cursorGroup = document.getElementById("ds-cursor-group");
+  if (cursorGroup) cursorGroup.style.display = "none";
+}}
+
 function initDataset() {{
   datasetUniqueNs = Array.from(new Set(DATASET_DATA.map(r => parseInt(r.n)))).sort((a, b) => a - b);
   datasetUniqueSizes = Array.from(new Set(DATASET_DATA.map(r => parseInt(r.size)))).sort((a, b) => a - b);
@@ -1023,6 +1905,8 @@ function initDataset() {{
   updateXAxisSelectorOptions();
   updateYBounds();
   resetView();
+  initTabs();
+  initDatasetControls();
 }}
 
 function updateYBounds() {{
@@ -1354,6 +2238,7 @@ function render() {{
 
   renderAxesAndGrid();
   renderBarChart(selectedModels, selectedSizes, selectedNs, selectedIters);
+  updateCursorGuideline();
 }}
 
 function renderBarChart(selectedModels, selectedSizes, selectedNs, selectedIters) {{
@@ -1515,8 +2400,8 @@ function renderBarChart(selectedModels, selectedSizes, selectedNs, selectedIters
       rect.setAttribute("ry", "3");
       rect.setAttribute("class", "bar-base bar-rect");
 
-      rect.addEventListener("mouseenter", (e) => showTooltip(e, item));
-      rect.addEventListener("mousemove", (e) => updateTooltipPos(e));
+      rect.addEventListener("mouseenter", (e) => {{ showTooltip(e, item); updateCursorGuideline(e); }});
+      rect.addEventListener("mousemove", (e) => {{ updateTooltipPos(e); updateCursorGuideline(e); }});
       rect.addEventListener("mouseleave", hideTooltip);
       rect.addEventListener("click", () => showDetailCard(item));
 
@@ -1919,6 +2804,93 @@ function hideTooltip() {{
   tooltip.style.display = "none";
 }}
 
+let lastMousePos = null;
+
+function getSvgCoords(e) {{
+  const svg = document.getElementById("main-chart");
+  if (!svg) return null;
+  if (svg.createSVGPoint && svg.getScreenCTM) {{
+    const pt = svg.createSVGPoint();
+    pt.x = e.clientX;
+    pt.y = e.clientY;
+    const ctm = svg.getScreenCTM();
+    if (ctm) {{
+      const p = pt.matrixTransform(ctm.inverse());
+      return {{ x: p.x, y: p.y }};
+    }}
+  }}
+  const rect = svg.getBoundingClientRect();
+  return {{
+    x: ((e.clientX - rect.left) / rect.width) * SVG_WIDTH,
+    y: ((e.clientY - rect.top) / rect.height) * SVG_HEIGHT
+  }};
+}}
+
+function updateCursorGuideline(e) {{
+  if (e && e.clientX !== undefined) {{
+    lastMousePos = {{ clientX: e.clientX, clientY: e.clientY }};
+  }}
+  if (!lastMousePos || isDragging) {{
+    hideCursorGuideline();
+    return;
+  }}
+
+  const cursorGroup = document.getElementById("cursor-group");
+  const cursorHLine = document.getElementById("cursorHLine");
+  const cursorBadge = document.getElementById("cursorBadge");
+  const cursorBadgeRect = document.getElementById("cursorBadgeRect");
+  const cursorBadgeText = document.getElementById("cursorBadgeText");
+  if (!cursorGroup || !cursorHLine) return;
+
+  const p = getSvgCoords(lastMousePos);
+  if (!p) return;
+
+  // Check if cursor is within vertical plot range and near chart horizontally
+  const inPlotY = p.y >= MARGIN.top && p.y <= MARGIN.top + PLOT_HEIGHT;
+  const inPlotX = p.x >= MARGIN.left - 45 && p.x <= MARGIN.left + PLOT_WIDTH + 30;
+
+  if (inPlotY && inPlotX) {{
+    cursorGroup.style.display = "block";
+
+    // Horizontal dashed line across the plot width
+    cursorHLine.setAttribute("x1", MARGIN.left - 4);
+    cursorHLine.setAttribute("y1", p.y);
+    cursorHLine.setAttribute("x2", MARGIN.left + PLOT_WIDTH);
+    cursorHLine.setAttribute("y2", p.y);
+
+    // Compute metric value corresponding to mouse Y position
+    const ratio = 1.0 - (p.y - MARGIN.top) / PLOT_HEIGHT;
+    const curVal = currentYMin + ratio * (currentYMax - currentYMin);
+    const valStr = formatMetricVal(curVal, currentMetric);
+
+    if (cursorBadge && cursorBadgeText && cursorBadgeRect) {{
+      cursorBadge.style.display = "block";
+      cursorBadgeText.textContent = valStr;
+
+      const badgeW = Math.max(54, valStr.length * 7.5 + 14);
+      const badgeH = 19;
+      const badgeX = Math.max(2, MARGIN.left - badgeW - 5);
+
+      cursorBadgeRect.setAttribute("width", badgeW);
+      cursorBadgeRect.setAttribute("height", badgeH);
+      cursorBadgeRect.setAttribute("x", badgeX);
+      cursorBadgeRect.setAttribute("y", p.y - badgeH / 2);
+
+      cursorBadgeText.setAttribute("x", badgeX + badgeW / 2);
+      cursorBadgeText.setAttribute("y", p.y + 0.5);
+    }}
+  }} else {{
+    cursorGroup.style.display = "none";
+  }}
+}}
+
+function hideCursorGuideline() {{
+  const cursorGroup = document.getElementById("cursor-group");
+  if (cursorGroup) {{
+    cursorGroup.style.display = "none";
+  }}
+}}
+
 function showDetailCard(p) {{
   const activeCfg = METRIC_CONFIG[currentMetric];
   const panel = document.getElementById("detailPanel");
@@ -1947,10 +2919,23 @@ function setupEventListeners() {{
     currentYMin = dragStartYMin + yShift;
     currentYMax = dragStartYMax + yShift;
     render();
+    hideCursorGuideline();
   }});
 
   window.addEventListener("mouseup", () => {{
-    isDragging = false;
+    if (isDragging) {{
+      isDragging = false;
+      updateCursorGuideline();
+    }}
+  }});
+
+  chartBody.addEventListener("mousemove", (e) => {{
+    updateCursorGuideline(e);
+  }});
+
+  chartBody.addEventListener("mouseleave", () => {{
+    hideCursorGuideline();
+    hideTooltip();
   }});
 
   chartBody.addEventListener("wheel", (e) => {{
@@ -2074,7 +3059,10 @@ function resetView() {{
 }}
 
 function exportSVG() {{
-  const svgEl = document.getElementById("main-chart");
+  hideCursorGuideline();
+  hideDsCursorGuideline();
+  const isDsTab = (currentActiveTab === "dataset");
+  const svgEl = isDsTab ? document.getElementById("dataset-chart") : document.getElementById("main-chart");
   const serializer = new XMLSerializer();
   let source = serializer.serializeToString(svgEl);
 
@@ -2086,7 +3074,7 @@ function exportSVG() {{
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `${{currentMetric}}_vs_${{currentXDim}}_${{DATASET_NAME}}.svg`;
+  link.download = isDsTab ? `dataset_split_distribution_${{DATASET_NAME}}.svg` : `${{currentMetric}}_vs_${{currentXDim}}_${{DATASET_NAME}}.svg`;
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
@@ -2098,6 +3086,43 @@ function exportSVG() {{
 </html>
 """
     return html_template
+
+
+def get_all_dataset_split_stats(outs_dir: Path) -> Dict[str, Any]:
+    """Extracts train sample sizes and test normal/defect counts for all datasets in base dir."""
+    base_dir = outs_dir.parent
+    stats = {}
+    if not base_dir.is_dir():
+        return stats
+    for d in sorted(base_dir.iterdir()):
+        sum_f = d / "final_multisize_summary.json"
+        if d.is_dir() and sum_f.is_file():
+            try:
+                data = json.loads(sum_f.read_text(encoding="utf-8"))
+                if not data:
+                    continue
+                item0 = data[0]
+                ns = sorted(list(set(int(x.get("n", 0)) for x in data if "n" in x)))
+                tp = int(item0.get("tp") or item0.get("din_tp", 0))
+                fn = int(item0.get("fn") or item0.get("din_fn", 0))
+                fp = int(item0.get("fp") or item0.get("din_fp", 0))
+                tn = int(item0.get("tn") or item0.get("din_tn", 0))
+                defect_cnt = tp + fn
+                normal_cnt = fp + tn
+                total_test = defect_cnt + normal_cnt
+
+                stats[d.name] = {
+                    "name": d.name,
+                    "train_ns": ns,
+                    "train_counts": {n: n for n in ns},
+                    "test_defect": defect_cnt,
+                    "test_normal": normal_cnt,
+                    "test_total": total_test,
+                    "is_current": (d.resolve() == outs_dir.resolve())
+                }
+            except Exception as e:
+                print(f"[warn] Failed to parse stats for {d.name}: {e}")
+    return stats
 
 
 def generate_dataset_html(outs_dir: Path, output_html: Optional[Path] = None) -> Path:
@@ -2114,7 +3139,8 @@ def generate_dataset_html(outs_dir: Path, output_html: Optional[Path] = None) ->
     charts_dir.mkdir(parents=True, exist_ok=True)
 
     has_bank = any(outs_dir.glob("**/feature_bank.npz")) and any("e2e_auc" in d and d["e2e_auc"] is not None for d in dataset_data)
-    html_content = build_interactive_html(dataset_name, dataset_data, has_bank=has_bank)
+    all_datasets_stats = get_all_dataset_split_stats(outs_dir)
+    html_content = build_interactive_html(dataset_name, dataset_data, has_bank=has_bank, all_datasets_stats=all_datasets_stats)
 
     target_html = Path(output_html) if output_html else (charts_dir / "benchmark_dashboard.html")
     target_html.write_text(html_content, encoding="utf-8")
