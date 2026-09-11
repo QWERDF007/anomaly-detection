@@ -146,6 +146,30 @@ def auto_detect_max_iters(outs_dir: Path) -> list[int]:
     return sorted(list(iters)) if iters else [2000]
 
 
+def get_process_gpu_vram_gb(device=None) -> float:
+    """Returns true physical resident VRAM in GB for current process across GPU (including FAISS & PyTorch)."""
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        pid = os.getpid()
+        total_mem = 0
+        for idx in range(pynvml.nvmlDeviceGetCount()):
+            h = pynvml.nvmlDeviceGetHandleByIndex(idx)
+            for proc in pynvml.nvmlDeviceGetComputeRunningProcesses(h):
+                if proc.pid == pid:
+                    total_mem += proc.usedGpuMemory
+        if total_mem > 0:
+            return round(float(total_mem / (1024 ** 3)), 2)
+    except Exception:
+        pass
+    if torch.cuda.is_available():
+        try:
+            return round(float(torch.cuda.max_memory_allocated(device) / (1024 ** 3)), 2)
+        except Exception:
+            pass
+    return 0.0
+
+
 def evaluate_single_task(
     task_info: tuple,
     device: torch.device,
@@ -271,7 +295,7 @@ def evaluate_single_task(
                 torch.cuda.synchronize(device)
     din_lat_ms = (time.perf_counter() - t0) * 1000.0 / 20.0
     din_fps = 1000.0 / max(1e-4, din_lat_ms)
-    din_vram_gb = (torch.cuda.max_memory_allocated(device) / (1024**3)) if torch.cuda.is_available() else 0.0
+    din_vram_gb = get_process_gpu_vram_gb(device)
 
     # E2E pure GPU benchmark (ONLY when genuine two-stage bank data exists)
     e2e_lat_ms = None
@@ -295,7 +319,7 @@ def evaluate_single_task(
                     torch.cuda.synchronize(device)
         e2e_lat_ms = (time.perf_counter() - t0) * 1000.0 / 20.0
         e2e_fps = 1000.0 / max(1e-4, e2e_lat_ms)
-        e2e_vram_gb = (torch.cuda.max_memory_allocated(device) / (1024**3)) if torch.cuda.is_available() else 0.0
+        e2e_vram_gb = get_process_gpu_vram_gb(device)
 
     # Inference on Full Test Set
     batch_sz = 8
@@ -376,6 +400,20 @@ def evaluate_single_task(
                         final_amap = cv2.resize(amap_r, (s, s), interpolation=cv2.INTER_LINEAR)
                         e2e_clean_scores.append(float(np.sort(final_amap.flatten())[-k_top:].mean()))
 
+    # Free Dinomaly2 memory so PatchCore is evaluated in pure isolation
+    try:
+        del din_model, encoder, bottleneck, decoder, t_d, gaussian_kernel
+        if ab_t is not None:
+            del ab_t
+        if nor_t is not None:
+            del nor_t
+    except Exception:
+        pass
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    import gc
+    gc.collect()
+
     # 2. Evaluate PatchCore
     pat_scores = None
     pat_clean_scores = []
@@ -420,7 +458,7 @@ def evaluate_single_task(
                         torch.cuda.synchronize(device)
             pat_lat_ms = (time.perf_counter() - t0) * 1000.0 / 20.0
             pat_fps = 1000.0 / max(1e-4, pat_lat_ms)
-            pat_vram_gb = (torch.cuda.max_memory_allocated(device) / (1024**3)) if torch.cuda.is_available() else 0.0
+            pat_vram_gb = get_process_gpu_vram_gb(device)
 
             pat_scores_all = []
             with torch.no_grad():
@@ -438,6 +476,14 @@ def evaluate_single_task(
                         t = pat_transform(img).unsqueeze(0).to(device)
                         sc, _ = pat_model.predict(t)
                         pat_clean_scores.append(float(sc[0]))
+
+            try:
+                del pat_model, t_p
+            except Exception:
+                pass
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
         except Exception as e:
             print(f"[warn] PatchCore eval failed for N={n} Size={s}: {e}")
 
